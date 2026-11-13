@@ -136,6 +136,11 @@ bottom rail, and the menu's Close is unavailable for such a tile. Super+Shift+Q
 has no such restriction, which is how a pane's last tile, and finally the
 session, is closed.
 
+Super+Shift+Q never closes the console's tile, where the login prompt is
+shown, in any profile, whether or not a session is running. Nothing changes on
+the screen, and `tapestryd` reports `chord close refused` on the serial
+console. The login prompt stays, and the next login starts a session as usual.
+
 ### Use workspaces
 
 A workspace is a separate arrangement of tiles, of which the display shows one
@@ -373,7 +378,9 @@ that file, so they change with the bindings. The theme picker, the key
 reference, Super+K and Super+Shift+Q are carried out by the session
 compositor: `tapestryd` delivers those chords to it through the top rail. The
 legacy profile has no rails, so there the first three chords have no effect,
-and `tapestryd` closes a tile on Super+Shift+Q itself, without asking.
+and `tapestryd` closes a tile on Super+Shift+Q itself, without asking. In every
+profile, `tapestryd` refuses Super+Shift+Q for a pane that holds a surface of
+the system's rather than of a user's session, such as the console renderer's.
 
 Keys reach a tile's program in the order they were typed, Ctrl-C included. When
 a program that reads its terminal raw stops reading, and its terminal holds as

@@ -786,7 +786,8 @@ fixed the index shift the rule exposed: removing a child BEFORE the open
 one left `active` naming the next tile over
 (`closing_a_stacked_tile_keeps_or_hands_on_the_open_one_by_the_successor_rule`).
 Super+Q (the compositor's `Close` chord) stays the structural act: it
-closes the focused leaf without the final-tile protection — the only
+closes the focused leaf (never one that hosts a system surface, 9.5's
+amendment of 2026-11-13) without the final-tile protection — the only
 reading under which a pane holding a retained tile can be removed at all
 (a §9.3 delta for the operator: its "with the §6.5 protections" is read as
 §9.5's dirty-document / foreground-job ask, I-7's dialog).
@@ -1521,7 +1522,9 @@ environment, so with no rail there is nothing to do but say it, while a
 close with no rail (or onto a rail whose queue is too full, which retires
 it) is performed by the compositor itself, exactly as before I-7b. So
 `deliver_chord` returns whether the owner actually has the chord, and
-only the close arm reads that answer.
+only the close arm reads that answer. Since 2026-11-13 neither happens for a
+pane that hosts a system surface: the compositor refuses the chord (9.5's
+amendment).
 
 **Widened at TC-1b (2026-09-25).** `code` 4 is the HISTORY chord
 (`Super+K`, the `history` action; HALCYON §14.13), the user's deletion of
@@ -1727,6 +1730,23 @@ a retained tile can be removed at all. With NO rail — the legacy profile,
 or a seat whose rail is not up — there is nobody to ask, so the compositor
 closes the pane itself exactly as before; the same fallback catches a rail
 whose event queue was too full to take the chord (which retires it).
+
+**Amended 2026-11-13 (operator vote on round R3's F9): the close chord never
+closes a pane that hosts a system surface.** A system surface is one whose
+owner is not a session principal (`Comp::system_surface`): the console
+renderer's, which shows the login prompt, or any other system client's. When
+the focused pane hosts one, the compositor refuses `ChordAction::Close`, with
+or without a session and in every profile, and says `tapestryd: chord close
+refused: pane <id> hosts a system surface`. It neither delivers the chord to a
+rail nor closes the pane itself. Before the amendment, with no rail (the
+session image at its login prompt, the legacy profile, a gate image) the
+compositor closed the console's pane itself: the renderer was sent a close
+and exited, and the boot had no login prompt for the rest of its life
+(confirmed in a guest on 2026-11-13). A pane that hosts only session surfaces,
+or none, closes as before. The environment's own close verb is unchanged: a
+session's `close` of such a pane was already refused (`E_PERM`,
+`actor_owns_subtree_all`). Turned down: refusing only with no session;
+respawning the console when its pane closes; leaving it as it was.
 
 ## 10. Effects (the last slice)
 

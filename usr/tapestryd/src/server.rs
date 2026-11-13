@@ -11229,9 +11229,15 @@ impl Comp {
                 // With no rail -- the legacy profile, or a seat whose rail is
                 // not up -- there is nobody to ask, so the compositor closes
                 // it here exactly as it always did.
+                // 9.5 as amended 2026-11-13: never a pane that hosts a system
+                // surface (the console renderer's, where the login prompt is),
+                // with or without a session: closed with no rail, the renderer
+                // exits and the boot has no login prompt again.
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
-                    if !self.deliver_chord(3, id) {
+                    if self.layout.subtree_surfaces(f).into_iter().any(|n| self.system_surface(n)) {
+                        say!("tapestryd: chord close refused: pane {} hosts a system surface", id);
+                    } else if !self.deliver_chord(3, id) {
                         let _ = self.pane_cmd(Actor::Renderer, (0, 0), id, "close");
                     }
                 }

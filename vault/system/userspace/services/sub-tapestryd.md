@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/epoch.rs, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs]
+code: [usr/tapestryd/src/epoch.rs, tools/interactive/ls-halcyon-login-close.exp, tools/interactive/ls-gfx-console-close.exp, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -2597,6 +2597,27 @@ comment in `usr/lib/libtapestry/src/lib.rs`. Witnessed in-guest by
 `ls-halcyon-session-instrument`'s I-7b legs -- `tapestryd: chord close -> rail
 owner`, then the confirmation dialog, then a Cancel that keeps both the tile
 and its job.
+
+**Never a system surface's pane (2026-11-13, operator vote on round R3's F9;
+HALCYON-INSTRUMENT 9.5 as amended).** Before either the delivery or the
+fallback, the `Close` arm asks whether the focused pane's subtree
+(`Layout::subtree_surfaces`) hosts a system surface (`Comp::system_surface`: a
+live surface whose owner is not a session principal, as the console
+renderer's is), and if so refuses: `tapestryd: chord close refused: pane <id>
+hosts a system surface`, with nothing delivered and nothing closed. With no
+rail, the fallback used to close the console's pane at a login prompt: aurora
+was sent a close and exited, and the boot had no login prompt again (guest run
+2's probe, 2026-11-13). A pane of session surfaces, or an empty one, closes
+as before. During a session the console's leaf is backgrounded (no rect, not
+visible), so neither a Super+arrow nor a click focuses it; the refusal is
+asked first there too, and that case is not driven. The environment's own
+`close` verb is unchanged: a session closing such a pane was already refused
+(`actor_owns_subtree_all`). Witnesses: `ls-halcyon-login-close` (session
+image: the boot's prompt and the one a logout returns to, each followed by a
+login) and `ls-gfx-console-close` (gate image, after a login on the serial
+line); and before any guest, a scripted guest of nine cases, each fault red at
+its own text.
+NOT YET RUN IN A GUEST.
 
 
 ## The delivered history chord -- Super+K forgets a tile's history (2026-09-25, TC-1b)

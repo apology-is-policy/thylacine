@@ -43,6 +43,8 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-pointer.exp (EXTINCTION: only)"
   - "tools/interactive/ls-halcyon-scale-session.exp (EXTINCTION: only)"
   - "tools/interactive/ls-halcyon-scale-fitted.exp (EXTINCTION: only)"
+  - "tools/interactive/ls-halcyon-login-close.exp (EXTINCTION: only)"
+  - "tools/interactive/ls-gfx-console-close.exp (EXTINCTION: only)"
   - "tools/interactive/ls-gpu-dead.exp (EXTINCTION: only -- the dead-engine witness)"
   - "tools/interactive/ls-graphical-sak-dead.exp (EXTINCTION: only -- the dead-engine seat witness)"
   - "tools/interactive/ls-graphical-sak-chained.exp (EXTINCTION: only -- two takeover waits in series, ended by the bound from the chord)"
@@ -133,7 +135,7 @@ literal-mentions:
   - "tools/interactive/go8d.exp (a prose note)"
   - "tools/check-console-lines.py (exempts the base line by its text; a reword only drops the exemption, and the check then fails)"
 created: 2026-08-01
-updated: 2026-11-09
+updated: 2026-11-13
 ---
 ## The surface
 

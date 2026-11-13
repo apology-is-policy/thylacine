@@ -1,0 +1,58 @@
+#!/usr/bin/expect -f
+# ls-gfx-console-close -- the close chord never closes the console, in the
+# gate image as in the session image (HALCYON-INSTRUMENT 9.5, as amended
+# 2026-11-13; ls-halcyon-login-close is the session image's).
+#
+# The gate image has no session compositor and so no rail: before the
+# amendment, Super+Shift+Q on the console's pane was closed by the compositor
+# itself, aurora was sent a close and exited, and the display had no console
+# for the rest of the boot. After a login on the serial line, the press must be
+# refused: the compositor's first line about the chord is its refusal, and
+# aurora says nothing of a close in the 5 s after it.
+#
+# Requires the gate image: tools/build.sh kernel --config ci
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+after 2000
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+shift+q} e]} {
+    lc_fail $e
+}
+set line ""
+lc_within 10 {
+    -re {(tapestryd: chord close[^\r\n]*|aurora: CLOSE received; exiting)[\r\n]} {
+        set line $expect_out(1,string)
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "the close chord on the console"
+    }
+    timeout {
+        lc_fail "no line about the close chord within 10 s of it"
+    }
+    eof {
+        lc_fail "EOF after the close chord"
+    }
+}
+if {![regexp {^tapestryd: chord close refused: pane \d+ hosts a system surface$} $line]} {
+    lc_fail "read '$line' where the refusal of the close chord on the console was due"
+}
+lc_pass "the close chord on the console was refused: $line"
+lc_within 5 {
+    -re {aurora: CLOSE received; exiting} {
+        lc_fail "aurora exited after the close chord was refused"
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "after the refused close chord"
+    }
+    timeout {
+    }
+    eof {
+        lc_fail "EOF after the refused close chord"
+    }
+}
+lc_pass "ls-gfx-console-close: the console's pane refused the close chord and aurora stayed"
+lc_quit

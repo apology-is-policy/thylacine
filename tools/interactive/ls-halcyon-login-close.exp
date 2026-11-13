@@ -1,0 +1,209 @@
+#!/usr/bin/expect -f
+# ls-halcyon-login-close -- the close chord never closes the console.
+#
+# HALCYON-INSTRUMENT 9.5, as amended 2026-11-13: Super+Shift+Q refuses a pane
+# that hosts a system surface, and the console renderer's (aurora's, where the
+# login prompt is) is one. Before the amendment, with no session there was no
+# rail to deliver the chord to, the compositor closed the focused pane itself,
+# aurora was sent a close and exited, and the boot had no login prompt again.
+#
+# One boot of the session image, two login prompts:
+#
+#   first:   the boot's prompt. Super+Shift+Q, and the compositor's next line
+#            about the chord is its refusal; then a login starts a session,
+#            which a console that exited could not take.
+#   second:  the prompt a logout returns to (every tile closed by the same
+#            chord). The same press and the same refusal; a second login
+#            starts a session.
+#
+# Each prompt's first line about the chord is read whichever it is (the
+# refusal, `no rail`, a delivery, aurora's exit), with one pattern, and only
+# the refusal passes. A console that exits at any point before its session is
+# up fails where it is said.
+#
+# Not driven here: the chord during a session. The console's place is then
+# backgrounded (no rect, not visible), so no Super+arrow or click focuses it,
+# and the refusal holds there because it is asked before any delivery.
+#
+# Requires the session image:
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 1280x800
+set ::env(THYLACINE_SCALE) 100
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} {
+        lc_fail $e
+    }
+    after 1500
+}
+# Super+Shift+Q at a login prompt: the compositor's first line about it must
+# be its refusal.
+proc close_at_prompt {which} {
+    after 3000
+    key "meta_l+shift+q"
+    set line ""
+    lc_within 10 {
+        -re {(tapestryd: chord close[^\r\n]*|aurora: CLOSE received; exiting)[\r\n]} {
+            set line $expect_out(1,string)
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "the close chord at the $which login prompt"
+        }
+        timeout {
+            lc_fail "the $which login prompt: no line about the close chord within 10 s of it"
+        }
+        eof {
+            lc_fail "EOF after the close chord at the $which login prompt"
+        }
+    }
+    if {![regexp {^tapestryd: chord close refused: pane \d+ hosts a system surface$} $line]} {
+        lc_fail "the $which login prompt: read '$line' where the refusal of the close chord was due"
+    }
+    lc_pass "the close chord at the $which login prompt was refused: $line"
+}
+proc login {which} {
+    lc_raw_send "michael\r" "login user ($which session)"
+    set got ""
+    lc_within 20 {
+        -re {(password: |aurora: CLOSE received; exiting)} {
+            set got $expect_out(1,string)
+        }
+        timeout {
+            lc_fail "no password prompt for the $which login: the console did not take the user name"
+        }
+        eof {
+            lc_fail "EOF before the $which login's password prompt"
+        }
+    }
+    if {$got ne "password: "} {
+        lc_fail "the console exited before the $which login's password prompt"
+    }
+    lc_raw_send "correct-horse-battery-staple-v1\r" "login password ($which session)"
+    set got ""
+    lc_within 60 {
+        -re {(login: session compositor \(halcyond\) spawned|Thylacine textual shell|aurora: CLOSE received; exiting)} {
+            set got $expect_out(1,string)
+        }
+        timeout {
+            lc_fail "no graphical session from the $which login"
+        }
+        eof {
+            lc_fail "EOF at the $which session's start"
+        }
+    }
+    if {$got eq "Thylacine textual shell"} {
+        # A lever the image lacks is a SKIP, never a FAIL.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    } elseif {$got ne "login: session compositor (halcyond) spawned"} {
+        lc_fail "the console exited during the $which login"
+    }
+    lc_within 60 {
+        -re {halcyond: status bar [^\r\n]*running false panes 2} {
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "the $which session"
+        }
+        timeout {
+            lc_fail "the $which session's welcome and shell did not become ready"
+        }
+        eof {
+            lc_fail "EOF before the $which session was ready"
+        }
+    }
+    lc_pass "the $which login started a session"
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -re {aurora: console up [^\r\n]*[\r\n]} {
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "boot"
+    }
+    timeout {
+        lc_fail "no aurora at boot"
+    }
+    eof {
+        lc_fail "EOF before aurora"
+    }
+}
+expect {
+    -ex "Thylacine login: " {
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "boot"
+    }
+    timeout {
+        lc_fail "no login prompt"
+    }
+    eof {
+        lc_fail "EOF before the login prompt"
+    }
+}
+set timeout 60
+
+close_at_prompt first
+login first
+
+# Every tile closed is the logout. A press that finds the session gone lands
+# on the login prompt, which refuses it.
+set out ""
+for {set press 1} {$press <= 4 && $out eq ""} {incr press} {
+    after 1000
+    key meta_l+shift+q
+    lc_within 8 {
+        -re {(halcyond: session logout \(code (\d+)\)|aurora: CLOSE received; exiting)[^\r\n]*[\r\n]} {
+            if {[string match "aurora:*" $expect_out(1,string)]} {
+                lc_fail "the console exited while the first session was closed"
+            }
+            set out $expect_out(2,string)
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "the first session's logout"
+        }
+        timeout {
+        }
+        eof {
+            lc_fail "EOF at the first session's logout"
+        }
+    }
+}
+if {$out eq ""} {
+    lc_fail "four Super+Shift+Q and the first session did not log out"
+} elseif {$out ne "0"} {
+    lc_fail "the first session logged out with code $out"
+}
+set got ""
+lc_within 90 {
+    -re {(Thylacine login: |aurora: CLOSE received; exiting)} {
+        set got $expect_out(1,string)
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "after the first session's logout"
+    }
+    timeout {
+        lc_fail "the login prompt did not return after the first session's logout"
+    }
+    eof {
+        lc_fail "EOF after the first session's logout"
+    }
+}
+if {$got ne "Thylacine login: "} {
+    lc_fail "the console exited after the first session's logout"
+}
+lc_pass "the first session logged out and the login prompt returned"
+
+close_at_prompt second
+login second
+lc_pass "ls-halcyon-login-close: the console refused the close chord at both login prompts and served both logins"
+lc_quit
