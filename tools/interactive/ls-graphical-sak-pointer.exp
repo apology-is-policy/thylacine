@@ -187,7 +187,7 @@ while {!($ended && $back)} {
     if {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
         lc_fail "a motion of $gx $gy reached the fixture while the trusted screen was up"
     } elseif {[string match "rel-watch: mark *" $line]} {
-        lc_fail "the trusted screen's Enter reached the fixture: it said a mark before the seat was said to be back"
+        lc_fail "the trusted screen's Enter reached the fixture: it said a mark before the episode's end and the seat's return had both been read"
     } elseif {[string match "corvus: *" $line]} {
         set ended 1
     } elseif {[string match "tapestryd: seat back *" $line]} {
