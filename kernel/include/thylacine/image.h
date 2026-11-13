@@ -29,11 +29,14 @@
 // contributes TWO entries: its text segment + its R-only rodata segment. The
 // key includes `exec` (#45 audit F1): two segments with an IDENTICAL file
 // window but different X-ness (a crafted ELF's aliased R+X + R-only PT_LOADs)
-// resolve to DISTINCT Burrows, so no single FILE Burrow is ever mapped at both
-// an executable and a non-executable prot -- the property that keeps the
-// fault arm's freq->exec-gated I-cache sync sound (a non-exec fill never
-// leaves an executable resident-hit unsynced). A legit binary is unaffected:
-// the same file's same segment always carries the same X bit -> the same key.
+// resolve to DISTINCT Burrows, each created with that `exec` as its exec class
+// (file_exec). The fault arm syncs the I-cache for every page filled into an
+// exec-class Burrow, from whichever mapping's fault filled it, and vma_args_ok
+// refuses an executable mapping of any other FILE Burrow. A Burrow CAN be
+// mapped R and RX at once (a protect cuts an RX mapping down to R), so the
+// sync follows the Burrow, never the faulting mapping's prot. A legit binary
+// is unaffected: the same file's same segment always carries the same X bit
+// -> the same key.
 //
 // LIFECYCLE: the cache holds ONE handle_count ref per cached Burrow (a STRONG
 // ref), so text persists after the last Proc unmaps (the Plan 9 temporal cache —
@@ -55,9 +58,9 @@
 // like ANON's attach-time charge — shared text is charged once via the I-7 dual
 // refcount. The cache itself charges nothing.
 //
-// At R-3 there is NO production caller: exec still slurps (R-4 wires
-// image_lookup_or_create in place of the eager whole-ELF read). The cache is
-// exercised in isolation by the kernel test suite (KERNEL_TESTS hooks below).
+// Callers: exec's file-backed segments (exec.c map_file_backed) and the two
+// file-mapping cores (syscall.c sys_mmap_file_for_proc and
+// sys_mmap_fixed_file_for_proc).
 
 #ifndef THYLACINE_IMAGE_H
 #define THYLACINE_IMAGE_H

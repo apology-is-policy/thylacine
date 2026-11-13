@@ -438,7 +438,9 @@ literal now.
 On any change: that the Spoor ref ledger balances on every path — the Image
 lookup consumes a ref, the thunk keeps the borrow, and a NULL return consumed
 nothing; that the dispatch gate keeps all three conjuncts, and in particular
-that `PF_W` never becomes shareable; that the I-cache sync stays over the
+that `PF_W` never becomes shareable; that a file-backed segment's Image
+lookup passes `PF_X` as the exec class its mapping prot implies (`vma_args_ok`
+refuses an executable map of any other FILE Burrow); that the I-cache sync stays over the
 **page-rounded** span and stays ungated on `filesz > 0`, because a pure-bss
 executable segment is exactly the case that has no copied bytes; that
 `exec_read_header`'s phdr bound stays ahead of `elf_load`'s deref; that the

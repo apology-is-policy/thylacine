@@ -88,12 +88,13 @@ chain in one call (the function walks `deferred_free_next` itself since B-1a').
 tell a refused shape from a slab shortfall, `vma_alloc`'s other NULL. `burrow_map_in`
 does.
 
-**Five rejections at `vma_alloc`**, and the order they are written in is not
+**Six rejections at `vma_alloc`**, and the order they are written in is not
 the order they matter in:
 
 | rejected | why |
 |---|---|
 | `WRITE \| EXEC` | [[inv-i12]] — **the single user-side W^X gate** |
+| `EXEC` over a FILE Burrow outside the exec class (`!file_exec`) | [[inv-i36]] -- the fault arm syncs a FILE page by its Burrow's class, so an executable mapping of any other Burrow would fetch pages no fill synced; a protect never adds X, so this constructor is the one gate (audit round 32 F2) |
 | `WRITE` without `READ` | AArch64 has no write-only AP encoding, so a W-only request would silently map *readable*. Rejecting keeps the VMA's prot and the PTE's meaning identical |
 | `start >= end`, misalignment | a range that is not a range |
 | null Burrow | a mapping with nothing behind it (except a guard — below) |

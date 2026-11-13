@@ -50,8 +50,9 @@ among them -- is created un-registered, as a bypass is: its Burrow holds the
 Spoor exactly as long as a mapping does and never answers a hit, so whatever
 the server keeps for that open (a connection slot) goes with the last
 mapping, no later mapper is served its bytes, and none inherits its size.
-The question comes before the search because a private image must never be
-found.
+A private image is never registered, so it never answers a hit whatever the
+order; asking before the search also keeps an unversioned open from taking a
+versioned entry's Burrow (round 32 F4 corrected the reason given here).
 
 The key is seven fields: device class, device number, qid path, **qid version**,
 file offset, page-rounded size, and executability. Three of those carry
@@ -75,7 +76,13 @@ can declare two `PT_LOAD`s over an identical file window with different X bits.
 Without that field they would share one Burrow mapped at two protections, and
 the fault handler's I-cache sync is gated on whether the fill is executable — so
 a non-executable fill could leave an executable mapping of the same pages
-unsynced. Splitting the key makes a dual-protection Burrow unconstructible. A
+unsynced. Each Burrow takes the key's executability as its **exec class**
+(`file_exec`): the fault handler syncs every fill of an exec-class Burrow,
+whichever mapping faulted, and `vma_args_ok` refuses an executable mapping of
+any other. The class, not the key alone, is what holds: a protect can cut an
+RX mapping of one Burrow down to R, so a dual-protection Burrow IS
+constructible, and a fill through the R piece is executed by the RX piece
+(audit round 32 F2; the key once claimed to make it unconstructible). A
 legitimate binary never notices: the same segment always carries the same bit.
 
 ## Mechanism

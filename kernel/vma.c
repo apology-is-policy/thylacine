@@ -69,6 +69,13 @@ bool vma_args_ok(u64 vaddr_start, u64 vaddr_end, u32 prot,
     // syscalls already guard. Reject it here so the VMA prot matches the PTE.
     if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return false;
 
+    // I-36: a FILE page is I-cache synced by its Burrow's exec class, so an
+    // executable mapping of a Burrow outside that class would fetch pages no
+    // fill synced. A protect never adds X, so the constructor is the one gate.
+    if (burrow->type == BURROW_TYPE_FILE && (prot & VMA_PROT_EXEC) &&
+        !burrow->file_exec)
+        return false;
+
     // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
     // Burrow's end would name slots its pagemap does not have, and the range
     // release walks the mapping's own slot bound -- refused here, at the one

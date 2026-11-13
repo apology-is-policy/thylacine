@@ -176,11 +176,19 @@ static s64 viv_mmap_call(struct Proc *p, u64 prot, u64 fd) {
     return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
 }
 
-static bool viv_anon_at(struct Proc *p, s64 va) {
+// The anonymous reserve mints a lazy Burrow, at the prot the call asked for.
+static bool viv_anon_at(struct Proc *p, s64 va, u32 prot) {
     if (va <= 0 || ((u64)va & (PAGE_SIZE - 1))) return false;
     if ((u64)va < EXEC_USER_BURROW_BASE || (u64)va >= EXEC_USER_BURROW_TOP) return false;
     struct Vma *v = vma_lookup(p, (u64)va);
-    return v && v->burrow && v->burrow->type == BURROW_TYPE_ANON;
+    return v && v->burrow && v->burrow->type == BURROW_TYPE_ANON_LAZY && v->prot == prot;
+}
+
+static hidx_t viv_opath_handle(struct Proc *p, struct Dev *d) {
+    struct Spoor *sp = d->attach("");
+    if (!sp) return -1;
+    sp->flag |= CWALKONLY;
+    return handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, sp);
 }
 
 void test_vivarium_mmap_dev_zero_is_anonymous(void) {
@@ -188,25 +196,72 @@ void test_vivarium_mmap_dev_zero_is_anonymous(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
     hidx_t zfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devzero.attach(""));
     hidx_t nfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devnull.attach(""));
-    s64 zrw = -1, zro = -1, nrw = 0, nro = 0;
+    hidx_t wfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, devzero.attach(""));
+    hidx_t ofd = viv_opath_handle(p, &devzero);
+    s64 zrw = -1, zro = -1, nrw = 0, nro = 0, wro = 0, oro = 0;
     bool zrw_anon = false, zro_anon = false;
-    if (zfd >= 0 && nfd >= 0) {
+    if (zfd >= 0 && nfd >= 0 && wfd >= 0 && ofd >= 0) {
         zrw = viv_mmap_call(p, VIV_PROT_READ | VIV_PROT_WRITE, (u64)zfd);
         zro = viv_mmap_call(p, VIV_PROT_READ, (u64)zfd);
         nrw = viv_mmap_call(p, VIV_PROT_READ | VIV_PROT_WRITE, (u64)nfd);
         nro = viv_mmap_call(p, VIV_PROT_READ, (u64)nfd);
-        zrw_anon = viv_anon_at(p, zrw);
-        zro_anon = viv_anon_at(p, zro);
+        wro = viv_mmap_call(p, VIV_PROT_READ, (u64)wfd);
+        oro = viv_mmap_call(p, VIV_PROT_READ, (u64)ofd);
+        zrw_anon = viv_anon_at(p, zrw, (u32)(VMA_PROT_READ | VMA_PROT_WRITE));
+        zro_anon = viv_anon_at(p, zro, (u32)VMA_PROT_READ);
     }
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 
-    TEST_ASSERT(zfd >= 0 && nfd >= 0, "handle_alloc");
-    TEST_ASSERT(zrw_anon, "a read-write private map of /dev/zero is anonymous memory");
-    TEST_ASSERT(zro_anon, "a read-only one is too");
+    TEST_ASSERT(zfd >= 0 && nfd >= 0 && wfd >= 0 && ofd >= 0, "handle_alloc");
+    TEST_ASSERT(zrw_anon, "a read-write private map of /dev/zero is anonymous memory, RW");
+    TEST_ASSERT(zro_anon, "a read-only one is too, R");
     TEST_EXPECT_EQ(nrw, -(s64)T_E_NOSYS, "control: /dev/null read-write is in no arm's domain");
     TEST_EXPECT_EQ(nro, -(s64)T_E_NODEV, "control: /dev/null read-only is refused by the file arm");
+    // Only a descriptor a file mapping would accept is rewritten (round 32 F3).
+    TEST_EXPECT_EQ(wro, -(s64)T_E_ACCES, "a write-only /dev/zero: EACCES, as Linux");
+    TEST_EXPECT_EQ(oro, -(s64)T_E_BADF, "an O_PATH /dev/zero: EBADF, as Linux");
+}
+
+// Both mapping cores judge the descriptor as Linux's mmap does: one naming
+// nothing or opened O_PATH is EBADF, one not open for reading EACCES. The
+// readable control reaches the next gate (devzero backs no mapping: ENODEV),
+// so each refusal above is the descriptor check's own.
+void test_vivarium_mmap_descriptor_errnos(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t rfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devzero.attach(""));
+    hidx_t wfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, devzero.attach(""));
+    hidx_t ofd = viv_opath_handle(p, &devzero);
+    const u64 fixed = EXEC_USER_BURROW_BASE + 0x200000ull;
+    const u64 none  = (u64)PROC_HANDLE_MAX - 1u;
+    s64 m[4] = {0, 0, 0, 0}, f[4] = {0, 0, 0, 0};
+    struct Handle probe;
+    bool empty = handle_get(p, (hidx_t)none, &probe) < 0;
+    if (!empty) handle_put(&probe);
+    bool ok = rfd >= 0 && wfd >= 0 && ofd >= 0 && empty;
+    if (ok) {
+        const u64 fds[4] = { none, (u64)wfd, (u64)ofd, (u64)rfd };
+        for (int i = 0; i < 4; i++) {
+            m[i] = sys_mmap_file_for_proc(p, fds[i], PAGE_SIZE, false, 0);
+            f[i] = sys_mmap_fixed_file_for_proc(p, fixed, fds[i], PAGE_SIZE,
+                                                (u32)VIV_PROT_READ, 0);
+        }
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(ok, "handles, and an empty slot");
+    TEST_EXPECT_EQ(m[0], -(s64)T_E_BADF,  "a descriptor naming nothing: EBADF");
+    TEST_EXPECT_EQ(f[0], -(s64)T_E_BADF,  "MAP_FIXED: EBADF");
+    TEST_EXPECT_EQ(m[1], -(s64)T_E_ACCES, "not open for reading: EACCES");
+    TEST_EXPECT_EQ(f[1], -(s64)T_E_ACCES, "MAP_FIXED: EACCES");
+    TEST_EXPECT_EQ(m[2], -(s64)T_E_BADF,  "O_PATH: EBADF");
+    TEST_EXPECT_EQ(f[2], -(s64)T_E_BADF,  "MAP_FIXED: EBADF");
+    TEST_EXPECT_EQ(m[3], -(s64)T_E_NODEV, "control: a readable one passes to the opt-in floor");
+    TEST_EXPECT_EQ(f[3], -(s64)T_E_NODEV, "MAP_FIXED control: the same floor");
 }
 
 // A T2 shell narrows its own words by its own Linux prototype. readlinkat's

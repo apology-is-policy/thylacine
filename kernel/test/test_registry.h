@@ -441,6 +441,7 @@ void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
 void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
+void test_demand_page_file_exec_class_syncs_every_fill(void);
 void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
@@ -1150,6 +1151,7 @@ void test_cons_drain_tap_mirrors_output(void);       // G-4
 void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
 void test_vivarium_mmap_dev_zero_is_anonymous(void);
+void test_vivarium_mmap_descriptor_errnos(void);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_git_chunk_rows(void);

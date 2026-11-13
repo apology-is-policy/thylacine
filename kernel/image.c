@@ -152,11 +152,12 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     // Any other file maps privately: its own Burrow, never registered, so its
     // Spoor -- and whatever state the server keeps for that open, a netd
     // connection slot -- lives exactly as long as a mapping of it, and no
-    // later mapper is served this one's bytes. Asked before the search too:
-    // a private image must never answer a hit.
+    // later mapper is served this one's bytes. A private image is never
+    // registered, so it never answers a hit; asking before the search also
+    // keeps an unversioned open from taking a versioned entry's Burrow.
     if (!spoor->dev || !spoor->dev->content_versioned ||
         !spoor->dev->content_versioned(spoor)) {
-        struct Burrow *own = burrow_create_file(spoor, file_offset, length);
+        struct Burrow *own = burrow_create_file(spoor, file_offset, length, exec);
         if (!own)
             return NULL;                     // no ref taken; caller still owns spoor
         own->file_limit = file_limit;        // private here, as on the miss arm
@@ -184,7 +185,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     spin_unlock(&g_image_lock);
 
     // --- create OUTSIDE the lock (burrow_create_file may sleep; it ADOPTS spoor) ---
-    struct Burrow *fresh = burrow_create_file(spoor, file_offset, length);
+    struct Burrow *fresh = burrow_create_file(spoor, file_offset, length, exec);
     if (!fresh)
         return NULL;                         // no ref taken; caller still owns spoor
     // #194: stamp the caller-sampled backing size BEFORE publication (fresh is

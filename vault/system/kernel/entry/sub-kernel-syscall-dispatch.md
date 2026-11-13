@@ -1919,7 +1919,12 @@ The order is fixed and observable: the prot and flag masks, W|X (`-EACCES`),
 W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`
 without FIXED (`-EINVAL`), fd -1 without FIXED (`-EBADF`), W without FIXED
 (`-EACCES`), X or a nonzero offset on the anonymous window, a file map without
-R -- and only then the cores, which own the lookups, the window check
+R -- and only then the cores, which own the lookups (`sys_lookup_mapping_spoor`,
+Linux's descriptor order: one naming nothing or opened `O_PATH` is `-EBADF`, one
+not open for reading `-EACCES` -- until audit round 32 they answered `-EBADF`
+and `-EINVAL` for the last two; `vivarium.mmap_descriptor_errnos` drives both
+cores, with a readable descriptor reaching the `may_back_mapping` floor as the
+control), the window check
 (`mmap_fixed_window`: `[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP]`), the
 vouching (`exec_map_vouched`: a `may_back_exec` Dev AND a mount not marked
 `MNOEXEC`) and the replace (`burrow_map_fixed` -> `vma_replace_range_in`, the
