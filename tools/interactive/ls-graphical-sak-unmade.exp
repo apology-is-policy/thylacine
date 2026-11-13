@@ -23,8 +23,10 @@
 #                memory" seven times: the first, and six more after waits
 #                that double from 0.3 s, 18.9 s in all. Before each of the
 #                six Lictor lets go of the spare the making before it may
-#                have left with the device, which answers twice that it has
-#                no such resource. Each time Lictor says its screen stays
+#                have left with the device, which answers the detach that
+#                it has no such resource; the free after it is answered the
+#                same, which is a free done and is said nothing of
+#                (`unref_frees`). Each time Lictor says its screen stays
 #                2048x1080 at one, six times "to be tried again" and the
 #                seventh not; and after the seventh, which no making
 #                follows, it lets go of the spare once more. Every line is
@@ -111,9 +113,10 @@ set GROUND {8 11 12}
 # asked, and Lictor of a making that failed. 0x1201 is the device's "out of
 # memory" and 0x1203 its "no such resource"; 0x1100 is its plain yes.
 set REFUSED "tapestryd: gpu RESOURCE_CREATE_2D resp_type=0x1201 (expected 0x1100)"
+# The free of a spare that was never made is answered 0x1203 too, which
+# Lictor takes as a free done and says nothing of (`unref_frees`).
 set NO_SPARE [list \
-    "tapestryd: gpu DETACH_BACKING resp_type=0x1203 (expected 0x1100)" \
-    "tapestryd: gpu RESOURCE_UNREF resp_type=0x1203 (expected 0x1100)"]
+    "tapestryd: gpu DETACH_BACKING resp_type=0x1203 (expected 0x1100)"]
 set STAYS "lictor: trusted screen stays 2048x1080 at 1x: the device did not make its image"
 
 proc key {chord} {
@@ -209,7 +212,7 @@ proc attention {label} {
         -re {(lictor: seat failed[^\r\n]*|lictor: trusted screen[^\r\n]*|tapestryd: gpu [^\r\n]*)[\r\n]} {
             lc_fail "$label: $expect_out(1,string)"
         }
-        -re {lictor: trusted scanout active generation=\d+[\r\n]} {
+        -re {lictor: trusted scanout active generation=\d+[^\r\n]*[\r\n]} {
             lc_step "the trusted screen is up ($label)"
         }
         -re {EXTINCTION:} {

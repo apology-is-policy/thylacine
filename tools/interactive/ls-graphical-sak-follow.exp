@@ -145,7 +145,7 @@ proc attention {label} {
     key "ctrl+alt+f10"
     lc_within 30 {
         -re {lictor: (seat failed|trusted screen)[^\r\n]*[\r\n]} { lc_fail "$label: [string trim $expect_out(0,string)]" }
-        -re {lictor: trusted scanout active generation=\d+[\r\n]} {
+        -re {lictor: trusted scanout active generation=\d+[^\r\n]*[\r\n]} {
             set ::up_at [clock seconds]
             lc_step "the trusted screen is up ($label)"
         }

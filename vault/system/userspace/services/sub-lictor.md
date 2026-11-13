@@ -450,9 +450,11 @@ between what the session holds and what it holds with the largest trusted
 image. The display grows to 2048x1080 and both follow. It then becomes
 4096x2160, which leaves the session's mode as it is, and the device answers
 the making of the 35.4 MB image "out of memory" seven times: the first, and
-six more after waits that double. The scenario reads all 28 lines in their
-order (from the second making on, the spare let go of and refused twice as a
-resource the device has not; the making refused; the screen said to stay
+six more after waits that double. The scenario reads all 21 lines in their
+order (from the second making on, the spare let go of: its detach refused as a
+resource the device has not, and its free answered the same, which
+`gpu_api::unref_frees` reads as a free done and says nothing of; the making
+refused; the screen said to stay
 2048x1080 at one, six times to be tried again and the seventh not; then the
 spare let go of once more, since no making follows to do it), requires
 the 18.9 s of waits, then reads the 2048x1080 picture under secure attention,
