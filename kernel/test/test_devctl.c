@@ -22,6 +22,7 @@
 #include "../../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count
 #include "../../arch/arm64/fault.h"    // prowl-6: userland_demand_page
 #include "../../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident
+#include "../../mm/slub.h"     // kfree_large_watch: the snapshot's page is freed
 #include <thylacine/devctl.h>
 
 // =============================================================================
@@ -1335,13 +1336,32 @@ static long prw_read_rest(struct Spoor *c, char *out, size_t cap, size_t got, lo
     }
 }
 
-// /ctl/procs is rendered once per open file (vote 108). A read that holds the
-// whole table keeps nothing, and the next read is end of file. A reader taking
-// 16 bytes at a time reads that same whole table, even when a Proc joins between
-// its first piece and the rest -- the Proc a fresh open does show, so the join
-// happened. One-byte reads, which a one-read rule refused, read a whole table. A
-// walk clone of the open file carries no snapshot, so its close frees nothing,
-// and the open file's own last close frees its snapshot. The table can change
+// The race leg's second reader: a Proc joins, then a read of the same open file
+// at offset 0 arrives while the first read's rendering waits to be published.
+struct psnap_race {
+    struct Spoor *c;
+    struct Proc  *join;
+    char         *out;
+    long          got;
+    bool          linked;
+};
+static void psnap_race_read(void *arg) {
+    struct psnap_race *r = arg;
+    proc_test_link(r->join);
+    r->linked = true;
+    r->got = devctl.read(r->c, r->out, 4096, 0);
+}
+
+// /ctl/procs is rendered once per open file (vote 108). The first read keeps
+// the rendering, a whole read too, and its next read is end of file. A reader
+// taking 16 bytes at a time reads the table a whole read had just shown, even
+// when a Proc joins between its first piece and the rest -- the Proc a fresh
+// open does show, so the join happened. A second read of the same open file
+// arriving at offset 0 before the first publishes is served the first
+// published table, and the loser's copy is freed. A walk clone carries no
+// snapshot, and the clone opened from a read-into file (a mount crossing does
+// that) starts at offset 0 and reads its own whole table. The last close frees
+// the snapshot's page; one-byte reads read a whole table. The table can change
 // between the reference read and the pieced one (a Proc reaped), so the pieced
 // read is taken again until it matches, within four tries.
 void test_devctl_procs_snapshot(void) {
@@ -1349,18 +1369,19 @@ void test_devctl_procs_snapshot(void) {
     static char pieced[4096 + 16];
     static char fresh[4096];
     static char ones[4096 + 1];
+    static char outer[4096], nested[4096];
 
     struct Proc *own[3] = { proc_alloc(), proc_alloc(), proc_alloc() };
     TEST_ASSERT(own[0] != NULL && own[1] != NULL && own[2] != NULL,
                 "proc_alloc for the table's own rows");
     for (int i = 0; i < 3; i++) own[i]->state = PROC_STATE_ALIVE;
     for (int i = 0; i < 2; i++) proc_test_link(own[i]);
-    const u64 live0 = devctl_procs_snaps_live_for_test();
+    const u64 held0 = devctl_procs_snaps_held_for_test();
 
     struct prw_shape ref = { 0 }, sh = { 0 };
     long full = -1, w_next = -1, got = -1, fl = -1;
-    bool w_kept = true, same = false, fresh_joined = false, pieced_joined = true;
-    u64 live_open = 0;
+    bool w_kept = false, same = false, fresh_joined = false, pieced_joined = true;
+    u64 held_open = 0;
     struct Spoor *p = NULL;
     for (int attempt = 0; attempt < 4 && !same; attempt++) {
         struct Spoor *w = open_ctl_leaf("procs");
@@ -1378,7 +1399,7 @@ void test_devctl_procs_snapshot(void) {
         long first = devctl.read(p, pieced, 16, 0);
         proc_test_link(own[2]);
         got = first == 16 ? prw_read_rest(p, pieced, sizeof pieced, 16, 16) : -1;
-        live_open = devctl_procs_snaps_live_for_test();
+        held_open = devctl_procs_snaps_held_for_test();
         struct Spoor *f = open_ctl_leaf("procs");
         fl = f ? devctl.read(f, fresh, (long)sizeof fresh, 0) : -1;
         if (f) spoor_clunk(f);
@@ -1394,14 +1415,21 @@ void test_devctl_procs_snapshot(void) {
     }
 
     // The clones, both walk shapes: devctl's own spoor_clone, and the caller's
-    // pre-clone (stalk, the O_PATH re-open of a descriptor).
-    bool clone_bare = false, nc_bare = false;
-    u64 live_clones = 0;
+    // pre-clone. A clone found carrying the snapshot is detached before its
+    // close, so the failure is the assertion and not a page freed twice.
+    bool clone_bare = false, nc_bare = false, opened_rewound = false;
+    u64 held_clones = 0, held_opened = 0;
+    long opened_len = -1;
+    struct prw_shape osh2 = { 0 };
     if (p) {
         struct Walkqid *wq = devctl.walk(p, NULL, (const char **)0, 0);
         if (wq) {
-            clone_bare = wq->spoor != NULL && wq->spoor != p && wq->spoor->aux == NULL;
-            if (wq->spoor && wq->spoor != p) spoor_clunk(wq->spoor);
+            struct Spoor *cl = wq->spoor;
+            clone_bare = cl != NULL && cl != p && cl->aux == NULL;
+            if (cl && cl != p) {
+                cl->aux = NULL;
+                spoor_clunk(cl);
+            }
             walkqid_free(wq);
         }
         struct Spoor *nc = spoor_clone(p);
@@ -1409,13 +1437,55 @@ void test_devctl_procs_snapshot(void) {
             wq = devctl.walk(p, nc, (const char **)0, 0);
             nc_bare = wq != NULL && wq->spoor == nc && nc->aux == NULL;
             if (wq) walkqid_free(wq);
-            if (nc_bare) spoor_clunk(nc);
-            else { nc->aux = NULL; spoor_unref(nc); }
+            nc->aux = NULL;
+            spoor_clunk(nc);
         }
-        live_clones = devctl_procs_snaps_live_for_test();
+        held_clones = devctl_procs_snaps_held_for_test();
+
+        // A mount crossing clones the mounted Spoor and opens the clone; p's
+        // cursor stands where its reader left it.
+        p->offset = got > 0 ? got : 16;
+        struct Spoor *mc = spoor_clone(p);
+        if (mc) {
+            wq = devctl.walk(p, mc, (const char **)0, 0);
+            if (wq) walkqid_free(wq);
+            mc->aux = NULL;
+            if (devctl.open(mc, 0)) {
+                opened_rewound = mc->offset == 0;
+                opened_len = devctl.read(mc, fresh, (long)sizeof fresh, mc->offset);
+                if (opened_len > 0) prw_shape_of(fresh, (size_t)opened_len, &osh2);
+                held_opened = devctl_procs_snaps_held_for_test();
+            }
+            spoor_clunk(mc);
+        }
     }
     long past = p && got > 0 ? devctl.read(p, fresh, (long)sizeof fresh, got) : -1;
-    if (p) spoor_clunk(p);
+    bool page_freed = false;
+    if (p) {
+        if (p->aux) kfree_large_watch_arm_for_test(p->aux);
+        spoor_clunk(p);
+        page_freed = kfree_large_watch_fired_for_test();
+        kfree_large_watch_disarm_for_test();
+    }
+
+    // The race: the second reader publishes first, so the first read must serve
+    // its table (the joined Proc in it) and free its own copy.
+    struct psnap_race race = { .c = open_ctl_leaf("procs"), .join = own[2], .out = nested,
+                               .got = -1, .linked = false };
+    long out_len = -1;
+    u64 held_race = 0;
+    if (race.c) {
+        devctl_procs_snap_race_for_test(psnap_race_read, &race);
+        out_len = devctl.read(race.c, outer, (long)sizeof outer, 0);
+        devctl_procs_snap_race_for_test(NULL, NULL);
+        held_race = devctl_procs_snaps_held_for_test();
+        spoor_clunk(race.c);
+        if (race.linked) proc_test_unlink(own[2]);
+    }
+    bool race_same = out_len > 0 && out_len == race.got;
+    for (long i = 0; race_same && i < out_len; i++)
+        if (outer[i] != nested[i]) race_same = false;
+    bool race_joined = race.got > 0 && prw_has_pid(nested, (size_t)race.got, own[2]->pid);
 
     struct Spoor *o = open_ctl_leaf("procs");
     long one = o ? devctl.read(o, ones, 1, 0) : -1;
@@ -1423,7 +1493,7 @@ void test_devctl_procs_snapshot(void) {
     struct prw_shape osh = { 0 };
     if (onelen > 0) prw_shape_of(ones, (size_t)onelen, &osh);
     if (o) spoor_clunk(o);
-    const u64 live_end = devctl_procs_snaps_live_for_test();
+    const u64 held_end = devctl_procs_snaps_held_for_test();
 
     for (int i = 0; i < 2; i++) proc_test_unlink(own[i]);
     for (int i = 0; i < 3; i++) {
@@ -1433,20 +1503,28 @@ void test_devctl_procs_snapshot(void) {
 
     TEST_ASSERT(full > 16 && !ref.torn && !ref.cut && ref.rows >= 3,
                 "the whole table, three rows or more, in one read");
-    TEST_ASSERT(!w_kept, "a read that holds the whole table keeps no snapshot");
+    TEST_ASSERT(w_kept, "a whole read keeps its rendering too");
     TEST_EXPECT_EQ(w_next, 0, "after it, the next read is end of file");
     TEST_ASSERT(got > 0, "16-byte reads reach end of file");
     TEST_ASSERT(fresh_joined, "a fresh open shows the Proc that joined between the pieces");
     TEST_ASSERT(!pieced_joined, "the pieced table does not");
     TEST_ASSERT(same, "the pieced table is the whole table, row for row, within four tries");
-    TEST_EXPECT_EQ(live_open, live0 + 1, "the pieced read keeps one snapshot");
+    TEST_EXPECT_EQ(held_open, held0 + 1, "the pieced read holds one snapshot");
     TEST_ASSERT(clone_bare, "a walk clone of the open file carries no snapshot");
     TEST_ASSERT(nc_bare, "nor does the caller's pre-clone after the walk");
-    TEST_EXPECT_EQ(live_clones, live0 + 1, "closing the clones freed no snapshot");
+    TEST_EXPECT_EQ(held_clones, held0 + 1, "closing the clones freed no snapshot");
+    TEST_ASSERT(opened_rewound, "a clone opened from a read-into file starts at offset 0");
+    TEST_ASSERT(opened_len > 0 && !osh2.torn && !osh2.short_row && osh2.rows >= 3,
+                "and reads a whole table of its own");
+    TEST_EXPECT_EQ(held_opened, held0 + 2, "the opened clone holds its own snapshot");
     TEST_EXPECT_EQ(past, 0, "the pieced read's end is end of file");
+    TEST_ASSERT(page_freed, "the open file's last close frees its snapshot's page");
+    TEST_ASSERT(race_joined, "the racing read rendered the joined Proc");
+    TEST_ASSERT(race_same, "the read that lost the race serves the table published first");
+    TEST_EXPECT_EQ(held_race, held0 + 1, "the race leaves one snapshot: the loser's copy is freed");
     TEST_EXPECT_EQ(one, 1, "a one-byte read is answered");
     TEST_ASSERT(one == 1 && ones[0] == 'P', "with the header's first byte");
     TEST_ASSERT(onelen > 0 && !osh.torn && !osh.short_row && osh.rows >= 3,
                 "one-byte reads read a whole table");
-    TEST_EXPECT_EQ(live_end, live0, "every last close freed its snapshot");
+    TEST_EXPECT_EQ(held_end, held0, "every last close freed its snapshot");
 }

@@ -1623,6 +1623,7 @@ struct test_case g_tests[] = {
                                        test_devproc_walk_unknown_pid_misses, false, NULL },
     { "devproc.walk_to_status_file",   test_devproc_walk_to_status_file,   false, NULL },
     { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
+    { "devproc.open_rewinds",          test_devproc_open_rewinds,          false, NULL },
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
     { "devproc.imperium_read_gated",   test_devproc_imperium_read_gated,   false, NULL },
     { "devproc.account_read_gated",    test_devproc_account_read_gated,    false, NULL },

@@ -719,6 +719,15 @@ keeps the pid in use (ARCH 7.3.4), so no cookie ever names two objects; an id
 created mid-listing appears if it lies past the cookie, and one that ends is not
 listed again. A directory whose Proc or thread has gone lists as `-1`.
 
+The cookie lives in the directory's cursor (`Spoor.offset`), and a walk from the
+directory clones it, cursor and all. So an `openat` from a `/proc` directory a
+readdir had read used to open `status` at the cookie's byte (the pid, ppid and
+name lines lost) and a child directory's listing empty; Rust std's
+`remove_dir_all`, Go's `os.RemoveAll` and gnulib's fts walk that way. Every
+open now starts at 0 (`dev_simple_open`, [[sub-kernel-dev]]; audit round 29
+F1), and `devproc.open_rewinds` holds it: a root whose cursor is a cookie, a
+clone shown to carry it, an open that starts at 0, a read from the first line.
+
 ## `status` gained `tables:` and `file:` (2026-09-23; B-1a' audits F1 and F8)
 
 `/proc/<pid>/status` reports, after `pages:` (the address space's holder

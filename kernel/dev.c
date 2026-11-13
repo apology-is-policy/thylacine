@@ -195,12 +195,15 @@ struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype) {
     return c;
 }
 
-// dev_simple_open: mark COPEN + record omode. Idempotent — re-opening
-// an already-open Spoor just updates omode (matches Plan 9 idiom).
+// dev_simple_open: mark COPEN, record omode, and start the cursor at 0 (Plan 9
+// devopen). The Spoor being opened is a walk clone, and spoor_clone copied its
+// source's offset: a directory's readdir cookie, or the place a mounted file's
+// reader had reached.
 struct Spoor *dev_simple_open(struct Spoor *c, int omode) {
     if (!c) return NULL;
     c->flag |= COPEN;
     c->mode = omode;
+    c->offset = 0;
     return c;
 }
 

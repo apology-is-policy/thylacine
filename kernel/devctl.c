@@ -165,10 +165,10 @@ bool devctl_system_counters_readable(const struct Proc *reader) {
 
 // procs: column-aligned PID/state/threads listing.
 //
-// The table holds the rows that fit DEVCTL_READ_BUF, not every Proc: the walk
-// stops at the first row that does not fit (format_procs), and the table then
-// ends with PROCS_CUT_LINE, whose room is kept free for it. It is rendered once
-// per open file (devctl_read keeps a short read's rendering). A reader that
+// The table holds the rows that fit one snapshot (PROCS_SNAP_CAP, 4092 bytes),
+// not every Proc: the walk stops at the first row that does not fit
+// (format_procs), and the table then ends with PROCS_CUT_LINE, whose room is
+// kept free for it. It is rendered once per open file (procs_snap). A reader that
 // needs every Proc lists /proc -- a directory, with no such bound -- and reads
 // each status.
 #define PROCS_HEADER   "PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n"
@@ -1192,31 +1192,6 @@ static int devctl_stat_native(struct Spoor *c, struct t_stat *out) {
     return 0;
 }
 
-// The /ctl/procs rendering a short read did not hold, kept for the rest of that
-// open file's reads so that a reader of any buffer size reads one table.
-// Published once in Spoor.aux, immutable after, freed by devctl_close at the last
-// reference; a walk clone never inherits it (devctl_walk). One per open file, so
-// bounded like a pipe ring: PROC_HANDLE_MAX per Proc.
-struct procs_snap {
-    u32  len;
-    char text[];
-};
-
-#ifdef KERNEL_TESTS
-static u64 g_procs_snaps_live;
-u64 devctl_procs_snaps_live_for_test(void) {
-    return __atomic_load_n(&g_procs_snaps_live, __ATOMIC_ACQUIRE);
-}
-#endif
-
-static long procs_snap_serve(const struct procs_snap *s, u8 *out, long n, s64 off) {
-    if ((u64)off >= s->len) return 0;
-    size_t copy = s->len - (size_t)off;
-    if (copy > (size_t)n) copy = (size_t)n;
-    for (size_t i = 0; i < copy; i++) out[i] = (u8)s->text[(size_t)off + i];
-    return (long)copy;
-}
-
 static struct Spoor *devctl_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
@@ -1224,18 +1199,6 @@ static struct Spoor *devctl_open(struct Spoor *c, int omode) {
 static struct Spoor *devctl_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
     (void)c; (void)name; (void)omode; (void)perm; (void)gid;
     return NULL;
-}
-
-static int devctl_close(struct Spoor *c) {
-    if (c->aux) {   // a /ctl/procs snapshot (devctl_read); the last reference is ours
-        kfree(c->aux);
-        c->aux = NULL;
-#ifdef KERNEL_TESTS
-        __atomic_sub_fetch(&g_procs_snaps_live, 1, __ATOMIC_ACQ_REL);
-#endif
-    }
-    dev_simple_close(c);
-    return 0;
 }
 
 // prowl-1 bumped 512 -> 2048: /ctl/procs renders into this stack buffer, and
@@ -1258,6 +1221,87 @@ _Static_assert(DEVCTL_READ_BUF >= sizeof(PROCS_HEADER) - 1u + PROCS_CUT_LEN,
                "/ctl/procs: the read buffer holds the header and the cut line");
 _Static_assert(DEVCTL_READ_BUF >= KSTACK_HEAD_MAX + KSTACK_TAIL_MAX,
                "/ctl/kstack: the read buffer holds the header and the table's end");
+
+// /ctl/procs is rendered once per open file, into a procs_snap: the first read
+// at offset 0 renders it and publishes it in Spoor.aux by compare-and-swap, and
+// every read of that open file, at any offset, is served from it (vote 108, the
+// shape of Linux's seq_file single_open). Immutable once published; freed by
+// devctl_close at the last reference; a walk clone never inherits it
+// (devctl_walk). Exactly one page: kmalloc serves a request past
+// SLUB_MAX_OBJECT_SIZE from alloc_pages, and a page is the most it costs.
+#define PROCS_SNAP_CAP (DEVCTL_READ_BUF - sizeof(u32))
+struct procs_snap {
+    u32  len;
+    char text[PROCS_SNAP_CAP];
+};
+_Static_assert(sizeof(struct procs_snap) == DEVCTL_READ_BUF,
+               "/ctl/procs: a snapshot is exactly one page");
+_Static_assert(PROCS_SNAP_CAP >= sizeof(PROCS_HEADER) - 1u + PROCS_CUT_LEN,
+               "/ctl/procs: a snapshot holds the header and the cut line");
+
+#ifdef KERNEL_TESTS
+static u64 g_procs_snaps_held;                    // allocated, not yet freed
+static void (*g_procs_snap_race)(void *);
+static void *g_procs_snap_race_arg;
+u64 devctl_procs_snaps_held_for_test(void) {
+    return __atomic_load_n(&g_procs_snaps_held, __ATOMIC_ACQUIRE);
+}
+// Runs once, inside the next /ctl/procs render, after it rendered and before
+// it publishes: a read there plays a second thread arriving at offset 0.
+void devctl_procs_snap_race_for_test(void (*fn)(void *), void *arg) {
+    g_procs_snap_race_arg = arg;
+    g_procs_snap_race = fn;
+}
+#endif
+
+static void procs_snap_free(struct procs_snap *s) {
+    kfree(s);
+#ifdef KERNEL_TESTS
+    __atomic_sub_fetch(&g_procs_snaps_held, 1, __ATOMIC_ACQ_REL);
+#endif
+}
+
+// The open file's snapshot: rendered and published now, or, when another read
+// of the same open file published first, that one. NULL when no page is free.
+static const struct procs_snap *procs_snap_take(struct Spoor *c, const struct ctl_leaf *leaf,
+                                                const struct Proc *reader) {
+    struct procs_snap *s = kmalloc(sizeof(*s), 0);
+    if (!s) return NULL;
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_procs_snaps_held, 1, __ATOMIC_ACQ_REL);
+#endif
+    s->len = (u32)leaf->fmt(reader, s->text, PROCS_SNAP_CAP);
+#ifdef KERNEL_TESTS
+    void (*race)(void *) = g_procs_snap_race;
+    if (race) {
+        g_procs_snap_race = NULL;
+        race(g_procs_snap_race_arg);
+    }
+#endif
+    void *first = NULL;
+    if (__atomic_compare_exchange_n(&c->aux, &first, s, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return s;
+    procs_snap_free(s);
+    return first;
+}
+
+static long procs_snap_serve(const struct procs_snap *s, u8 *out, long n, s64 off) {
+    if ((u64)off >= s->len) return 0;
+    size_t copy = s->len - (size_t)off;
+    if (copy > (size_t)n) copy = (size_t)n;
+    for (size_t i = 0; i < copy; i++) out[i] = (u8)s->text[(size_t)off + i];
+    return (long)copy;
+}
+
+static int devctl_close(struct Spoor *c) {
+    if (c->aux) {   // a /ctl/procs snapshot; the last reference is ours
+        procs_snap_free(c->aux);
+        c->aux = NULL;
+    }
+    dev_simple_close(c);
+    return 0;
+}
 
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -1283,7 +1327,7 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     // discloses no address, so I-16 is not the issue here -- the cost is. Its
     // formatter walks every live Proc under g_proc_table_lock with IRQs MASKED
     // and scans each thread's 16 KiB stack for the poison boundary, recomputed
-    // on EVERY read() at every offset (devctl leaves are stateless). Left
+    // on EVERY read() at every offset (only /ctl/procs keeps a rendering). Left
     // world-readable, a `while(1) pread(...)` loop would hold a CPU masked and
     // block every fork/exit/wait behind the proc-table lock -- defeating, on
     // that CPU, the very interrupt-latency property ARCH 8.12 exists to
@@ -1295,40 +1339,22 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (!devctl_kernel_base_readable(reader)) return -T_E_ACCES;   // a refusal: ERRORS.md
     }
 
-    // /ctl/procs is rendered once per open file: a second rendering's tail after
-    // the first one's head is a table no moment ever had. A read at offset 0
-    // that holds the whole table keeps nothing, and every later read is end of
-    // file; a shorter one keeps the rendering, and the later reads are served
-    // from it (vote 108). The offset only grows (devctl is not seekable), so
-    // a read past 0 with nothing kept follows a read that held the table.
+    // /ctl/procs: one rendering per open file, so no read joins a second
+    // rendering's tail to the first one's head. Every open starts its cursor at
+    // 0 (dev_simple_open), so a read past 0 with nothing kept is a positioned
+    // read with no first read; it answers end of file.
     if (kind == CTL_KIND_PROCS) {
         const struct procs_snap *s = __atomic_load_n(&c->aux, __ATOMIC_ACQUIRE);
-        if (s) return procs_snap_serve(s, (u8 *)buf, n, off);
-        if (off > 0) return 0;
+        if (!s) {
+            if (off > 0) return 0;
+            s = procs_snap_take(c, leaf, reader);
+            if (!s) return -T_E_NOMEM;
+        }
+        return procs_snap_serve(s, (u8 *)buf, n, off);
     }
 
     char content[DEVCTL_READ_BUF];
     size_t total = leaf->fmt(reader, content, DEVCTL_READ_BUF);
-
-    if (kind == CTL_KIND_PROCS && total > (size_t)n) {
-        struct procs_snap *s = kmalloc(sizeof(*s) + total, 0);
-        if (!s) return -T_E_NOMEM;
-        s->len = (u32)total;
-        for (size_t i = 0; i < total; i++) s->text[i] = content[i];
-        // Two threads sharing the open file can both arrive here at offset 0;
-        // the first to publish wins and the other reads the winner's table.
-        void *none = NULL;
-        if (__atomic_compare_exchange_n(&c->aux, &none, s, false,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-#ifdef KERNEL_TESTS
-            __atomic_add_fetch(&g_procs_snaps_live, 1, __ATOMIC_ACQ_REL);
-#endif
-        } else {
-            kfree(s);
-            s = none;
-        }
-        return procs_snap_serve(s, (u8 *)buf, n, 0);
-    }
 
     if ((size_t)off >= total) return 0;
     size_t avail = total - (size_t)off;

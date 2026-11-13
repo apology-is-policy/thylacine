@@ -1746,12 +1746,16 @@ static s64 spoor_read_on(struct Spoor *c, u8 *kbuf, u64 len, bool positioned,
     if (len == 0)                                    return 0;
     if (!c->dev || !c->dev->read)                    return -T_E_INVAL;
     if (positioned && len > (u64)INT64_MAX - (u64)off) return -T_E_INVAL;
-    long n = c->dev->read(c, kbuf, (long)len, positioned ? off : c->offset);
+    // The cursor is read with acquire and advanced with release, so what a Dev
+    // published beside it before returning (devctl's /ctl/procs snapshot in
+    // Spoor.aux) is seen by the next read at the advanced cursor on any CPU.
+    long n = c->dev->read(c, kbuf, (long)len,
+                          positioned ? off : __atomic_load_n(&c->offset, __ATOMIC_ACQUIRE));
     // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
     // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
     // negative to keep pouch's [-4095,-1] error window safe (see the write twin).
     if (n < 0) return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
-    if (!positioned) c->offset += n;
+    if (!positioned) __atomic_add_fetch(&c->offset, (s64)n, __ATOMIC_RELEASE);
     return (s64)n;
 }
 
@@ -4655,13 +4659,13 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // reject bucket):
     //   (a) leaf Devs (cons/null/zero/full/random/pipe/notes/none) return NULL
     //       -> the walk-fail path below.
-    //   (b) Devs that REUSE nc on a clone (devcap/devsrv/devramfs return
-    //       w->spoor == nc, nqid==0) -> the create call proceeds but their
-    //       create stub returns NULL, and their clone carries aux==NULL (or a
-    //       no-op close), so the eventual spoor_clunk(nc) is harmless.
-    //   (c) self-cloning dir Devs (devproc/devctl IGNORE nc and clone
-    //       internally) return w->spoor != nc -> the reject path below (which
-    //       now clunks the leaked clone, F2).
+    //   (b) Devs that REUSE nc on a clone (devcap/devsrv/devramfs/devproc/
+    //       devctl return w->spoor == nc, nqid==0) -> the create call proceeds
+    //       but their create stub returns NULL, and their clone carries
+    //       aux==NULL (or a no-op close), so the eventual spoor_clunk(nc) is
+    //       harmless.
+    //   (c) a Dev that ignores nc and clones internally returns w->spoor != nc
+    //       -> the reject path below (which clunks the leaked clone, F2).
     // Only dev9p replaces nc->aux with a real fresh fid -- the only Dev whose
     // create actually creates at v1.0.
     struct Spoor *nc = spoor_clone(src);

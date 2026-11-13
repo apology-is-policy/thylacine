@@ -216,10 +216,19 @@ register outside `dev_init` — `devpipe` from `pipe.c` and `dev9p` from
 
 **The simple-leaf helpers** exist because most kernel Devs are one
 file: `dev_simple_attach` allocates and stamps a qid of `{path 0,
-vers 0, type qtype}`; `dev_simple_open` sets `COPEN` and records the
-mode; `dev_simple_close` clears `COPEN`. `dev_simple_open` is
-deliberately idempotent — re-opening updates the mode, matching the
-Plan 9 idiom.
+vers 0, type qtype}`; `dev_simple_open` sets `COPEN`, records the
+mode and starts the cursor at 0; `dev_simple_close` clears `COPEN`.
+The cursor is Plan 9's `devopen`: every open's caller (stalk's quarry,
+the single-hop walk-open, a union member's root) opens a walk clone,
+and `spoor_clone` copied the source's offset. Before 2026-11-13 it was
+left there: an `openat` from a `/proc` directory a readdir had read
+started `status` at the readdir cookie's byte, and a mounted `/ctl/procs`
+whose reader had read into it was crossed at that reader's offset (audit
+round 29 F1). dev9p, devenv and devsrv already started at 0; devcap
+(write-only control files) and devpipe (streams) do not read by offset,
+and devnone never opens. `devproc.open_rewinds` walks from a root whose
+offset is a readdir cookie, checks the clone carried it, and requires
+the opened `status` to start at 0 and read from its first line.
 
 **`devnone`** is the no-op Dev (`dc='-'`), registered first, and it is
 better than it looks. Its documented role is an audit guard — "any

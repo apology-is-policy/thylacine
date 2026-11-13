@@ -316,8 +316,8 @@ without rows, for its peak (below).
 
 ### A cut process table says so (2026-11-12; operator vote 85)
 
-`/ctl/procs` holds the rows that fit `DEVCTL_READ_BUF` (4 KiB, about sixty
-rows), not every Proc. A table that left a row out ends with one
+`/ctl/procs` holds the rows that fit one snapshot (`PROCS_SNAP_CAP`, 4092
+bytes, about sixty rows), not every Proc. A table that left a row out ends with one
 fixed line, `PROCS_CUT_LINE`:
 
     (cut: more processes than one read holds; /proc lists them all)
@@ -353,16 +353,15 @@ whole nine-column row, with nothing of a later rendering after it (below).
 
 ### One rendering per open file (2026-11-13; operator votes 99 and 108)
 
-`/ctl/procs` is rendered once per open file. A read at offset 0 renders the
-table into the 4 KiB stack buffer. When the caller's buffer holds all of it,
-nothing is kept, and every later read of that open file answers end of file.
-When it does not, the rendering is kept as a `procs_snap` (its length and its
-bytes, `kmalloc`ed to size), published in `Spoor.aux` by compare-and-swap, and
-every later read of that open file is served from it, at any offset; a read at
-or past its end answers end of file. `devctl_close` frees it at the open
-file's last reference. The offset only grows: devctl is not seekable, so
-`pread` and `lseek` are refused (`spoor_read_on`), and a read past offset 0
-with nothing kept follows a read that held the table.
+`/ctl/procs` is rendered once per open file. Its first read at offset 0
+renders the table into a `procs_snap` (a length and `PROCS_SNAP_CAP` = 4092
+bytes, exactly one page: `kmalloc` serves a request past
+`SLUB_MAX_OBJECT_SIZE` from `alloc_pages`) and publishes it in `Spoor.aux` by
+compare-and-swap. Every read of that open file, at any offset, is served from
+it, and a read at or past its end answers end of file. A whole read keeps it
+too, as Linux's `seq_file` keeps its buffer: then every reader of the open
+file, whatever its buffer and whichever thread it runs on, reads one
+rendering. `devctl_close` frees it at the open file's last reference.
 
 Every read used to render the table afresh, and a reader that read to end of
 file joined a second rendering's tail to the first: when the second was
@@ -374,47 +373,82 @@ caller's buffer. Audit round 28 F1 showed what that cost a reader that starts
 small: `hexdump` (16-byte reads) and Rust std's `read_to_string` (a 32-byte
 first probe; the file's size reads 0) were refused, and a 1 KiB reader
 (libthyla-rs's `read_to_end`, Pouch stdio) got about thirteen rows and the cut
-line. Vote 108 pulled vote 99's per-open snapshot forward for this one file
-(Linux `seq_file`'s `single_open` shape), so every reader, whatever its
-buffer, reads one whole table. No read is refused for its size; were such a
-refusal to return, its code is `EINVAL` (vote 109). The other rendered files
-(devctl's other leaves, devproc, diorama's Linux view) still render per read,
-until vote 99's own snapshot chunk after the clipboard arc.
+line. Vote 108 pulled vote 99's per-open snapshot forward for this one file.
+No read is refused for its size; were such a refusal to return, its code is
+`EINVAL` (vote 109). The other rendered files (devctl's other leaves, devproc,
+diorama's Linux view) still render per read, until vote 99's own snapshot
+chunk after the clipboard arc.
 
-Two threads sharing the open file can both read at offset 0. Each renders;
-the first compare-and-swap publishes, and the other frees its copy and reads
-the winner's table. A snapshot is immutable once published, and it is freed
-only at the last reference, when no read is running, because every read holds
-a reference. `spoor_clone` copies `aux` shallowly, so `devctl_walk` clears it
-on every Spoor it returns: a walk clone (a resolver's pre-clone, the O_PATH
-re-open of a descriptor, `clone_walk_zero`) never carries a snapshot, and no
-snapshot is freed twice. A snapshot costs at most 4 KiB and its length per open
-file that read short, uncharged like a pipe ring and bounded the same way, by
-`PROC_HANDLE_MAX` open files per Proc. When `kmalloc` fails, the read fails
-with `ENOMEM` and nothing is kept.
+Three things keep it one open file's and freed once:
+- **No clone inherits it.** `spoor_clone` copies `aux` shallowly, so
+  `devctl_walk` clears it on every Spoor it returns. The one route by which a
+  clone reaches an opened `/ctl/procs` is a mount whose source it is: a mount
+  crossing clones the source (`clone_walk_zero`) and opens the clone. The
+  O_PATH re-open of a descriptor is not one: a file descriptor answers ENOTDIR
+  there.
+- **Every open starts at offset 0.** `dev_simple_open` resets the cursor the
+  clone copied ([[sub-kernel-dev]]), so that crossing reads its own whole table
+  from byte 0 instead of answering end of file at the mounted reader's offset
+  (audit round 29 F1).
+- **A race publishes one.** Two threads sharing the open file can both read at
+  offset 0. Each renders; the first compare-and-swap publishes, and the other
+  frees its copy and serves the winner's. The snapshot is immutable once
+  published and freed only at the last reference, when no read runs, because
+  every read holds a reference. `spoor_read_on` reads the cursor with acquire
+  and advances it with release ([[sub-kernel-syscall-dispatch]]), so a read at
+  a cursor another thread advanced sees the snapshot that thread published.
+  Before that, the advanced cursor could be seen with `aux` still NULL, and a
+  read past 0 with nothing kept answers end of file (round 29 F2). That answer
+  now belongs to positioned readers alone (`mmap_eager_copy`, exec's header,
+  fault reads), which read offset 0 first with at least 4 KiB.
+
+A snapshot costs one page per open file that has been read, uncharged, like a
+pipe ring. It lives as long as a reference does: the handle table's, at most
+`PROC_HANDLE_MAX` (1024) per Proc, and a mount entry's, at most
+`PGRP_MOUNT_CAP` (1024) per territory, so a Proc's ceiling is about 2048
+pages. When no page is free, the read fails with `ENOMEM` and nothing is
+kept.
+
+The table is rendered for the open file's first reader, with that reader's
+gates: the none wall and the `CPU_NS` gate. A Proc handed the open file, or
+one that inherits it (a fork before a drop to none), reads that rendering
+([[sub-kernel-devproc]]'s none wall still holds: no Proc reaches the table
+another Proc rendered without that Proc's handing it over). This is Linux's
+`f_cred` shape for `seq_file`.
 
 `devctl.procs_snapshot` reads through `devctl_read` with two Procs of its own
-linked. A whole read keeps nothing (`Spoor.aux` stays NULL) and its next read
-is end of file. A pieced read in 16-byte reads, with a third Proc linked after
-its first piece, reads the table a whole read had just shown, row for row by
-pid, while a fresh open shows the third Proc, so the change it missed did
-happen; it is taken again until it matches, within four tries, because a Proc
-can come or go between the reference read and the pieced one. The pieced read
-keeps exactly one snapshot (a test-only live count). Both walk shapes, devctl's
-own clone and a caller's pre-clone, return a Spoor with no snapshot, and closing
-them frees none. One-byte reads read a whole table, starting with the
-header's first byte, and every last close frees its snapshot. A kernel without
-the snapshot fails it: vote 99's rule ends the pieced read after 16 bytes, and
-a kernel that renders per read gives the pieced read the third Proc's row or a
-splice on every try. `ps-many.exp`'s second leg is unchanged: `cat`'s first
-read (8 KiB) holds the table, keeps nothing, and its second read finds end of
-file, so a whole row or a cut line's end after the cut line fails the leg. Its
-leg 2b runs `hexdump /ctl/procs` (16-byte reads) on the same large system and
-requires the table to end with the cut line and its total to be 3000 to 4096
-bytes: vote 99's rule refused that read, and a rule that ended the file after
-the first read would leave 16 bytes. That leg reaches the file through
-`spoor_read_on` and the open file's own offset, which the kernel test calls
-around.
+linked. A whole read keeps its rendering, and its next read is end of file. A
+pieced read in 16-byte reads, with a third Proc linked after its first piece,
+reads the table a whole read had just shown, row for row by pid, while a fresh
+open shows the third Proc, so the change it missed did happen. It is taken
+again until it matches, within four tries, because a Proc can come or go
+between the reference read and the pieced one. Both walk shapes, devctl's own
+clone and a caller's pre-clone, return a Spoor with no snapshot; a clone found
+carrying one is detached before its close, so that mutant fails at the
+assertion and not on a page freed twice. A clone of the read-into file opened
+the way a mount crossing opens it starts at 0 and reads a whole table of its
+own. The open file's last close is watched entering the large free for its
+snapshot's page (`kfree_large_watch`). The race is played by a test hook that
+runs inside a render, after it renders and before it publishes: a Proc joins,
+and a second read of the same open file publishes first. The first read must
+serve that table, the joined Proc in it, and leave one snapshot held, the
+loser's copy freed. One-byte reads read a whole table, and every last close
+frees its snapshot (a held count: allocated, not yet freed). A kernel without
+the snapshot fails it at once: vote 99's rule ends the pieced read after 16
+bytes, and a kernel that renders per read gives the pieced read the third
+Proc's row or a splice on every try.
+
+`ps-many.exp`'s second leg is unchanged: `cat`'s first read (8 KiB) holds the
+table and its second read finds end of file, so a whole row or a cut line's end
+after the cut line fails the leg. Its leg 2b runs `hexdump /ctl/procs`
+(16-byte reads) on the same large system, rebuilds the bytes from the hex
+columns, and requires one table: the header, whole nine-column rows with no pid
+twice, the cut line last, rows at contiguous offsets, and a total of 3000 to
+4096 bytes. Vote 99's rule refused that read, a rule that ended the file after
+the first read would leave 16 bytes, and a file rendered per read hands out
+slices of different renderings whose rows tear where their lengths differ.
+That leg reaches the file through `spoor_read_on` and the open file's own
+cursor, which the kernel test calls around.
 
 ### A cut kernel-stack table says so, and keeps its peak (2026-11-13)
 

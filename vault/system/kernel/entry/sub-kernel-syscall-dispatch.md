@@ -977,8 +977,15 @@ The kernel half is thin because the Dev vtable **always** took an explicit offse
 syscall-layer sugar. So `sys_read_for_proc` and `sys_write_for_proc` were
 refactored onto a shared inner (`spoor_read_common` / `spoor_write_common`)
 carrying a `positioned` flag: cleared, it reads `c->offset` and advances it after
-the transfer, byte-identical to the pre-existing bodies; set, it passes the
-caller's offset straight through and touches the cursor on no path.
+the transfer; set, it passes the caller's offset straight through and touches the
+cursor on no path. The read side's cursor is an acquire load and a release
+advance (`__atomic_add_fetch`, 2026-11-13): what a Dev published beside the cursor
+before its read returned, devctl's `/ctl/procs` snapshot in `Spoor.aux`, is seen
+by the next read at the advanced cursor on another CPU. As plain accesses, a
+second thread sharing the open file could see the advanced cursor and not the
+snapshot, and read end of file in the table's middle (audit round 29 F2). Two
+threads reading one open file at once still share one cursor, as on Plan 9;
+only the ordering is promised, and the add no longer loses one of two advances.
 
 Three positioned-specific gates guard the offset, and their ORDER is load-bearing:
 

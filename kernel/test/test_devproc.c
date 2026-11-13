@@ -295,6 +295,34 @@ void test_devproc_walk_dotdot_to_root(void) {
     spoor_unref(root);
 }
 
+// An open starts the cursor at 0 (dev_simple_open, Plan 9 devopen). The walk
+// clones copy their source's offset, and a readdir of /proc leaves its cookie
+// there, so an openat from that directory used to read status from the
+// cookie's byte on. The carried offset is checked first: the premise, so a
+// clone that started at 0 anyway cannot pass the test for the open.
+void test_devproc_open_rewinds(void) {
+    static char buf[512];
+    struct Spoor *root = devproc.attach("");
+    TEST_ASSERT(root != NULL, "attach /proc");
+    root->offset = 81;               // a readdir of the root leaves its cookie here
+    struct Spoor *piddir = walk_one(root, "0");
+    spoor_unref(root);
+    struct Spoor *status = piddir ? walk_one(piddir, "status") : NULL;
+    if (piddir) spoor_unref(piddir);
+    s64 carried = status ? status->offset : -1;
+    bool opened = status != NULL && devproc.open(status, 0) != NULL;
+    s64 at = status ? status->offset : -1;
+    long got = opened ? devproc.read(status, buf, (long)sizeof buf, at) : -1;
+    if (opened) spoor_clunk(status);
+    else if (status) spoor_unref(status);
+
+    TEST_EXPECT_EQ(carried, (s64)81, "the walk clones carry the directory's offset");
+    TEST_ASSERT(opened, "open /proc/0/status");
+    TEST_EXPECT_EQ(at, (s64)0, "the open starts the cursor at 0");
+    TEST_ASSERT(got > 5 && buf[0] == 'n' && buf[1] == 'a' && buf[2] == 'm' && buf[3] == 'e' && buf[4] == ':',
+                "a read at the cursor starts with the status's first line");
+}
+
 void test_devproc_read_status_format(void) {
     struct Spoor *c = open_status_for_pid(0);
     TEST_ASSERT(c != NULL, "open /proc/0/status OK");

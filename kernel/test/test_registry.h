@@ -959,6 +959,7 @@ void test_devproc_attach_returns_dir(void);
 void test_devproc_walk_root_to_kproc_dir(void);
 void test_devproc_walk_unknown_pid_misses(void);
 void test_devproc_walk_to_status_file(void);
+void test_devproc_open_rewinds(void);          // an open starts the cursor at 0, whatever the clone carried
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
 void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gate
