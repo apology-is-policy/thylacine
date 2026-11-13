@@ -155,10 +155,16 @@ proc attention {label} {
     }
     after 3000
 }
-# The scanout's size, then the dump the rects are read from.
+# The scanout's size once it has a picture on it, then the dump the rects are
+# read from.
 proc dumped {w h name label} {
-    global repo qmp shot ppm
     wait_dims [list $w $h] $label
+    shot_now $name $label
+}
+# The dump the rects are read from, of the scanout as it is: nothing is waited
+# for. The dump `dims` read last is the one kept.
+proc shot_now {name label} {
+    global repo qmp shot ppm
     if {[info exists ::env(LS_SAK_FOLLOW_SHOTS)]} {
         if {[catch {file copy -force $ppm [file join $::env(LS_SAK_FOLLOW_SHOTS) $name.ppm]} e]} {
             lc_fail "$label: the dump could not be kept: $e"
@@ -240,7 +246,10 @@ set d [dims]
 if {[lrange $d 0 1] ne {1600 1000}} {
     lc_fail "the scanout under secure attention is no longer 1600x1000 after the display changed (width height colours = $d; $::dims_why)"
 }
-dumped 1600 1000 one-after "the trusted screen after the display changed under it"
+# Read as it is. The screen has been up since the leg before, and a wait for a
+# picture would be a wait for the thing in question: what is shown for a
+# scanout with no image is nearly one colour.
+shot_now one-after "the trusted screen after the display changed under it"
 off 0 47 1600 48 $RULE "after the display changed under it the rail's rule is still device row 47, the whole width"
 off 0 94 1600 96 $GROUND "and device rows 94 and 95 are still the background, the whole width"
 # The prompt of an episode with nothing waiting ends by itself after 60s.
