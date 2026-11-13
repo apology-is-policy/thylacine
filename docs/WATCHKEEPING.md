@@ -227,7 +227,8 @@ authoritative.** A lease is a statement from whoever knows. It expires on
 unit of work, so a 40-minute gate in one blocking call beats not at all (a
 peer's beat read "36m ago" mid-gate; heartbeat expiry would have handed their
 cores away at minute 3). An expired lease is not an open one: taking it is a
-deliberate, recorded `steal`. **Holding is no licence to kill** — it means
+deliberate, recorded `steal`, or yip's own hand-on to the head of the queue once
+it has been expired ten minutes with every registered runner dead. **Holding is no licence to kill** — it means
 nobody else *starts*; killing a peer's gate at boot 39 of 40 destroys the work
 and the evidence, and the killer never sees what they destroyed. Identify by
 cwd, notify, grace, escalate.
@@ -792,7 +793,11 @@ been fixed by adding axes.
   depends on the heartbeat, so the "improvement" cannot be reintroduced.
 - **An expired lease is not an open one**: `steal` needs a reason, is refused
   while time remains, and records `stolen_from` + `steal_why` so a reclaim can
-  never read as an ordinary acquire in the log.
+  never read as an ordinary acquire in the log. Since yip 7b51147 (2026-11-13,
+  operator vote 105) a lease expired ten minutes with every runner its holder
+  registered verified dead, or none registered, passes to the head of the queue
+  at its next `hold` or `request`, recorded the same way; a runner that is alive
+  or cannot be checked keeps it.
 - **Release refuses to end someone else's claim** — the whole value is that
   the holder's word is authoritative.
 - **`ViolationAdvice`** is prose, on purpose (no mechanism): identify the owner
@@ -850,6 +855,21 @@ re-exec'd detached with `nohup … </dev/null &`:
   block every peer for its whole TTL. If the box stays unusable for
   `THYLA_WAKE_HELD_BOUND` seconds (default 600), it releases the lease too, then
   types a line saying so once the box frees.
+- **An EXPIRED lease in the way is said, once.** yip shows a lease whose TTL ran
+  out as `EXPIRED`, which is not `FREE`. yip passes it to the head of the queue
+  ten minutes after expiry when no runner its holder registered is alive; while
+  one may be, it goes to nobody until its holder releases or renews it, so the
+  queue behind it stands still, and a holder whose turn ended with the lease does
+  not know. (2026-11-10: the Mac idle for about thirteen hours with two agents
+  queued behind one.) yip's EXPIRED line ends with which case it is. While its `yip hold`
+  blocks, the watcher reads the resource's line every `THYLA_WAKE_EXPIRED_POLL`
+  seconds (default 300). On finding it EXPIRED under another agent it opens one
+  call to that agent, carrying yip's own entry for the resource and the two ways
+  out (release it, or renew it with `--now`), and types one line into the
+  waiting pane that names the holder and says whether the ring went out. Once
+  per expiry: a lease renewed and expired again is a new one. `watch` tells its
+  pane and rings nobody. It never steals: that takes a check of the holder's
+  runners and a reason, and stays the agent's decision.
 - `watch <res>` claims nothing and wakes when the machine is free or already
   the agent's; `cancel` stops the caller's own watchers (the state directory is
   shared by every agent, so `cancel --all` is the operator's) and touches
@@ -857,8 +877,10 @@ re-exec'd detached with `nohup … </dev/null &`:
 - yip names the asker's own lease `HELD by you`, a peer's by name — the match
   takes both.
 
-**Proven.** 48 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
-names as an agent) against throwaway panes running a fake input box and,
+**Proven.** 65 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
+names as an agent: the working directory decides who `yip presence` calls "you",
+so the same script started from another checkout fails every real-yip leg at
+"arm") against throwaway panes running a fake input box and,
 for every lease state, a fake `yip`: a shell pane and a missing pane are
 refused; an empty box is typed into once, verbatim; a half-typed line is waited
 out and never glued to; a dialog is never typed into, and the bound gives up
@@ -869,7 +891,20 @@ screens (one measured from an idle pane) through a stand-in tmux, including a
 colour whose parameters contain a 2, which must not read as dim; a real pane
 showing a dim suggestion is typed into; a box that stays typed past the held
 bound gets the lease released and the agent told; `cancel` leaves a peer's
-watcher alone and `--all` does not. Three of
+watcher alone and `--all` does not; behind an EXPIRED lease a hold rings the
+holder exactly once across several looks, with yip's entry in the call, tells
+the pane once, releases nothing, and still wakes on the grant; a peer's lease
+that is merely HELD, looked at as often, rings nobody and types nothing, while
+its hold is shown to be running; a watch tells and does not ring; a failed ring
+is named in the line; the agent's own expired lease is silent; a second expiry
+is rung and told again. Sixteen of those seventeen were made to fail by six
+mutants (2026-11-11): the look removed from `hold` (10 red), the ring not
+remembered (9 red, three rings where one was owed), a HELD line read as EXPIRED
+(9 red, three of them in controls that predate the feature), the own-lease
+exception removed (1 red), a release added on expiry (1 red), a watch that
+rings (2 red). The seventeenth, "its hold was running", is the liveness control
+for the silent leg and has no mutant.
+Three of
 those controls failed on the first build, each a real bug: the `HELD by you`
 spelling would have missed every grant; trailing blank rows of a tall pane
 pushed the box out of the bottom-rows window; and the missing-pane check passed
