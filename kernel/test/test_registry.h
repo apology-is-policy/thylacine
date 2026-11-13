@@ -1273,7 +1273,7 @@ void test_devctl_read_procs_format(void);
 void test_devctl_procs_tables_column(void);
 void test_devctl_counters_gated(void);         // IMPERIUM 11.3 item 10: owner/system-only counters
 void test_devctl_procs_rows_whole(void);       // a /ctl/procs row is committed whole
-void test_devctl_procs_one_read(void);        // /ctl/procs: EOF past offset 0, sized to the buffer
+void test_devctl_procs_snapshot(void);        // /ctl/procs: one rendering per open file
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);

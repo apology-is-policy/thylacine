@@ -1309,61 +1309,144 @@ void test_devctl_procs_rows_whole(void) {
                 "the whole table again, at full size, is whole and uncut");
 }
 
-// /ctl/procs is a one-read file (vote 99). Read through devctl_read: a read past
-// offset 0 answers end of file although the table is longer, so no second
-// rendering's tail follows the first; a buffer one byte short of the table gets
-// whole rows and the cut line, never the table's first bytes; a buffer without
-// room for the header and the cut line is refused with ERANGE, not answered
-// with nothing. The table can lose a byte between two reads (a thread reaped, a
-// count dropping a digit) and then fits one byte short uncut on a correct kernel,
-// so the short read is taken again until the table reads the same after it.
-void test_devctl_procs_one_read(void) {
-    static char buf[4096];     // devctl's own cap: a larger buffer reads no more
-    static char whole[4096];
-    static char later[4096];
-
-    struct Proc *own[2] = { proc_alloc(), proc_alloc() };
-    TEST_ASSERT(own[0] != NULL && own[1] != NULL, "proc_alloc for the table's own rows");
-    for (int i = 0; i < 2; i++) {
-        own[i]->state = PROC_STATE_ALIVE;
-        proc_test_link(own[i]);
+// Whether a row of a /ctl/procs render starts with `pid`.
+static bool prw_has_pid(const char *buf, size_t got, int pid) {
+    size_t ls = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (buf[i] != '\n') continue;
+        int v = 0;
+        size_t k = ls;
+        while (k < i && buf[k] >= '0' && buf[k] <= '9') v = v * 10 + (buf[k++] - '0');
+        if (k > ls && v == pid) return true;
+        ls = i + 1;
     }
+    return false;
+}
 
-    struct Spoor *c = open_ctl_leaf("procs");
-    struct prw_shape ref = { 0 }, sh = { 0 }, again = { 0 };
-    long full = -1, shy = -1;
-    bool still = false;
-    for (int attempt = 0; c && attempt < 4 && !still; attempt++) {
-        full = devctl.read(c, whole, (long)sizeof whole, 0);
-        if (full <= 1) break;
+// Read the open file `c` from `got` to end of file in `piece`-byte reads.
+// Returns the total length read, or -1 on an error or a table past `cap`.
+static long prw_read_rest(struct Spoor *c, char *out, size_t cap, size_t got, long piece) {
+    for (;;) {
+        if (got + (size_t)piece > cap) return -1;
+        long r = devctl.read(c, out + got, piece, (s64)got);
+        if (r < 0) return -1;
+        if (r == 0) return (long)got;
+        got += (size_t)r;
+    }
+}
+
+// /ctl/procs is rendered once per open file (vote 108). A read that holds the
+// whole table keeps nothing, and the next read is end of file. A reader taking
+// 16 bytes at a time reads that same whole table, even when a Proc joins between
+// its first piece and the rest -- the Proc a fresh open does show, so the join
+// happened. One-byte reads, which a one-read rule refused, read a whole table. A
+// walk clone of the open file carries no snapshot, so its close frees nothing,
+// and the open file's own last close frees its snapshot. The table can change
+// between the reference read and the pieced one (a Proc reaped), so the pieced
+// read is taken again until it matches, within four tries.
+void test_devctl_procs_snapshot(void) {
+    static char whole[4096];   // devctl's own cap: a larger buffer reads no more
+    static char pieced[4096 + 16];
+    static char fresh[4096];
+    static char ones[4096 + 1];
+
+    struct Proc *own[3] = { proc_alloc(), proc_alloc(), proc_alloc() };
+    TEST_ASSERT(own[0] != NULL && own[1] != NULL && own[2] != NULL,
+                "proc_alloc for the table's own rows");
+    for (int i = 0; i < 3; i++) own[i]->state = PROC_STATE_ALIVE;
+    for (int i = 0; i < 2; i++) proc_test_link(own[i]);
+    const u64 live0 = devctl_procs_snaps_live_for_test();
+
+    struct prw_shape ref = { 0 }, sh = { 0 };
+    long full = -1, w_next = -1, got = -1, fl = -1;
+    bool w_kept = true, same = false, fresh_joined = false, pieced_joined = true;
+    u64 live_open = 0;
+    struct Spoor *p = NULL;
+    for (int attempt = 0; attempt < 4 && !same; attempt++) {
+        struct Spoor *w = open_ctl_leaf("procs");
+        if (!w) break;
+        full = devctl.read(w, whole, (long)sizeof whole, 0);
+        w_kept = w->aux != NULL;
+        w_next = devctl.read(w, fresh, (long)sizeof fresh, full > 0 ? full : 1);
+        spoor_clunk(w);
+        if (full <= 16) break;
         prw_shape_of(whole, (size_t)full, &ref);
-        shy = devctl.read(c, buf, full - 1, 0);
-        if (shy > 0) prw_shape_of(buf, (size_t)shy, &sh);
-        long after = devctl.read(c, later, (long)sizeof later, 0);
-        if (after > 0) prw_shape_of(later, (size_t)after, &again);
-        still = after == full && again.rows == ref.rows;
-        for (int i = 0; still && i < ref.rows && i < PRW_PIDS; i++)
-            if (again.pids[i] != ref.pids[i]) still = false;
-    }
-    long past = c ? devctl.read(c, later, (long)sizeof later, 1) : -1;
-    long late = c ? devctl.read(c, later, (long)sizeof later, full > 0 ? full / 2 : 1) : -1;
-    long tiny = c ? devctl.read(c, later, 8, 0) : 0;
-    if (c) spoor_clunk(c);
 
-    for (int i = 0; i < 2; i++) {
-        proc_test_unlink(own[i]);
+        if (p) spoor_clunk(p);
+        p = open_ctl_leaf("procs");
+        if (!p) break;
+        long first = devctl.read(p, pieced, 16, 0);
+        proc_test_link(own[2]);
+        got = first == 16 ? prw_read_rest(p, pieced, sizeof pieced, 16, 16) : -1;
+        live_open = devctl_procs_snaps_live_for_test();
+        struct Spoor *f = open_ctl_leaf("procs");
+        fl = f ? devctl.read(f, fresh, (long)sizeof fresh, 0) : -1;
+        if (f) spoor_clunk(f);
+        proc_test_unlink(own[2]);
+        if (got <= 0 || fl <= 0) break;
+
+        prw_shape_of(pieced, (size_t)got, &sh);
+        fresh_joined = prw_has_pid(fresh, (size_t)fl, own[2]->pid);
+        pieced_joined = prw_has_pid(pieced, (size_t)got, own[2]->pid);
+        same = got == full && !sh.torn && !sh.short_row && sh.rows == ref.rows;
+        for (int i = 0; same && i < ref.rows && i < PRW_PIDS; i++)
+            if (sh.pids[i] != ref.pids[i]) same = false;
+    }
+
+    // The clones, both walk shapes: devctl's own spoor_clone, and the caller's
+    // pre-clone (stalk, the O_PATH re-open of a descriptor).
+    bool clone_bare = false, nc_bare = false;
+    u64 live_clones = 0;
+    if (p) {
+        struct Walkqid *wq = devctl.walk(p, NULL, (const char **)0, 0);
+        if (wq) {
+            clone_bare = wq->spoor != NULL && wq->spoor != p && wq->spoor->aux == NULL;
+            if (wq->spoor && wq->spoor != p) spoor_clunk(wq->spoor);
+            walkqid_free(wq);
+        }
+        struct Spoor *nc = spoor_clone(p);
+        if (nc) {
+            wq = devctl.walk(p, nc, (const char **)0, 0);
+            nc_bare = wq != NULL && wq->spoor == nc && nc->aux == NULL;
+            if (wq) walkqid_free(wq);
+            if (nc_bare) spoor_clunk(nc);
+            else { nc->aux = NULL; spoor_unref(nc); }
+        }
+        live_clones = devctl_procs_snaps_live_for_test();
+    }
+    long past = p && got > 0 ? devctl.read(p, fresh, (long)sizeof fresh, got) : -1;
+    if (p) spoor_clunk(p);
+
+    struct Spoor *o = open_ctl_leaf("procs");
+    long one = o ? devctl.read(o, ones, 1, 0) : -1;
+    long onelen = one == 1 ? prw_read_rest(o, ones, sizeof ones, 1, 1) : -1;
+    struct prw_shape osh = { 0 };
+    if (onelen > 0) prw_shape_of(ones, (size_t)onelen, &osh);
+    if (o) spoor_clunk(o);
+    const u64 live_end = devctl_procs_snaps_live_for_test();
+
+    for (int i = 0; i < 2; i++) proc_test_unlink(own[i]);
+    for (int i = 0; i < 3; i++) {
         own[i]->state = PROC_STATE_ZOMBIE;
         proc_free(own[i]);
     }
 
-    TEST_ASSERT(c != NULL, "open /ctl/procs");
-    TEST_ASSERT(full > 0 && !ref.torn && !ref.cut && ref.rows >= 3,
+    TEST_ASSERT(full > 16 && !ref.torn && !ref.cut && ref.rows >= 3,
                 "the whole table, three rows or more, in one read");
-    TEST_ASSERT(still, "the table read the same before and after the short read, within four tries");
-    TEST_EXPECT_EQ(past, 0, "a read at offset 1 answers end of file");
-    TEST_EXPECT_EQ(late, 0, "a read in the table's middle answers end of file");
-    TEST_ASSERT(shy > 0 && shy < full, "a buffer one byte short is answered, shorter");
-    TEST_ASSERT(shy > 0 && !sh.torn && !sh.short_row && sh.cut && sh.rows < ref.rows,
-                "a buffer one byte short holds whole rows and the cut line");
-    TEST_EXPECT_EQ(tiny, (long)-T_E_RANGE, "a buffer without room for the header and the cut line is refused");
+    TEST_ASSERT(!w_kept, "a read that holds the whole table keeps no snapshot");
+    TEST_EXPECT_EQ(w_next, 0, "after it, the next read is end of file");
+    TEST_ASSERT(got > 0, "16-byte reads reach end of file");
+    TEST_ASSERT(fresh_joined, "a fresh open shows the Proc that joined between the pieces");
+    TEST_ASSERT(!pieced_joined, "the pieced table does not");
+    TEST_ASSERT(same, "the pieced table is the whole table, row for row, within four tries");
+    TEST_EXPECT_EQ(live_open, live0 + 1, "the pieced read keeps one snapshot");
+    TEST_ASSERT(clone_bare, "a walk clone of the open file carries no snapshot");
+    TEST_ASSERT(nc_bare, "nor does the caller's pre-clone after the walk");
+    TEST_EXPECT_EQ(live_clones, live0 + 1, "closing the clones freed no snapshot");
+    TEST_EXPECT_EQ(past, 0, "the pieced read's end is end of file");
+    TEST_EXPECT_EQ(one, 1, "a one-byte read is answered");
+    TEST_ASSERT(one == 1 && ones[0] == 'P', "with the header's first byte");
+    TEST_ASSERT(onelen > 0 && !osh.torn && !osh.short_row && osh.rows >= 3,
+                "one-byte reads read a whole table");
+    TEST_EXPECT_EQ(live_end, live0, "every last close freed its snapshot");
 }

@@ -2,7 +2,7 @@
 
 Thylacine reports its processes and their memory through three text files and
 two commands. `/ctl/procs` lists the processes in one snapshot, one line each,
-as many as one read holds.
+as many as fit in 4 KiB.
 `/proc/<pid>/status` describes one process, including its memory footprint.
 `/ctl/memory` reports the machine's pages and the user pool. `ps` prints the
 process list as a table, and `prowl` shows the processes, the CPUs and the pool
@@ -200,7 +200,7 @@ returned once the free space at the top of the heap passes 2 MiB. Freed small
 blocks that lie below a block still in use stay charged, and the program's later
 allocations reuse them.
 
-`/ctl/procs` is one snapshot taken under the process-table lock. One read holds
+`/ctl/procs` is one snapshot taken under the process-table lock. It holds
 4 KiB, some fifty to sixty processes. When a process does not fit, the table
 stops after the last whole row and ends with this line:
 
@@ -208,11 +208,11 @@ stops after the last whole row and ends with this line:
 (cut: more processes than one read holds; /proc lists them all)
 ```
 
-The file is one read. A read of 4 KiB or more that does not end with that line
-holds every process the reader may see. A smaller read holds the rows that fit,
-and ends with that line when a row did not fit. A second read finds the end of the file, so `cat`
-shows one table. A read too small for the heading and that line fails with
-`ERANGE`. `ps` and
+A table that does not end with that line holds every process the reader may
+see. The first read of each open takes the snapshot, and every later read of
+that open reads on through the same snapshot, so a program that reads a few
+bytes at a time reads the same whole table that `cat` shows, and the read after
+its last byte finds the end of the file. `ps` and
 `prowl` take their rows from `/proc`: they list the directory, which has no
 such limit, and read each process's status file, so they show every process on
 a system of any size. Their rows are read one after another. Each row describes

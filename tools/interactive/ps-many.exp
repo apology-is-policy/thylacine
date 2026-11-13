@@ -9,14 +9,15 @@
 # asserts:
 #   - /ctl/procs has no cut line on the small system and ends with it on the
 #     large one. The pair is one variable apart: a line that is always there,
-#     or never, fails one leg. The file is one read (vote 99): cat's second
-#     read, past offset 0, finds end of file, so nothing of a later rendering
-#     follows the cut line -- no whole row and no cut line's end. Without the
-#     rule that shows only when a later rendering was longer; the kernel test
-#     devctl.procs_one_read turns red without it at every run, and
-#     devctl.procs_rows_whole holds every buffer size to whole rows and the
-#     line. The small leg holds while the booted system fits one read (about
-#     sixty Procs).
+#     or never, fails one leg. The file is rendered once per open (votes 99
+#     and 108): cat's first read holds the table and its second finds end of
+#     file, so nothing of a later rendering follows the cut line -- no whole
+#     row and no cut line's end; hexdump, reading 16 bytes at a time, reads
+#     the same whole table to the line. Without the rule a later rendering
+#     shows only when it was longer; the kernel test devctl.procs_snapshot
+#     turns red without it at every run, and devctl.procs_rows_whole holds
+#     every buffer size to whole rows and the line. The small leg holds while
+#     the booted system fits the table (about sixty Procs).
 #   - every pid /proc lists both before and after a ps is in that ps. Such a
 #     Proc was alive throughout the listing (pids are never reused), and the
 #     listing owes it a row. Reading the sixty rows that fit omits the rest.
@@ -133,6 +134,33 @@ foreach line [lrange [split $after_cut "\n"] 0 end-1] {
     }
 }
 lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table of [llength $seen] whole rows with the cut line, and cat read nothing after it ($others other line(s) on the console)"
+
+# ---- (2b) a reader taking 16 bytes at a time reads the whole cut table ------
+# hexdump reads 16-byte rows and ends with the total it read. The file is
+# rendered once per open (vote 108), so its reads go on through one table of
+# about 4 KiB to the cut line. A rule that ends the file after the first read
+# leaves it 16 bytes, and one that refuses a small read leaves it none.
+lc_send "hexdump /ctl/procs | tail -n 3; echo many-hex-end"
+set timeout 30
+set hexgut ""
+set hextotal -1
+expect {
+    -re {\n[0-9a-f]{8}  [^|\n]*\|([^\n]{1,16})\|\r*\n[0-9a-f]{8}  [^|\n]*\|([^\n]{1,16})\|\r*\n([0-9a-f]{8})\r*\nmany-hex-end} {
+        set hexgut "$expect_out(1,string)$expect_out(2,string)"
+        set hextotal [expr {"0x$expect_out(3,string)" + 0}]
+    }
+    -re "\[\r\n\]many-hex-end" { lc_fail "hexdump /ctl/procs did not end with two rows and its total (2b)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during hexdump /ctl/procs (2b)" }
+    timeout           { lc_fail "no end of hexdump /ctl/procs (2b)" }
+    eof               { lc_fail "qemu exited during hexdump /ctl/procs (2b)" }
+}
+if {[string range $hexgut end-4 end] ne "all)."} {
+    lc_fail "hexdump /ctl/procs with seventy more Procs does not end with the cut line: `$hexgut` (2b)"
+}
+if {$hextotal < 3000 || $hextotal > 4096} {
+    lc_fail "hexdump /ctl/procs with seventy more Procs read $hextotal bytes, where the cut table is about 4 KiB (2b)"
+}
+lc_pass "ps-many(2b): hexdump read /ctl/procs 16 bytes at a time through one table of $hextotal bytes to its cut line"
 
 # ---- (3) ps lists every Proc alive throughout it ----------------------------
 set before [pids_of "ls /proc | cat" $ls_row "ls1"]
