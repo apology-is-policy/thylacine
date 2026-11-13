@@ -37,7 +37,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-11-04
+updated: 2026-11-13
 ---
 ## Ordered ownership codec and journal
 
@@ -337,7 +337,13 @@ and turns the pure crate into acts: `layout save|restore|list|delete` and
 exercises is still adjudicated in [[sub-tapestryd]], not conferred by anything it
 holds (it takes no capability, no `SPAWN_PERM`, and adds no server verb -- the
 authority is the user's own principal). Its welcome transcript points at the tile's
-namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`.
+namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`. The tour's
+"Loaded systems" list is init's children among every Proc `/proc` lists
+([[sub-libthyla-rs]] `procs::list`), at most ten by pid; a set it cannot read
+whole shows no list. A tile's output is pixels, so the tour says one line on the
+serial console, `halcyon: welcome shown (tier T) systems N`: the tier it went out
+at and how many systems it listed. `ls-gfx-session` reads both and fails on
+`systems 0`.
 
 - **`name_is_valid` closes traversal by construction.** A layout name is one path
   component, `[A-Za-z0-9._-]`, no leading `-` (so a name never reads as an option),

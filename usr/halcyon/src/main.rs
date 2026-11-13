@@ -1495,6 +1495,7 @@ fn welcome() -> i64 {
     let home = env::var("HOME")
         .map(|h| String::from(h.trim()))
         .filter(|h| !h.is_empty());
+    let systems = loaded_systems();
     {
         use beacon::sink::{Cell, Em, HdrClass, ObjType, Sink, Table};
         let mut out = StdoutOut;
@@ -1528,7 +1529,6 @@ fn welcome() -> i64 {
             s.text("\n");
         }
         // The loaded systems: init's children, name + pid, two columns.
-        let systems = loaded_systems();
         if !systems.is_empty() {
             s.hdr(2, "Loaded systems");
             s.text("\n");
@@ -1614,10 +1614,11 @@ fn welcome() -> i64 {
         s.text("\n");
     }
     // The serial witness (the tile's own output is pixels): which tier the
-    // tour went out at.
+    // tour went out at, and how many loaded systems it listed.
     let _ = libthyla_rs::t_putstr(&format!(
-        "halcyon: welcome shown (tier {})\n",
-        if rich { "rich" } else { "none" }
+        "halcyon: welcome shown (tier {}) systems {}\n",
+        if rich { "rich" } else { "none" },
+        systems.len()
     ));
     // Become the shell (LINEAGE: the image is replaced in place; the pts,
     // the pgrp and the pid stay the tile's).
