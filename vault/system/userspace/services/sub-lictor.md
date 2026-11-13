@@ -644,17 +644,16 @@ forgets the marks made before it:
   completes, said with its pins released;
 - on the second shot the chain's retirement is withheld, so the engine dies at
   30 s and the retirement is refused.
-The same arming gives the compositor three stall shots to aim
-(`Request::TestStallNext`, refused once spent). Each makes the next synchronous
+The compositor aims stall shots of its own (`Request::TestStallShot`, opcode
+70). Each makes the next synchronous
 command retire, then report its deadline missed (`Gpu::test_stall_next`),
 said as `INJECTED stall shot of test-latch-dead`, a token distinct from the
 retirement shots' so a scenario waiting on one cannot match the other. The pump
 at the end of that same request (`Device::execute`'s trailing reap) revives the
 engine, so the reply already reads `Engine::Live` with the stall count moved: a
 stall of known length, with no race against the device, carried to the
-compositor by the count alone. `Request::TestStallShot` (opcode 70) gives one
-more shot outside that budget, with no arming, bound to the connection that
-asked: it rides that connection's next request, whatever it is, and the serve
+compositor by the count alone. A shot needs no arming and is bound to the
+connection that asked: it rides that connection's next request, whatever it is, and the serve
 loop spends it at that request's end if no synchronous command took it
 (`Device::test_stall_ride`, `test_stall_settle`; forgotten with the
 connection), so neither a seat takeover nor another client can take it.
@@ -671,19 +670,15 @@ leaves the shot for the next one: a scanout command that names a resource
 which is not an ordinary one is such a request (`Device::execute`). The
 compositor's display half aims only at binds of a screen it has just made or
 of a client's slot, which are not refused there.
-The arming's `TestStallNext` shots still ride the next synchronous command
-whoever sends it, so a seat takeover or the owed-free pass landing between the
-compositor's aim and its command would take one, and since both kinds share one
-flag, `test_stall_settle` spends a pending `TestStallNext` shot too; tapestryd
-never has both kinds pending. tapestryd's aims take `TestStallShot`s for that
-reason: the display's three (`ls-display-stall`, `ls-display-follow-edid`; round
-R4), and since 2026-11-13 the bring-up and health-step ones, each sent just before
-its step's first request (the compositor ctx's create, a blit-convention
-attempt's context create, the health step's first upload). Nothing in the tree
-sends `TestStallNext` now; the arming still gives three, and its scenarios do
-not spend them. A takeover needs test-mode, the bootarg and the
+Bound to a connection's request, a shot cannot be taken by a seat takeover or the
+owed-free pass landing between the compositor's aim and its command. A shot that
+any synchronous command could take had that hazard (round R4, F1), and the
+request for it is gone. tapestryd sends each shot just before its step's first
+request: the display's three (`ls-display-stall`, `ls-display-follow-edid`), the
+compositor ctx's create, a blit-convention attempt's context create, and a
+composition health step's first upload. A takeover needs test-mode, the bootarg and the
 operator's chord, and vote 30 recovers the seat. The bootarg is Lictor's own
-reading, not the compositor's: the latch, seat and stall-next shots fire only from
+reading, not the compositor's: the latch and seat shots fire only from
 counts `TestArmLatch` sets, the chained shots only from `TestArmChained`'s, and the
 restore shot only from `TestArmRestore`'s.
 In a guest (2026-11-13, 12d96aa0d, aux-3-mac before it merged main): the lever

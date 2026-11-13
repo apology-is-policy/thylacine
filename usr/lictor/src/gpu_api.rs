@@ -355,18 +355,14 @@ pub enum Request {
     /// Test lever: the engine latches dead, as its synchronous deadline
     /// would, at the next retirement the compositor asks for.
     TestArmLatch,
-    /// Test lever, one shot per armed boot: the next synchronous command
-    /// retires, then reports its deadline missed (a stall the next pump
-    /// revives).
-    TestStallNext,
     /// Test lever: the next two trusted takeovers each wait twice in series, the
     /// second wait outlasting the takeover's bound from the chord (vote 80).
     TestArmChained,
     /// Test lever: the next trusted episode's restore has its rebind of the
     /// compositor's frame refused, so the seat returns to a blank output.
     TestArmRestore,
-    /// Test lever: one stall shot outside the latch witness's budget, for the
-    /// compositor to aim at a command of its own; the caller bounds how often.
+    /// Test lever: one stall shot for the compositor to aim at a command of
+    /// its own, riding its connection's next request; the caller bounds how often.
     TestStallShot,
     /// Test lever: for a bounded time the owed-free pass passes over the
     /// frees a stream on `ctx_id` can reach (`on`), or no longer (`!on`, its
@@ -979,7 +975,6 @@ impl Wire for Request {
             Self::TestHoldCtxDied { ctx_pub } => { 53u16.put(out); ctx_pub.put(out); },
             Self::TestAbandonedTotal => { 54u16.put(out); },
             Self::TestArmLatch => { 67u16.put(out); },
-            Self::TestStallNext => { 68u16.put(out); },
             Self::TestArmChained => { 69u16.put(out); },
             Self::TestArmRestore => { 74u16.put(out); },
             Self::TestStallShot => { 70u16.put(out); },
@@ -1058,7 +1053,6 @@ impl Wire for Request {
             53 => Self::TestHoldCtxDied { ctx_pub: <u32>::get(r)? },
             54 => Self::TestAbandonedTotal,
             67 => Self::TestArmLatch,
-            68 => Self::TestStallNext,
             69 => Self::TestArmChained,
             74 => Self::TestArmRestore,
             70 => Self::TestStallShot,
@@ -1168,7 +1162,7 @@ mod admission_tests {
         vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
-            Request::TestArmLatch, Request::TestStallNext, Request::TestArmChained, Request::TestArmRestore, Request::TestStallShot,
+            Request::TestArmLatch, Request::TestArmChained, Request::TestArmRestore, Request::TestStallShot,
             Request::TestOwedDefer { ctx_id: 1, on: true }, Request::TestOwedStall { resource_id: 1 },
             Request::FreesOwed]
     }
@@ -1854,15 +1848,6 @@ mod cursor_wire_tests {
         assert_eq!(bytes, [1, 0, 70, 0]);
         let mut r = Reader::new(&bytes).unwrap();
         assert!(matches!(Request::get(&mut r).unwrap(), Request::TestStallShot));
-        r.finish().unwrap();
-    }
-    #[test]
-    fn the_stall_lever_has_its_own_opcode() {
-        let mut bytes = Vec::new();
-        Request::TestStallNext.put(&mut bytes);
-        assert_eq!(bytes, [1, 0, 68, 0]);
-        let mut r = Reader::new(&bytes).unwrap();
-        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestStallNext));
         r.finish().unwrap();
     }
     #[test]

@@ -340,10 +340,6 @@ impl Gpu {
     pub fn test_arm_restore(&mut self) -> bool {
         self.invoke::<()>(Request::TestArmRestore).is_ok()
     }
-    #[cfg(feature = "test-mode")]
-    pub fn test_stall_next(&mut self) -> bool {
-        self.invoke(Request::TestStallNext).unwrap_or(false)
-    }
     /// The shot rides this connection's next request, whatever it is.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_shot(&mut self) -> bool {

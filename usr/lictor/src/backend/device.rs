@@ -88,9 +88,6 @@ pub struct Device {
     pub test_refuse_restore: bool,
     #[cfg(feature = "test-mode")]
     test_blind_armed: bool,
-    /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
-    #[cfg(feature = "test-mode")]
-    test_stall_shots: u8,
     /// The connection whose next request a `TestStallShot` rides.
     #[cfg(feature = "test-mode")]
     test_stall_shot_for: Option<i64>,
@@ -185,7 +182,6 @@ impl Device {
             #[cfg(feature = "test-mode")] test_restore_shots: 0,
             #[cfg(feature = "test-mode")] test_refuse_restore: false,
             #[cfg(feature = "test-mode")] test_blind_armed: false,
-            #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_stall_shot_for: None,
             #[cfg(feature = "test-mode")] test_owed_defer: None,
             #[cfg(feature = "test-mode")] test_owed_defers: TEST_OWED_DEFERS,
@@ -958,7 +954,7 @@ impl Device {
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
                     if !self.test_declared { return Err(self.test_undeclared(0, crate::gpu_api::TEST_LEVERS_WORD)); }
-                    self.test_latch_shots = 2; self.test_seat_shots = 14; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 14;
                     self.test_blind_armed = true;
                     super::intake::test::arm();
                     ().put(&mut out);
@@ -976,14 +972,6 @@ impl Device {
                 #[cfg(feature = "test-mode")] {
                     if !self.test_restore_declared { return Err(self.test_undeclared(2, crate::gpu_api::TEST_RESTORE_WORD)); }
                     self.test_restore_shots = 1; ().put(&mut out);
-                }
-                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
-            }
-            Request::TestStallNext => {
-                #[cfg(feature = "test-mode")] {
-                    let armed = self.test_stall_shots > 0;
-                    if armed { self.test_stall_shots -= 1; self.gpu.test_stall_next(); }
-                    armed.put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
