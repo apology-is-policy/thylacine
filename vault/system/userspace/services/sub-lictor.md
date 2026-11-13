@@ -649,9 +649,10 @@ caller's own request. Until 2026-11-13 it sat in `Gpu::set_scanout`, which
 `Device::restore` calls to put the display back after an episode: a
 compositor that left the presentation at none with the drill armed failed
 the restoration, and the seat's failure cancelled the grant the user had just
-made, in every image (round R3 F1). NOT YET RUN IN A GUEST: a compositor made
-to keep the display disabled and the drill armed is to fail no seat, and with
-the drill read in `restore` again the same compositor is to fail it.
+made, in every image (round R3 F1). In a guest (2026-11-13, ce4243c64) a
+compositor made to disable the display and arm the drill on every pass failed
+no seat across an episode, and with the drill read in `restore` again the same
+compositor failed it: `lictor: seat failed: normal scanout restoration`.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
 resource can still retire. tapestryd aims three at the
@@ -760,8 +761,9 @@ from the device, not when the hand made it: the device stamps nothing, so a posi
 an episode's last milliseconds and read after RESTORED is the next seat's first. The witness
 is `tools/interactive/ls-graphical-sak-pointer.exp` (the pointer moved over the trusted
 screen makes no program's motion, and the Enter that ends the episode reaches no program).
-Its first form ran green in a guest on 2026-11-13; the form that tells that Enter from the
-one the scenario presses after it is NOT YET RUN IN A GUEST ([[sub-tapestryd]] has both).
+Its first form ran green in a guest on 2026-11-13, and so did, later that day (ce4243c64),
+the form that tells that Enter from the one the scenario presses after it ([[sub-tapestryd]]
+has both).
 
 Until 2026-10-29 the restore was retried forever: every compositor request
 parked for good and the kernel refused the serial BREAK into the failed

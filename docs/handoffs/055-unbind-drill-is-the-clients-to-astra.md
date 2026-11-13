@@ -41,6 +41,12 @@ and what it refuses now is only the caller's own request, so it is no lever over
 
 Host: lictor 76 tests, tapestryd 130, the guest and production builds. In a guest (the second run
 of 2026-11-13): a compositor made to disable the display and arm the drill on every pass, against
-the broker as changed (no seat is to fail) and against a `restore` that reads the drill again (the
-seat is to fail at `normal scanout restoration`). The dossier `sub-lictor` and row 209 of
+the broker as changed (no seat failed) and against a `restore` that reads the drill again (the
+seat failed: `lictor: seat failed: normal scanout restoration`). Both on ce4243c64. The dossier `sub-lictor` and row 209 of
 `docs/AUDIT-TRIGGERS.md` (item f) say the rule.
+
+## Main closes the same hole its own way
+
+corona's landing, on main at 7da0341f4, closes it in `Gpu`: `set_scanout_client` reads the
+drill and `set_scanout`, which `restore` calls, does not (corona's round 24). When aux-3-mac
+merges main, main's form stands and this branch's `Device` form goes.

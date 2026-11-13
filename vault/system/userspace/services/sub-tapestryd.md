@@ -232,7 +232,7 @@ GET_EDID submit error`, and with the derivation moved after the EDID's answer
 it was red with `the EDID's query was reached before the scale changed`. Its
 boot's two order checks are one pattern each since round R3 F7: as two, the
 wanted line's pattern, listed first, passed a `serving` line said before it
-in the same read.
+in the same read. The one-pattern form ran green in a guest on ce4243c64.
 
 Tests. The rule, on a host (`own_pct`, `carried_pct` and `nearest_pct`,
 [[sub-libhalcyon]]). The boot's use of it and `derive_scale`'s, in a guest:
@@ -3980,9 +3980,14 @@ position were handed on with the first events after the seat's return,
 before anything pressed or moved after it; the control's log has that
 order, and the pass was not traced further. The scenario as first written
 pressed its own Enter first, read the kept Enter's mark as that one, and
-failed a step later on a motion of 40 0. THE FORM THAT READS EVERY LINE IS
-NOT YET RUN IN A GUEST; against a scripted guest it reads as wanted in 14
-cases, 12 of them faults. No scenario makes the reading that finds the seat
+failed a step later on a motion of 40 0. The form that reads every line ran
+green in a guest (2026-11-13, ce4243c64), and three faults baked into that
+image were red at its first check after the episode, each with its own text:
+the return not forgetting the position (`a motion of 680 0`), both walls down
+(`the trusted screen's Enter reached the fixture`), and a broker that keeps the
+pointer's events during an episode with the compositor as built (`a motion of
+40 0`, counted from the trusted screen's position). Against a scripted guest
+it reads as wanted in 14 cases, 12 of them faults. No scenario makes the reading that finds the seat
 back a pointer drain's. Its leg during the episode is structural: in this
 harness the pass sits in a request Lictor parks for the whole episode, so no
 drain is read at a phase that is not 0, and the rule's `Episode` arm and
