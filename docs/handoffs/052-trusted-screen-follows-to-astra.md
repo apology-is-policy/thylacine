@@ -103,6 +103,8 @@ The Lictor dossier's section "The trusted screen follows its display (2026-11-12
 mechanism and what no test shows. The host test is
 `render::tests::a_display_that_changed_asks_for_the_screen_it_would_have_had_from_the_start`.
 The guest test is `tools/interactive/ls-graphical-sak-follow.exp`: a smaller display, a change
-while the trusted screen is up, and a larger display afterwards, each read off Lictor's line
-and a dump of the scanout under secure attention. `docs/JOURNAL.md` has the run, the audit
+while the trusted screen is up, and a larger display afterwards, the first and the last read off Lictor's line
+and a dump of the scanout under secure attention, the middle one off the dump alone: Lictor
+prints nothing while its screen is up. Run in a guest on 2026-11-13 with a control for each
+leg; the first run found the middle leg unable to fail, and what it reads now is the fix. `docs/JOURNAL.md` has the run, the audit
 round and what they found.

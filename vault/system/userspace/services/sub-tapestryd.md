@@ -562,7 +562,9 @@ found no bind, and so does a change that fails. Its legs:
   the bind was `bind_pump`'s, a pass later, and the leg read it after `not
   followed` and before the host was asked again (round 2's finding: between
   the two the device scans the screen that was given up). The leg fails on
-  that older order, so it also knows a failed change that reads nothing.
+  that older order, so it also knows a failed change that reads nothing. In a guest
+  (2026-11-13) the leg is green on the compositor as it is and red at that
+  check on one whose failed change reads nothing.
 - D, from the composed state with nothing stalled: `mode AxB -> WxH (scanout
   composed)`, the dump at the new size, and a dump that differs after typing,
   which here is read off the composed screen.

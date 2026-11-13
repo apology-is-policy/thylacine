@@ -123,7 +123,11 @@ processes that paint chrome and glyphs, and what the bakes need.
   screen. Measured 2026-11-13 under 10.0.2, the QEMU `tools/run-vm.sh`
   runs: the guest of a cocoa window with `THYLACINE_HIDPI=1` read `edid
   650x406 mm for 2560x1600 px` at its start, which is the synthetic 100
-  DPI. Why the window's first report carries no size is not known. Not
+  DPI, and was told of no display in that whole boot. Read in that
+  version's source and not shown by a run: the report at the start is made
+  before the application has finished launching, where `updateUIInfo`
+  drops it (`ui/cocoa.m:698`, called from `:2152`), and after it only a
+  resize, a change of screen or a choice of console reports. Not
   measured: what a guest reads once the window is resized or moved to
   another screen, and any of it under 11.) Prior art: plan9.ini's
   `monitor=`/`vgasize=` (the boot side

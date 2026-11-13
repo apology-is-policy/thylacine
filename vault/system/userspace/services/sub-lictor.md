@@ -425,7 +425,10 @@ backing where the boot made 16. The picture is what the middle leg can read:
 Lictor's would not be seen there, and a scanout whose image is let go of
 shows QEMU's placeholder at the size it had, so the dump's size would not
 change. The leg's first version read only those two, and a Lictor made to
-follow while its screen is up passed it. Not shown by any
+follow while its screen is up passed it. The leg as it is
+fails that Lictor in a guest (2026-11-13): no line in the 4 s, a dump still
+1600x1000, and the rule's row black across. The dump is taken as it is, with
+no wait for a picture, which a scanout with no image nearly lacks. Not shown by any
 test: a failed making and its retries, the spare that is owed and its release
 asked again, the lever's shot set aside, memory that cannot be had, a display
 that changes during entry or restoration, and the EDID's millimetres on this
