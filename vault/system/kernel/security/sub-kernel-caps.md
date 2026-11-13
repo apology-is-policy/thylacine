@@ -197,6 +197,11 @@ Reading or controlling the held child still takes an attach through the
 [[inv-i39]] gate, cover included, so the flag cannot be used to reach a Proc
 the caller could not already debug.
 
+**No file mapping** (2026-11-13, audit round 30 F1). devcap sets
+`no_file_mapping`: a cap leaf is a message channel with nothing to read, and a
+file mapping, kept in the Image cache past every close, would only keep the
+leaf's Spoor. `devcap.registered` asserts the flag.
+
 ## Mechanism
 
 **The strip is unconditional, and that is the point.** `caps_mask` alone

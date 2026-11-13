@@ -1275,6 +1275,7 @@ void test_devctl_procs_tables_column(void);
 void test_devctl_counters_gated(void);         // IMPERIUM 11.3 item 10: owner/system-only counters
 void test_devctl_procs_rows_whole(void);       // a /ctl/procs row is committed whole
 void test_devctl_procs_snapshot(void);        // /ctl/procs: one rendering per open file
+void test_devctl_backs_no_mapping(void);      // /ctl: no mapping keeps a snapshot
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
@@ -2121,6 +2122,7 @@ void test_pipe_transport_reads_now_without_sleeping(void);
 void test_pipe_pump_treats_a_closed_transport_as_dead(void);
 void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
+void test_pipe_backs_no_mapping(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);

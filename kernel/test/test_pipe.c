@@ -51,12 +51,21 @@
 //   pipe.client_death_hangs_up_the_tx_pipe
 //     A 9P client's death over the spoor transport hangs up its tx pipe:
 //     the server end reads EOF after the queued bytes, nothing closed.
+//
+//   pipe.backs_no_mapping
+//     Both mapping cores refuse a pipe end (ENODEV), and the ring is freed
+//     at the second close: no Image entry kept an end.
 
 #include "test.h"
 
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/errno.h>
+#include <thylacine/exec.h>      // EXEC_USER_BURROW_BASE
+#include <thylacine/handle.h>
+#include <thylacine/territory.h>
+#include <thylacine/vivarium.h>  // VIV_PROT_READ
+#include <thylacine/vma.h>
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
@@ -866,4 +875,37 @@ void test_pipe_fstat_reports_fifo(void) {
     spoor_clunk(wr2);
     spoor_clunk(rd);
     spoor_clunk(wr);
+}
+
+// A pipe backs no file mapping (Dev.no_file_mapping): a mapping is kept in the
+// Image cache with a Spoor reference, which would keep the end, and so its ring,
+// past both closes. Measure first, assert last.
+void test_pipe_backs_no_mapping(void) {
+    u64 freed_before = pipe_total_freed();
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+    TEST_ASSERT(rd != NULL && wr != NULL, "both ends");
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->territory = territory_alloc();
+    spoor_ref(rd); hidx_t fd  = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, rd);
+    spoor_ref(rd); hidx_t fdx = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, rd);
+    s64 m = 0, mf = 0;
+    if (p->territory && fd >= 0 && fdx >= 0) {
+        m  = sys_mmap_file_for_proc(p, (u64)fd, PAGE_SIZE, false, 0);
+        mf = sys_mmap_fixed_file_for_proc(p, EXEC_USER_BURROW_BASE + 0x200000ull,
+                                          (u64)fdx, PAGE_SIZE, (u32)VIV_PROT_READ, 0);
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    spoor_clunk(rd);
+    spoor_clunk(wr);
+    u64 freed = pipe_total_freed() - freed_before;
+
+    TEST_ASSERT(fd >= 0 && fdx >= 0, "handle_alloc");
+    TEST_EXPECT_EQ(m, -(s64)T_E_NODEV, "a map of a pipe end: ENODEV");
+    TEST_EXPECT_EQ(mf, -(s64)T_E_NODEV, "its MAP_FIXED twin: ENODEV");
+    TEST_EXPECT_EQ(freed, 1ULL, "no mapping kept the ring past both closes");
 }

@@ -111,7 +111,7 @@ struct Dev  *dev_lookup_by_name(const char *);  // NULL if absent (tests build o
 int          dev_count(void);                   // registered, excluding the sentinel (tests build only)
 
 struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype);   // alloc + qid{0,0,qtype}
-struct Spoor *dev_simple_open(struct Spoor *c, int omode);  // set COPEN + mode
+struct Spoor *dev_simple_open(struct Spoor *c, int omode);  // set COPEN + mode, offset 0
 void          dev_simple_close(struct Spoor *c);            // clear COPEN
 
 extern struct Dev *bestiary[];                     // BESTIARY_MAX + 1, NULL-terminated
@@ -224,9 +224,11 @@ and `spoor_clone` copied the source's offset. Before 2026-11-13 it was
 left there: an `openat` from a `/proc` directory a readdir had read
 started `status` at the readdir cookie's byte, and a mounted `/ctl/procs`
 whose reader had read into it was crossed at that reader's offset (audit
-round 29 F1). dev9p, devenv and devsrv already started at 0; devcap
-(write-only control files) and devpipe (streams) do not read by offset,
-and devnone never opens. `devproc.open_rewinds` walks from a root whose
+round 29 F1). dev9p and devsrv already started at 0; devenv's open went
+through `dev_simple_open` and carried the offset too (only its create
+reset it), so this fixes it with the rest. devcap (write-only control
+files) and devpipe (streams) do not read by offset, and devnone never
+opens. `devproc.open_rewinds` walks from a root whose
 offset is a readdir cookie, checks the clone carried it, and requires
 the opened `status` to start at 0 and read from its first line.
 

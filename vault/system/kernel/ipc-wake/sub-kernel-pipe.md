@@ -3,7 +3,7 @@ id: sub-kernel-pipe
 type: sub
 parent: moc-kernel-ipc-wake
 title: "pipe — the connected Spoor pair over a shared ring"
-code: ["kernel/pipe.c", "kernel/include/thylacine/pipe.h"]
+code: ["kernel/pipe.c", "kernel/include/thylacine/pipe.h", "kernel/test/test_pipe.c"]
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [spec-pipe, gate-smp]
@@ -81,6 +81,13 @@ byte-transport under the 9P spoor-transport adapter.
   (one pipe, one inode; starts at 1 so the historical unset 0 stays
   distinguishable). `.seekable` stays false — fstat-able ≠ seekable
   (RW-4 R2-F2 decoupling, pinned by `sys_prw.pipe_not_seekable`).
+- `.no_file_mapping` (2026-11-13, audit round 30 F1): both mapping cores
+  answer `ENODEV` for a pipe end, as Linux does for a FIFO. A file mapping is
+  kept in the Image cache with a Spoor reference, past the mapper and past
+  every close, so a mapped end would keep its ring alive: up to 65536 uncharged
+  rings per address space. A pipe has no bytes at an offset to map.
+  `pipe.backs_no_mapping` asks both cores through a Proc's handles and requires
+  the ring freed at the second close.
 
 ## Mechanism
 
@@ -222,6 +229,7 @@ unregister.
 - `.seekable` must stay false and `size` must stay 0 (#96's two
   pinned properties).
 - The rollback ladder's aux-detach must precede the clunk.
+- `.no_file_mapping` must stay set: a mapped end outlives every close.
 
 ## Seams
 

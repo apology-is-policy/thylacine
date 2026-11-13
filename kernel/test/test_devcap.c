@@ -70,6 +70,8 @@ void test_devcap_registered(void) {
         "devcap registered under dc='k'");
     TEST_EXPECT_EQ(dev_lookup_by_name("cap"), &devcap,
         "devcap registered under name=\"cap\"");
+    TEST_ASSERT(devcap.no_file_mapping,
+        "devcap backs no file mapping (a mapping would keep a leaf past its close)");
 
     struct Spoor *root = devcap.attach(NULL);
     TEST_ASSERT(root != NULL, "devcap.attach yields a Spoor");

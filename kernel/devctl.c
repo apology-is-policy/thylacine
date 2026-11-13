@@ -1201,7 +1201,8 @@ static struct Spoor *devctl_create(struct Spoor *c, const char *name, int omode,
     return NULL;
 }
 
-// prowl-1 bumped 512 -> 2048: /ctl/procs renders into this stack buffer, and
+// prowl-1 bumped 512 -> 2048: /ctl/procs rendered into this stack buffer (it
+// now renders into its snapshot page, PROCS_SNAP_CAP below), and
 // the NAME + CPU_NS columns widen each
 // proc line ~2x, so 512 would truncate (via the format_procs_cb overflow
 // early-return) at ~9 procs -- fewer than a booted system runs. 2048 fits ~30
@@ -1303,6 +1304,24 @@ static int devctl_close(struct Spoor *c) {
     return 0;
 }
 
+// Every leaf but /ctl/procs renders afresh into a stack buffer. noinline is
+// load-bearing: inlined, content[] would sit in devctl_read's frame on the
+// /ctl/procs path too, which renders into its snapshot page instead.
+__attribute__((noinline))
+static long devctl_read_rendered(const struct ctl_leaf *leaf, const struct Proc *reader,
+                                 void *buf, long n, s64 off) {
+    char content[DEVCTL_READ_BUF];
+    size_t total = leaf->fmt(reader, content, DEVCTL_READ_BUF);
+
+    if ((size_t)off >= total) return 0;
+    size_t avail = total - (size_t)off;
+    size_t copy = avail > (size_t)n ? (size_t)n : avail;
+
+    u8 *out = (u8 *)buf;
+    for (size_t i = 0; i < copy; i++) out[i] = (u8)content[(size_t)off + i];
+    return (long)copy;
+}
+
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n < 0) return -1;
@@ -1352,17 +1371,7 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
         }
         return procs_snap_serve(s, (u8 *)buf, n, off);
     }
-
-    char content[DEVCTL_READ_BUF];
-    size_t total = leaf->fmt(reader, content, DEVCTL_READ_BUF);
-
-    if ((size_t)off >= total) return 0;
-    size_t avail = total - (size_t)off;
-    size_t copy = avail > (size_t)n ? (size_t)n : avail;
-
-    u8 *out = (u8 *)buf;
-    for (size_t i = 0; i < copy; i++) out[i] = (u8)content[(size_t)off + i];
-    return (long)copy;
+    return devctl_read_rendered(leaf, reader, buf, n, off);
 }
 
 static struct Block *devctl_bread(struct Spoor *c, long n, s64 off) {
@@ -1422,4 +1431,9 @@ struct Dev devctl = {
     .remove   = devctl_remove,
     .wstat    = devctl_wstat,
     .power    = devctl_power,
+
+    // An open /ctl/procs keeps its snapshot page; a mapping would keep the open
+    // file, and so the page, past every close. A /ctl leaf's size is 0: no byte
+    // of it was ever mappable.
+    .no_file_mapping = true,
 };

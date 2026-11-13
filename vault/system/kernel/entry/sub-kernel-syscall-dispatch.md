@@ -985,7 +985,12 @@ by the next read at the advanced cursor on another CPU. As plain accesses, a
 second thread sharing the open file could see the advanced cursor and not the
 snapshot, and read end of file in the table's middle (audit round 29 F2). Two
 threads reading one open file at once still share one cursor, as on Plan 9;
-only the ordering is promised, and the add no longer loses one of two advances.
+only the ordering is promised. The add keeps two reads from losing an advance,
+but the cursor's other writers stay plain (`spoor_write_on`, weft's fast paths,
+lseek, readdir's cookie), and a read and its advance are not one step: two
+readers can both read the bytes at one cursor. POSIX 2.9.7 asks read, write and
+lseek on a shared regular file to be atomic with respect to each other (Linux's
+`f_pos_lock`); that is owed, as its own item.
 
 Three positioned-specific gates guard the offset, and their ORDER is load-bearing:
 

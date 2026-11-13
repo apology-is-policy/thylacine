@@ -2,7 +2,8 @@
 # tools/interactive/ps-many.exp -- the process listing with more Procs alive
 # than one read of /ctl/procs holds.
 #
-# /ctl/procs is rendered into one 4096-byte buffer, about sixty rows. ps and
+# /ctl/procs is rendered into one page per open file (4092 bytes of text), about
+# sixty rows. ps and
 # prowl took it for the whole set until they moved to /proc's directory, whose
 # listing has no such bound, and /ctl/procs now ends with a cut line when a row
 # did not fit. This scenario starts seventy sleeps on a booted system and
@@ -140,9 +141,11 @@ lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table of [lleng
 # total it read. Put back together from the hex, the bytes must be one table:
 # the header, whole nine-column rows with no pid twice, and the cut line last.
 # The file is rendered once per open (vote 108). A rule that ends the file after
-# the first read leaves 16 bytes, one that refuses a small read leaves none, and
-# a file rendered afresh at every read hands out slices of different
-# renderings, whose rows tear where the renderings' lengths differ.
+# the first read leaves 16 bytes, and one that refuses a small read leaves none.
+# A file rendered afresh at every read tears only where a row's length changes
+# between two of the reads, and nothing here makes one change: such a kernel is
+# caught at every run by the kernel test devctl.procs_snapshot, not here. This
+# leg proves the small reader's path, through the file's own offset.
 lc_send "hexdump /ctl/procs; echo many-hex-end"
 set timeout 60
 set hexbytes ""

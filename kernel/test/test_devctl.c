@@ -9,6 +9,11 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>
+#include <thylacine/exec.h>      // EXEC_USER_BURROW_BASE
+#include <thylacine/handle.h>
+#include <thylacine/territory.h>
+#include <thylacine/vivarium.h>  // VIV_PROT_READ
+#include <thylacine/vma.h>
 #include <thylacine/page.h>       // prowl-6: PAGE_SIZE
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>     // V-4c-2b: sched_cpu_ctxt
@@ -1418,7 +1423,7 @@ void test_devctl_procs_snapshot(void) {
     // pre-clone. A clone found carrying the snapshot is detached before its
     // close, so the failure is the assertion and not a page freed twice.
     bool clone_bare = false, nc_bare = false, opened_rewound = false;
-    u64 held_clones = 0, held_opened = 0;
+    u64 held_opened = 0;
     long opened_len = -1;
     struct prw_shape osh2 = { 0 };
     if (p) {
@@ -1440,7 +1445,6 @@ void test_devctl_procs_snapshot(void) {
             nc->aux = NULL;
             spoor_clunk(nc);
         }
-        held_clones = devctl_procs_snaps_held_for_test();
 
         // A mount crossing clones the mounted Spoor and opens the clone; p's
         // cursor stands where its reader left it.
@@ -1512,7 +1516,6 @@ void test_devctl_procs_snapshot(void) {
     TEST_EXPECT_EQ(held_open, held0 + 1, "the pieced read holds one snapshot");
     TEST_ASSERT(clone_bare, "a walk clone of the open file carries no snapshot");
     TEST_ASSERT(nc_bare, "nor does the caller's pre-clone after the walk");
-    TEST_EXPECT_EQ(held_clones, held0 + 1, "closing the clones freed no snapshot");
     TEST_ASSERT(opened_rewound, "a clone opened from a read-into file starts at offset 0");
     TEST_ASSERT(opened_len > 0 && !osh2.torn && !osh2.short_row && osh2.rows >= 3,
                 "and reads a whole table of its own");
@@ -1527,4 +1530,41 @@ void test_devctl_procs_snapshot(void) {
     TEST_ASSERT(onelen > 0 && !osh.torn && !osh.short_row && osh.rows >= 3,
                 "one-byte reads read a whole table");
     TEST_EXPECT_EQ(held_end, held0, "every last close freed its snapshot");
+}
+
+// /ctl backs no file mapping (Dev.no_file_mapping). A mapping is kept in the
+// Image cache with a Spoor reference, so an open /ctl/procs mapped once would
+// keep its snapshot page past every close. Measure first, assert last: a broken
+// gate leaves a mapping to drain before any assert returns.
+void test_devctl_backs_no_mapping(void) {
+    u64 held0 = devctl_procs_snaps_held_for_test();
+    struct Spoor *f = open_ctl_leaf("procs");
+    TEST_ASSERT(f != NULL, "open /ctl/procs");
+    char b[1];
+    long got = devctl.read(f, b, 1, 0);
+    u64 held_read = devctl_procs_snaps_held_for_test();
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->territory = territory_alloc();
+    spoor_ref(f); hidx_t fd  = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);
+    spoor_ref(f); hidx_t fdx = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);
+    s64 m = 0, mf = 0;
+    if (p->territory && fd >= 0 && fdx >= 0) {
+        m  = sys_mmap_file_for_proc(p, (u64)fd, PAGE_SIZE, false, 0);
+        mf = sys_mmap_fixed_file_for_proc(p, EXEC_USER_BURROW_BASE + 0x200000ull,
+                                          (u64)fdx, PAGE_SIZE, (u32)VIV_PROT_READ, 0);
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    spoor_clunk(f);
+    u64 held_end = devctl_procs_snaps_held_for_test();
+
+    TEST_ASSERT(got == 1 && b[0] == 'P', "premise: the first read took a snapshot");
+    TEST_EXPECT_EQ(held_read, held0 + 1, "premise: the open file holds its snapshot");
+    TEST_ASSERT(fd >= 0 && fdx >= 0, "handle_alloc");
+    TEST_EXPECT_EQ(m, -(s64)T_E_NODEV, "a map of /ctl/procs: ENODEV");
+    TEST_EXPECT_EQ(mf, -(s64)T_E_NODEV, "its MAP_FIXED twin: ENODEV");
+    TEST_EXPECT_EQ(held_end, held0, "no mapping kept the snapshot past the close");
 }

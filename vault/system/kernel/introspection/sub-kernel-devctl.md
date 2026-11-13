@@ -403,11 +403,14 @@ Three things keep it one open file's and freed once:
   fault reads), which read offset 0 first with at least 4 KiB.
 
 A snapshot costs one page per open file that has been read, uncharged, like a
-pipe ring. It lives as long as a reference does: the handle table's, at most
-`PROC_HANDLE_MAX` (1024) per Proc, and a mount entry's, at most
-`PGRP_MOUNT_CAP` (1024) per territory, so a Proc's ceiling is about 2048
-pages. When no page is free, the read fails with `ENOMEM` and nothing is
-kept.
+pipe ring. It lives as long as a reference to the open file does. A descriptor
+is one (at most `PROC_HANDLE_MAX`, 1024, per Proc), a mount entry another (at
+most `PGRP_MOUNT_CAP`, 1024, per territory), and so is a Loom registration. A
+file mapping would be one too, kept in the Image cache past the mapper and past
+every close, one per mapping up to 65536 per address space: so devctl sets
+`no_file_mapping`, and both mapping cores answer `ENODEV` (a `/ctl` leaf's size
+is 0, so no byte of one was ever mappable; audit round 30 F1). When no page is
+free, the read fails with `ENOMEM` and nothing is kept.
 
 The table is rendered for the open file's first reader, with that reader's
 gates: the none wall and the `CPU_NS` gate. A Proc handed the open file, or
@@ -438,17 +441,26 @@ the snapshot fails it at once: vote 99's rule ends the pieced read after 16
 bytes, and a kernel that renders per read gives the pieced read the third
 Proc's row or a splice on every try.
 
+`devctl.backs_no_mapping` reads one byte of an open `/ctl/procs` (a snapshot
+is held), asks both mapping cores to map it through a Proc's handles, drains
+and frees that Proc, and closes the file: both cores answer `ENODEV`, and the
+held count returns to where it began, so no Image entry kept the open file.
+Without the flag a mapping succeeds and the cached entry keeps the snapshot
+past the close.
+
 `ps-many.exp`'s second leg is unchanged: `cat`'s first read (8 KiB) holds the
 table and its second read finds end of file, so a whole row or a cut line's end
 after the cut line fails the leg. Its leg 2b runs `hexdump /ctl/procs`
 (16-byte reads) on the same large system, rebuilds the bytes from the hex
 columns, and requires one table: the header, whole nine-column rows with no pid
 twice, the cut line last, rows at contiguous offsets, and a total of 3000 to
-4096 bytes. Vote 99's rule refused that read, a rule that ended the file after
-the first read would leave 16 bytes, and a file rendered per read hands out
-slices of different renderings whose rows tear where their lengths differ.
-That leg reaches the file through `spoor_read_on` and the open file's own
-cursor, which the kernel test calls around.
+4096 bytes. Vote 99's rule refused that read, and a rule that ended the file
+after the first read would leave 16 bytes. A file rendered per read tears only
+where a row's length changes between two reads, and nothing in the scenario
+makes one change, so the leg does not catch that kernel; `devctl.procs_snapshot`
+does, at every run (audit round 30 F2). The leg's own claim is the small
+reader's path: `spoor_read_on` and the open file's own cursor, which the kernel
+test calls around.
 
 ### A cut kernel-stack table says so, and keeps its peak (2026-11-13)
 

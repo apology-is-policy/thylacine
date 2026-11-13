@@ -677,6 +677,10 @@ struct Dev devpipe = {
     .remove   = devpipe_remove,
     .wstat    = devpipe_wstat,
     .power    = devpipe_power,
+
+    // A mapping would keep an end, and so its ring, past both closes; a pipe
+    // has no bytes at an offset to map (Linux: ENODEV on a FIFO).
+    .no_file_mapping = true,
 };
 
 // =============================================================================

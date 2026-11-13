@@ -145,9 +145,11 @@ struct Dev {
     // from the Image cache, keyed on (dc, devno, qid.path, qid.vers) and holding
     // a Spoor reference for as long as the entry is cached, so a file whose content
     // changes without a qid.vers bump can serve old bytes to a later mapping,
-    // and whatever the Spoor keeps alive outlives every handle. devenv sets it:
-    // a variable has no version, any holder may write it, and its open Spoor
-    // holds the Env it was opened in.
+    // and whatever the Spoor keeps alive outlives every handle. Set it on any Dev
+    // whose open Spoor keeps state alive or whose bytes have no version: devenv
+    // (a variable has no version and its Spoor holds its Env), devctl (a
+    // /ctl/procs snapshot page), devpipe (the ring), devsrv (a connection) and
+    // devcap (a message channel).
     bool         no_file_mapping;
 
     // devno_per_walker -- this Dev's walk stamps a devno that depends on WHO is
@@ -572,8 +574,8 @@ bool devramfs_truncated(void);         // the archive overflowed the entry table
 // dev_simple_attach: spoor_alloc + populate qid (path=0, vers=0, type
 // = the dev's qtype — typically QTFILE for a single-file leaf).
 //
-// dev_simple_open: mark COPEN + record the omode. Returns c on success,
-// NULL if c is NULL.
+// dev_simple_open: mark COPEN, record the omode and start the cursor at 0
+// (Plan 9 devopen). Returns c on success, NULL if c is NULL.
 //
 // dev_simple_close: clear COPEN. Per-Dev close hooks that need to
 // release aux state should call dev_simple_close last.

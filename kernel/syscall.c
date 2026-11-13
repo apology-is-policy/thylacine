@@ -1762,8 +1762,9 @@ static s64 spoor_read_on(struct Spoor *c, u8 *kbuf, u64 len, bool positioned,
 // Shared body behind SYS_READ (cursor) and SYS_PREAD (positioned) -- #37.
 // The read twin of spoor_write_common; see its comment for the positioned
 // gates (off >= 0, off + len overflow, dev->seekable) and the cursor
-// contract. positioned=false is byte-identical to the pre-#37
-// sys_read_for_proc.
+// contract. positioned=false is the pre-#37 sys_read_for_proc, with the cursor
+// read by an acquire load and advanced by a release add (the ordering a Dev
+// publishing beside the cursor relies on; see the dossier).
 //
 // Only KOBJ_SPOOR is readable (sys_lookup_rw_handle filters): the read
 // routes through the Dev `.read` vtable. A byte-mode /srv connection
@@ -4696,10 +4697,10 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
     // apply the nqid==1 partial-walk check here.
     if (w->spoor != nc) {
-        // F2 audit: a self-cloning Dev (devproc/devctl) returned its OWN fresh
-        // Spoor (ref=1) instead of reusing nc -- clunk it so it doesn't leak.
-        // (Unreachable at v1.0: no writable self-cloning Dev is user-exposed;
-        // correct for when one is.)
+        // F2 audit: a Dev that returned its OWN fresh Spoor (ref=1) instead of
+        // reusing nc -- clunk it so it doesn't leak. (Unreachable today: every
+        // Dev reuses nc, devproc and devctl included; correct for one that
+        // does not.)
         if (w->spoor) spoor_clunk(w->spoor);
         walkqid_free(w);
         nc->aux = NULL;

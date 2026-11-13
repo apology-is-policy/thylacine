@@ -213,8 +213,8 @@ see. The first read of each open takes the snapshot, and every later read of
 that open reads on through the same snapshot, so a program that reads a few
 bytes at a time reads one whole table, as `cat` does, and the read after its
 last byte finds the end of the file. A process handed an open `/ctl/procs`, or
-one that inherits it, reads the snapshot its opener's first read took, with the
-rows and figures that reader was allowed. `ps` and
+one that inherits it, reads the snapshot taken by the open's first read, with
+the rows and figures that reader was allowed, whichever process made it. `ps` and
 `prowl` take their rows from `/proc`: they list the directory, which has no
 such limit, and read each process's status file, so they show every process on
 a system of any size. Their rows are read one after another. Each row describes

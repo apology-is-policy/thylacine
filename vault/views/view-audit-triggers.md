@@ -79,7 +79,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-path]] | kernel/path.c, kernel/include/thylacine/path.h | inv-i33 | - The refcount balances on EVERY create/destroy/replace path (the #66a |
 | [[sub-kernel-pci-irq]] | kernel/pci_irq.c, kernel/include/thylacine/pci_irq.h, kernel/test/test_pci_irq.c | inv-i5, inv-i9, inv-i15, inv-i34 | Guest shared-ticket test passes: two asserting functions, stalled peer isolation, |
 | [[sub-kernel-perm]] | kernel/perm.c, kernel/include/thylacine/perm.h, kernel/test/test_perm.c |  | - No `principal_id` may ever be special-cased here. Adding a |
-| [[sub-kernel-pipe]] | kernel/pipe.c, kernel/include/thylacine/pipe.h | inv-i9 | - Every mutation that can enable a waiter must keep its wake — the |
+| [[sub-kernel-pipe]] | kernel/pipe.c, kernel/include/thylacine/pipe.h, kernel/test/test_pipe.c | inv-i9 | - Every mutation that can enable a waiter must keep its wake — the |
 | [[sub-kernel-poll]] | kernel/poll.c, kernel/include/thylacine/poll.h, kernel/test/test_poll.c | inv-i9 | - The sweep's three phases must keep their order: unregister → |
 | [[sub-kernel-proc]] | kernel/proc.c, kernel/include/thylacine/proc.h, kernel/test/test_proc.c, kernel/test/test_resource.c | inv-i1, inv-i32, inv-i33, inv-i44, inv-i48 | - The `rfork` ledger: every field is inherited, freshened or stripped |
 | [[sub-kernel-pts]] | kernel/pts.c, kernel/include/thylacine/pts.h, kernel/test/test_pts.c | inv-i20, inv-i1, inv-i22, inv-i9 | - The signal call must never grow a target parameter. The invariant is the |
