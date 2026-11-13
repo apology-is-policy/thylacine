@@ -345,22 +345,36 @@ lands where the guest has its pointer.
 Apple says a real event is stamped on that clock, and nothing here can
 show it, so the rule does not stand on it. Every pointer event the view
 asks about is measured against the clock when it is taken, and the least
-any was behind is kept (`lag`). On one clock that least is the promptest
-delivery there has been, and while it is between nothing and `LAG_MOST`
-(50 ms) the two times are compared as they are. A least that is negative,
-or longer than that, is the distance between two clocks, an event not
-being taken before it is made, and the change of hands is read on the
-events' clock by it. Two limits follow. With two clocks, an event made
-within the promptest delivery of the change is not told as stale: the
-distance cannot be had without that wait in it. And an events' clock that
-is behind by 50 ms or less is taken for a wait, so live events are taken
-for stale ones for that long after a change. An event that was only made
-says zero; it is never stale and is not measured. `--stats` says the least
-measured on each of its lines, once a pointer event has been asked about.
+any was behind of late is kept (`Lag`): the least over the span being
+filled and the one before it. A span is five seconds (`LAG_SPAN`) and
+begins with an event, so a time with no events ends none. On one clock
+that least is the promptest delivery of late, and while it is between
+nothing and `LAG_MOST` (50 ms) the two times are compared as they are. A
+least that is negative, or longer than that, is the distance between two
+clocks, an event not being taken before it is made, and the change of
+hands is read on the events' clock by it. Three limits follow. With two
+clocks, an event made within the promptest delivery of the change is not
+told as stale: the distance cannot be had without that wait in it. An
+events' clock that is behind by 50 ms or less is taken for a wait, so live
+events are taken for stale ones for that long after a change. And the
+least is of late and not of the view's life. Kept for good, it would be
+one event's to spoil: an event stamped ahead of its clock would be the
+least from then on, and after every change of hands the live events of
+that long would be taken for stale ones. Of late, such an event is the
+least for its own span and the next. The cost is that a least is forgotten
+when the span after its own has had nothing as prompt in it, and a slow
+event is then taken for a distance until a prompt one comes. An event that
+was only made says zero; it is never stale and is not measured. `--stats`
+says the least there has ever been (`Lag::ever`) on each of its lines, once
+a pointer event has been asked about, which is how an event stamped ahead
+would be heard of.
 
 What is shown: the rule, over events made and taken at given times on
 clocks nothing, half a second, three seconds and a day apart either way
-(`an_old_event_is_told_whatever_clock_events_are_stamped_on`); and that
+(`an_old_event_is_told_whatever_clock_events_are_stamped_on`); that an
+event two seconds ahead of its clock is the least for two spans and no
+longer, that the least outlasts an hour with no events, and what each
+costs (`the_least_lag_is_of_late_and_outlasts_a_time_with_no_events`); and that
 Core Graphics stamps an event when it is posted, and one that is only made
 says zero, while a script stamps its own (`stamp`) and what it stamps reads
 back as seconds on that clock (a unit test pins both). What a real event's
@@ -810,9 +824,13 @@ every step of a drag is a mode the guest sets at every step.
   handed one made-up motion. Where the events' clock is behind by 50 ms or
   less, live moves are dropped for that long after each change of hands.
   Until an event has been taken promptly, a slow first one is taken for a
-  distance, and an event made that long before a change is not told. And as
-  before: a press made more than five seconds before the change and taken
-  after it has its place.
+  distance, and an event made that long before a change is not told; the
+  same holds again when a whole span of five seconds has had no prompt
+  event after the last one that did. An event stamped ahead of its clock
+  misleads the rule for at most its span and the next (audit round R2's
+  first question; no source of such an event is known). And as before: a
+  press made more than five seconds before the change and taken after it
+  has its place.
 - **A captured pointer moves as the Mac's would have.** The motion is
   AppKit's, in points, with the Mac's acceleration, and not the device's own
   counts. A program that wants unaccelerated motion gets none. And it moves
