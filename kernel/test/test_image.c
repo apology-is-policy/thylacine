@@ -128,33 +128,50 @@ void test_image_private_unless_versioned(void) {
     u64 priv0    = image_cache_private_for_test();
     u64 creates0 = image_cache_creates_for_test();
 
+    // Every value is read and every ref dropped before the first assertion: an
+    // assertion returns, and a ref it strands is a live image no later test's
+    // eviction can take, which fails every cache count after this one.
     struct Burrow *b1 = image_lookup_or_create(mk_private_spoor(0x7000, 0), 0, PAGE_SIZE,
                                                /*exec=*/false, 3 * PAGE_SIZE);
     struct Burrow *b2 = image_lookup_or_create(mk_private_spoor(0x7000, 0), 0, PAGE_SIZE,
                                                /*exec=*/false, PAGE_SIZE);
-    TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
-    TEST_ASSERT(b1 != b2, "one identity off an unversioned Dev is two private images");
-    TEST_EXPECT_EQ(burrow_handle_count(b1), 1, "a private image's only ref is the caller's");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "nothing was cached");
-    TEST_EXPECT_EQ(image_cache_private_for_test() - priv0, 2, "two private creates");
-    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 0, "no cached create");
-    TEST_EXPECT_EQ(b1->file_limit, 3 * PAGE_SIZE, "the first keeps its own size");
-    TEST_EXPECT_EQ(b2->file_limit, PAGE_SIZE, "the second keeps its own size");
-    burrow_unref(b1);
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 1,
-                   "the last unref clunks a private image's Spoor: nothing else holds it");
-    burrow_unref(b2);
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 2, "and the second's");
+    bool both     = b1 != NULL && b2 != NULL;
+    bool two      = both && b1 != b2;
+    int  hc1      = b1 ? burrow_handle_count(b1) : -1;
+    u64  live     = image_cache_live_count_for_test();
+    u64  privs    = image_cache_private_for_test() - priv0;
+    u64  creates  = image_cache_creates_for_test() - creates0;
+    u64  lim1     = b1 ? b1->file_limit : 0;
+    u64  lim2     = b2 ? b2->file_limit : 0;
+    if (b1) burrow_unref(b1);
+    u64  freed1   = spoor_total_freed() - freed0;
+    if (b2) burrow_unref(b2);
+    u64  freed2   = spoor_total_freed() - freed0;
 
     struct Burrow *b3 = image_lookup_or_create(mk_spoor(0x7000, 0), 0, PAGE_SIZE,
                                                /*exec=*/false, PAGE_SIZE);
-    TEST_ASSERT(b3 != NULL, "control created");
-    burrow_unref(b3);
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "control: the versioned image is cached");
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 2,
-                   "control: its Spoor outlives its last caller");
-    TEST_EXPECT_EQ(image_cache_evict_idle_for_test(), 1, "control evicted");
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 3, "control Spoor clunked at eviction");
+    bool control  = b3 != NULL;
+    if (b3) burrow_unref(b3);
+    u64  live3    = image_cache_live_count_for_test();
+    u64  freed3   = spoor_total_freed() - freed0;
+    int  evicted  = image_cache_evict_idle_for_test();
+    u64  freed4   = spoor_total_freed() - freed0;
+
+    TEST_ASSERT(both, "both created");
+    TEST_ASSERT(two, "one identity off an unversioned Dev is two private images");
+    TEST_EXPECT_EQ(hc1, 1, "a private image's only ref is the caller's");
+    TEST_EXPECT_EQ(live, 0, "nothing was cached");
+    TEST_EXPECT_EQ(privs, 2, "two private creates");
+    TEST_EXPECT_EQ(creates, 0, "no cached create");
+    TEST_EXPECT_EQ(lim1, 3 * PAGE_SIZE, "the first keeps its own size");
+    TEST_EXPECT_EQ(lim2, PAGE_SIZE, "the second keeps its own size");
+    TEST_EXPECT_EQ(freed1, 1, "the last unref clunks a private image's Spoor: nothing else holds it");
+    TEST_EXPECT_EQ(freed2, 2, "and the second's");
+    TEST_ASSERT(control, "control created");
+    TEST_EXPECT_EQ(live3, 1, "control: the versioned image is cached");
+    TEST_EXPECT_EQ(freed3, 2, "control: its Spoor outlives its last caller");
+    TEST_EXPECT_EQ(evicted, 1, "control evicted");
+    TEST_EXPECT_EQ(freed4, 3, "control Spoor clunked at eviction");
 }
 
 void test_image_distinct_qid_distinct_entry(void) {
