@@ -99,7 +99,9 @@ mapping is admitted only if **both** the backing Dev carries this vouch **and**
 the mount is not `MNOEXEC`. ramfs vouches for the same reason it preserves each
 file's execute bit (Caveats) — it serves the binaries the machine executes from;
 `/env`'s Dev deliberately does not, because it serves per-process variable text,
-never code. The vouch is the allowlist entry, not the enforcement: the check
+never code. It sets `may_back_mapping = true` beside it (operator vote 113,
+2026-11-13): file mapping is opt-in too, and a Dev that backs exec must back
+mappings. The vouch is the allowlist entry, not the enforcement: the check
 lives on the exec/mmap path, and a Dev that forgot to set it would simply have
 its files refused as executable backing, fail-closed.
 
@@ -153,7 +155,8 @@ flag while copying the slot, so a clone never owns what it copied and its close
 drops nothing. An environment therefore lives until its process *and* every
 variable opened in it have let go. A variable is held open by a descriptor, a
 mount entry or a Loom registration, each bounded by its holder's table, and
-never by a mapping: this Dev backs none (a map of a variable is refused with
+never by a mapping: this Dev backs none (it leaves `may_back_mapping` unset, as
+every Dev but dev9p and devramfs does; a map of a variable is refused with
 `ENODEV`, an executable one with the exec floor's `EPERM`), because a cached mapping
 would hold the environment past every descriptor and serve a changed value as
 its old bytes, a variable having no version. The id needs the same care in the other

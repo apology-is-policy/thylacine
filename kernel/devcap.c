@@ -722,8 +722,4 @@ struct Dev devcap = {
     .remove   = devcap_remove,
     .wstat    = devcap_wstat,
     .power    = devcap_power,
-
-    // A cap leaf is a message channel, not bytes at an offset; a mapping would
-    // only keep its Spoor past every close.
-    .no_file_mapping = true,
 };

@@ -11,6 +11,7 @@
 #include <thylacine/errno.h>
 #include <thylacine/exec.h>      // EXEC_USER_BURROW_BASE
 #include <thylacine/handle.h>
+#include <thylacine/image.h>     // image_cache_evict_idle_for_test
 #include <thylacine/territory.h>
 #include <thylacine/vivarium.h>  // VIV_PROT_READ
 #include <thylacine/vma.h>
@@ -560,7 +561,7 @@ static void ksw_shape_of(const char *buf, size_t got, struct ksw_shape *o) {
             if (o->cut || o->trunc || ksw_tokens(buf, ls, i, 0, &v) != 5) o->bad = true;
             if (o->rows < KSW_PIDS) o->pids[o->rows] = (int)v;
             o->rows++;
-        } else if (ksw_line_is(buf, ls, i, "(cut: more processes than one read holds)")) {
+        } else if (ksw_line_is(buf, ls, i, "(cut: more processes than the table holds)")) {
             if (o->cut || o->trunc) o->bad = true;
             o->cut = true;
         } else if (ksw_line_starts(buf, ls, i, "peak:")) {
@@ -826,7 +827,7 @@ void test_devctl_read_9p_sessions_format(void) {
         // One row is live, so a buffer that holds the summary and not a row cuts,
         // and one that does not hold the summary is the cut line alone.
         {
-            static const char cut[] = "(cut: more rows than one read holds)\n";
+            static const char cut[] = "(cut: more rows than the table holds)\n";
             char small[192];
             size_t s = devctl_format_9p_sessions_for_test(&r, small, sizeof small);
             TEST_ASSERT(s <= sizeof small && contains(small, s, "admission count="), "a short read keeps the summary");
@@ -1223,7 +1224,7 @@ struct prw_shape {
 
 static void prw_shape_of(const char *buf, size_t got, struct prw_shape *o) {
     static const char cutline[] =
-        "(cut: more processes than one read holds; /proc lists them all)\n";
+        "(cut: more processes than the table holds; /proc lists them all)\n";
     const size_t cl = sizeof cutline - 1;
     o->rows = 0;
     o->torn = false;
@@ -1532,7 +1533,7 @@ void test_devctl_procs_snapshot(void) {
     TEST_EXPECT_EQ(held_end, held0, "every last close freed its snapshot");
 }
 
-// /ctl backs no file mapping (Dev.no_file_mapping). A mapping is kept in the
+// /ctl backs no file mapping (Dev.may_back_mapping unset). A mapping is kept in the
 // Image cache with a Spoor reference, so an open /ctl/procs mapped once would
 // keep its snapshot page past every close. Measure first, assert last: a broken
 // gate leaves a mapping to drain before any assert returns.
@@ -1560,6 +1561,9 @@ void test_devctl_backs_no_mapping(void) {
     proc_free(p);
     spoor_clunk(f);
     u64 held_end = devctl_procs_snaps_held_for_test();
+    // A broken gate leaves an idle Image entry holding the file; measured above,
+    // dropped here so the image suite's empty-cache premise is not its casualty.
+    if (m > 0 || mf > 0) (void)image_cache_evict_idle_for_test();
 
     TEST_ASSERT(got == 1 && b[0] == 'P', "premise: the first read took a snapshot");
     TEST_EXPECT_EQ(held_read, held0 + 1, "premise: the open file holds its snapshot");

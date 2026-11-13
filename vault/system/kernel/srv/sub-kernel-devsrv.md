@@ -235,12 +235,13 @@ one immortal boot registry; kproc's `/srv` mount holds it forever) ·
 `srv_lookup_in`/`srv_commit`/`srv_abort`/`srv_proc_exit_notify` ·
 counters. `srv_registry_reset` is test-only (undeclared in the header).
 
-**No file mapping** (2026-11-13, audit round 30 F1). devsrv sets
-`no_file_mapping`, so both mapping cores answer `ENODEV`. A file mapping is kept
+**No file mapping** (2026-11-13, audit round 30 F1). devsrv leaves
+`may_back_mapping` unset (file mapping is opt-in, vote 113), so both mapping
+cores answer `ENODEV`. A file mapping is kept
 in the Image cache with a Spoor reference, past the mapper and past every
 close, so a mapped endpoint would hold its connection open: the service would
 keep a client that never leaves. An endpoint has no bytes at an offset to map.
-`devsrv.registered` asserts the flag.
+`devsrv.registered` asserts the flag is unset.
 
 ## Mechanism
 

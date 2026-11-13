@@ -3,7 +3,7 @@ id: sub-kernel-dev
 type: sub
 title: "The Dev vtable and the bestiary — the interface every namespace resolves through"
 parent: moc-kernel-namespace
-code: ["kernel/dev.c", "kernel/include/thylacine/dev.h", "kernel/devnone.c", "kernel/null.c", "kernel/zero.c", "kernel/full.c"]
+code: ["kernel/dev.c", "kernel/include/thylacine/dev.h", "kernel/devnone.c", "kernel/null.c", "kernel/zero.c", "kernel/full.c", "kernel/test/test_dev.c"]
 audit: light
 guarded-by: []
 validated-by: [gate-smp]
@@ -281,13 +281,23 @@ is matched on `dc` alone, the conservative direction. A NEW per-walk
 stamper that leaves the flag false makes the shed drop live mounts, which
 is why the flag is opt-in to the *unsafe* behaviour's accommodation and
 the assigners of `devno` are an enumerated set.
-`no_file_mapping` (2026-10-28) says this Dev's files back no file
-mapping: both mapping cores refuse it with `ENODEV`, after the exec floor
-(an executable mapping answers `EPERM` first, Linux's order) and before
-the Image cache.
-`devenv` sets it, because a variable has no version (the Image cache keys
-pages on `qid.vers`) and its open Spoor holds the environment it was opened
-in, which a cached mapping would keep alive past every handle.
+`may_back_mapping` says this Dev's files may back a file mapping; every
+other Dev's files are refused by both mapping cores with `ENODEV`, after
+the exec floor (an executable mapping answers `EPERM` first, Linux's
+order) and before the Image cache. It is opt-in, as `may_back_exec` is
+(operator vote 113, 2026-11-13; it replaced the opt-out `no_file_mapping`
+of 2026-10-28), and only dev9p and devramfs set it. The Image cache keys
+pages on (dc, devno, qid.path, qid.vers), holds a Spoor reference past the
+mapper and past every close, and serves a later mapper of the same key the
+bytes the first mapper's Spoor read. A Dev may opt in only when its files
+are sized content versioned by `qid.vers` and the same for every reader:
+devenv's variables have no version and their Spoor holds an environment,
+a `/ctl/procs` open file holds a snapshot page rendered for its reader, a
+pipe end holds its ring, a `/srv` endpoint its connection (audit round 30
+F1). `dev_register` refuses a Dev that sets `may_back_exec` without
+`may_back_mapping`: an exec image is served from the same cache, and the
+phenotype maps executables through the mapping cores. `dev.mapping_is_opt_in`
+holds the registered set to exactly dev9p and devramfs.
 
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.

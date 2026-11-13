@@ -63,6 +63,7 @@
 #include <thylacine/errno.h>
 #include <thylacine/exec.h>      // EXEC_USER_BURROW_BASE
 #include <thylacine/handle.h>
+#include <thylacine/image.h>     // image_cache_evict_idle_for_test
 #include <thylacine/territory.h>
 #include <thylacine/vivarium.h>  // VIV_PROT_READ
 #include <thylacine/vma.h>
@@ -877,7 +878,7 @@ void test_pipe_fstat_reports_fifo(void) {
     spoor_clunk(wr);
 }
 
-// A pipe backs no file mapping (Dev.no_file_mapping): a mapping is kept in the
+// A pipe backs no file mapping (Dev.may_back_mapping unset): a mapping is kept in the
 // Image cache with a Spoor reference, which would keep the end, and so its ring,
 // past both closes. Measure first, assert last.
 void test_pipe_backs_no_mapping(void) {
@@ -903,6 +904,9 @@ void test_pipe_backs_no_mapping(void) {
     spoor_clunk(rd);
     spoor_clunk(wr);
     u64 freed = pipe_total_freed() - freed_before;
+    // A broken gate leaves an idle Image entry holding the end; measured above,
+    // dropped here so the image suite's empty-cache premise is not its casualty.
+    if (m > 0 || mf > 0) (void)image_cache_evict_idle_for_test();
 
     TEST_ASSERT(fd >= 0 && fdx >= 0, "handle_alloc");
     TEST_EXPECT_EQ(m, -(s64)T_E_NODEV, "a map of a pipe end: ENODEV");

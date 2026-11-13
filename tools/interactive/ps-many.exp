@@ -30,7 +30,7 @@ source [file join [file dirname [info script]] lib.exp]
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-set cutline {\(cut: more processes than one read holds; /proc lists them all\)}
+set cutline {\(cut: more processes than the table holds; /proc lists them all\)}
 
 # Run `cmd` and collect group 1 of every line `rowre` matches.
 proc pids_of {cmd rowre leg} {

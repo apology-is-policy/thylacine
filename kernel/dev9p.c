@@ -3312,6 +3312,7 @@ void dev9p_init(void) {
 VISIBLE_IF_KERNEL_TESTS struct Dev dev9p = {
     // #217 F1: serves real file content -- may back executable pages.
     .may_back_exec = true,
+    .may_back_mapping = true,
     .dc       = DEV9P_DC,
     .name     = "9p",
     // A-3b: rwx enforcement ACTIVE. The reconciliation A-2d deferred is in place

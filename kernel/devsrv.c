@@ -1673,8 +1673,4 @@ struct Dev devsrv = {
     .remove   = devsrv_remove,
     .wstat    = devsrv_wstat,
     .power    = devsrv_power,
-
-    // A mapping would keep an endpoint, and so its connection, open past every
-    // close: the service would hold a client that never leaves.
-    .no_file_mapping = true,
 };

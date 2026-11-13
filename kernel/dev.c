@@ -62,6 +62,12 @@ int dev_register(struct Dev *d) {
         extinction("dev_register: .wstat_native without .perm_enforced "
                    "(#47: perm_wstat_check is the only wstat authority gate)");
 
+    // An exec image is served from the same Image cache a file mapping is, and
+    // the phenotype maps executable files through the mapping cores: a Dev that
+    // backs exec and refused mappings would be a contradiction (vote 113).
+    if (d->may_back_exec && !d->may_back_mapping)
+        extinction("dev_register: .may_back_exec without .may_back_mapping");
+
     // #98: readiness that lives in a server is all three remote slots or none,
     // and never beside .poll. The poll core calls the release and the arm of any
     // Dev whose snapshot slot it used, so a partial set is a NULL call at the

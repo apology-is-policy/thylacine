@@ -7192,7 +7192,7 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
         return -(s64)T_E_INVAL;
     }
     // After the exec floor, as Linux checks noexec before a missing mmap.
-    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+    if (!sp->dev->may_back_mapping) {                // Dev.may_back_mapping
         spoor_clunk(sp);
         return -(s64)T_E_NODEV;
     }
@@ -7414,7 +7414,7 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         return -(s64)T_E_PERM;
     }
     // After the exec floor, as in the non-fixed arm.
-    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+    if (!sp->dev->may_back_mapping) {                // Dev.may_back_mapping
         spoor_clunk(sp);
         return -(s64)T_E_NODEV;
     }

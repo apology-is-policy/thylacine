@@ -272,6 +272,12 @@ pages; witnesses
 `dev9p_priv_of`, `dev9p_create_errno` (#99), the cached-open/write-behind
 budget diagnostics + test bias.
 
+
+**File mappings** (operator vote 113, 2026-11-13). dev9p sets `may_back_mapping`
+beside `may_back_exec`: a served file is sized content versioned by `qid.vers`,
+which the Image cache keys on, so it may back a file mapping. File mapping is
+opt-in; only dev9p and devramfs set it.
+
 ## Mechanism
 
 ### The priv and its lifetimes

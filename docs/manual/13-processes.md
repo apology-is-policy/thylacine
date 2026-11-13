@@ -205,7 +205,7 @@ allocations reuse them.
 stops after the last whole row and ends with this line:
 
 ```text
-(cut: more processes than one read holds; /proc lists them all)
+(cut: more processes than the table holds; /proc lists them all)
 ```
 
 A table that does not end with that line holds every process the reader may
@@ -236,8 +236,8 @@ owner and by holders of `CAP_HOSTOWNER`.
 `/ctl/kstack` is readable by holders of `CAP_HOSTOWNER`. For each process it
 shows the deepest any of its kernel stacks has ever run, in bytes, and the
 thread that ran it, and it ends with `peak:`, the deepest on the system. When
-a process does not fit one read, the rows end with
-`(cut: more processes than one read holds)` and the peak still covers the
+a process does not fit the table, the rows end with
+`(cut: more processes than the table holds)` and the peak still covers the
 processes left out. The file examines a bounded amount of the system in one
 read. Past that it stops and says
 `(scan budget exhausted -- rows above are partial and peak is a LOWER BOUND)`.

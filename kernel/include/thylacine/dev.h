@@ -137,20 +137,22 @@ struct Dev {
     // `.stat_native != NULL` and the inference turned out to be wrong.
     bool         may_back_exec;
 
-    // no_file_mapping -- this Dev's files back no file mapping (mmap, its
-    // MAP_FIXED twin, burrow_map_file): both mapping cores refuse it with
-    // -T_E_NODEV, Linux's answer for a file whose driver has no mmap, after the
-    // argument, handle and exec checks (an exec request answers the exec floor's
-    // -T_E_PERM first: Linux checks noexec before mmap). A mapping is served
-    // from the Image cache, keyed on (dc, devno, qid.path, qid.vers) and holding
-    // a Spoor reference for as long as the entry is cached, so a file whose content
-    // changes without a qid.vers bump can serve old bytes to a later mapping,
-    // and whatever the Spoor keeps alive outlives every handle. Set it on any Dev
-    // whose open Spoor keeps state alive or whose bytes have no version: devenv
-    // (a variable has no version and its Spoor holds its Env), devctl (a
-    // /ctl/procs snapshot page), devpipe (the ring), devsrv (a connection) and
-    // devcap (a message channel).
-    bool         no_file_mapping;
+    // may_back_mapping -- this Dev's files may back a file mapping (mmap, its
+    // MAP_FIXED twin, burrow_map_file). Every other Dev's files are refused by
+    // both mapping cores with -T_E_NODEV, Linux's answer for a file whose driver
+    // has no mmap, after the argument, handle and exec checks (an exec request
+    // answers the exec floor's -T_E_PERM first: Linux checks noexec before mmap).
+    // A mapping is served from the Image cache, keyed on (dc, devno, qid.path,
+    // qid.vers) and holding a Spoor reference for as long as the entry is
+    // cached, past the mapper and past every close, and a later mapper of the
+    // same key is served the bytes the first one's Spoor read. So only a Dev
+    // whose files are sized content, versioned by qid.vers and the same for
+    // every reader, may opt in: dev9p and devramfs. Opt-in, as may_back_exec is,
+    // because a Dev whose open Spoor keeps state alive (a /ctl/procs snapshot, a
+    // pipe ring, a /srv connection, an /env variable's Env) or whose bytes
+    // depend on the reader must never be mappable by forgetting a flag (vote
+    // 113). A Dev that backs exec backs mappings too; dev_register enforces it.
+    bool         may_back_mapping;
 
     // devno_per_walker -- this Dev's walk stamps a devno that depends on WHO is
     // walking rather than on the instance walked (devenv: the calling Proc's

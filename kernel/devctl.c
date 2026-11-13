@@ -172,7 +172,7 @@ bool devctl_system_counters_readable(const struct Proc *reader) {
 // needs every Proc lists /proc -- a directory, with no such bound -- and reads
 // each status.
 #define PROCS_HEADER   "PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n"
-#define PROCS_CUT_LINE "(cut: more processes than one read holds; /proc lists them all)\n"
+#define PROCS_CUT_LINE "(cut: more processes than the table holds; /proc lists them all)\n"
 #define PROCS_CUT_LEN  (sizeof(PROCS_CUT_LINE) - 1u)
 
 struct procs_fmt_state {
@@ -374,7 +374,7 @@ enum { KSTACK_VISIT_WORDS = 128u };
 // the file is for.
 #define KSTACK_HEAD_MAX    (sizeof("usable:    4294967295\nguard:     4294967295\n\n" \
                                    "PID    NAME    PEAK    TID\n") - 1u)
-#define KSTACK_CUT_LINE    "(cut: more processes than one read holds)\n"
+#define KSTACK_CUT_LINE    "(cut: more processes than the table holds)\n"
 #define KSTACK_BUDGET_LINE "\n(scan budget exhausted -- rows above are partial and " \
                            "peak is a LOWER BOUND)\n"
 #define KSTACK_PEAK_MAX    (sizeof("\npeak:      4294967295    pid -2147483648" \
@@ -969,7 +969,7 @@ static bool format_9p_admission(struct ctl_9p_fmt *f) {
 // One read is all of this file a reader gets, and the session rows come last.
 // A render that left a row out says so on its last line, whose room no row may
 // take: rows that are missing are then never mistaken for rows that do not exist.
-#define P9S_CUT_LINE "(cut: more rows than one read holds)\n"
+#define P9S_CUT_LINE "(cut: more rows than the table holds)\n"
 #define P9S_CUT_LEN  (sizeof(P9S_CUT_LINE) - 1u)
 
 static size_t format_9p_sessions(const struct Proc *reader, char *buf, size_t cap) {
@@ -1431,9 +1431,4 @@ struct Dev devctl = {
     .remove   = devctl_remove,
     .wstat    = devctl_wstat,
     .power    = devctl_power,
-
-    // An open /ctl/procs keeps its snapshot page; a mapping would keep the open
-    // file, and so the page, past every close. A /ctl leaf's size is 0: no byte
-    // of it was ever mappable.
-    .no_file_mapping = true,
 };

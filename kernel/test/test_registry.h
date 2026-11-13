@@ -1276,6 +1276,7 @@ void test_devctl_counters_gated(void);         // IMPERIUM 11.3 item 10: owner/s
 void test_devctl_procs_rows_whole(void);       // a /ctl/procs row is committed whole
 void test_devctl_procs_snapshot(void);        // /ctl/procs: one rendering per open file
 void test_devctl_backs_no_mapping(void);      // /ctl: no mapping keeps a snapshot
+void test_dev_mapping_is_opt_in(void);        // vote 113: only dev9p + devramfs map
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);

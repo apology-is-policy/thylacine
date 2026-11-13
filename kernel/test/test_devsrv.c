@@ -94,7 +94,7 @@ void test_devsrv_registered(void) {
         "devsrv registered under dc='s'");
     TEST_EXPECT_EQ(dev_lookup_by_name("srv"), &devsrv,
         "devsrv registered under name=\"srv\"");
-    TEST_ASSERT(devsrv.no_file_mapping,
+    TEST_ASSERT(!devsrv.may_back_mapping,
         "devsrv backs no file mapping (a mapping would hold a connection open)");
 
     struct Spoor *root = devsrv.attach(NULL);

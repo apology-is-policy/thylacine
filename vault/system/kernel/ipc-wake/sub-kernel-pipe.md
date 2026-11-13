@@ -81,8 +81,8 @@ byte-transport under the 9P spoor-transport adapter.
   (one pipe, one inode; starts at 1 so the historical unset 0 stays
   distinguishable). `.seekable` stays false — fstat-able ≠ seekable
   (RW-4 R2-F2 decoupling, pinned by `sys_prw.pipe_not_seekable`).
-- `.no_file_mapping` (2026-11-13, audit round 30 F1): both mapping cores
-  answer `ENODEV` for a pipe end, as Linux does for a FIFO. A file mapping is
+- `.may_back_mapping` unset (2026-11-13, audit round 30 F1; file mapping is
+  opt-in since vote 113): both mapping cores answer `ENODEV` for a pipe end, as Linux does for a FIFO. A file mapping is
   kept in the Image cache with a Spoor reference, past the mapper and past
   every close, so a mapped end would keep its ring alive: up to 65536 uncharged
   rings per address space. A pipe has no bytes at an offset to map.
@@ -229,7 +229,7 @@ unregister.
 - `.seekable` must stay false and `size` must stay 0 (#96's two
   pinned properties).
 - The rollback ladder's aux-detach must precede the clunk.
-- `.no_file_mapping` must stay set: a mapped end outlives every close.
+- `.may_back_mapping` must stay unset: a mapped end outlives every close.
 
 ## Seams
 

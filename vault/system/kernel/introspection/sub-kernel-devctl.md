@@ -31,7 +31,7 @@ silently reinterpreted as credits.
 One read is the whole file. The render is bounded by the 4 KiB read buffer,
 connection rows first and session rows last. A row that does not fit is left
 out whole, and a render that left any row out ends with the line
-`(cut: more rows than one read holds)`, whose room no row may take, so a
+`(cut: more rows than the table holds)`, whose room no row may take, so a
 missing row is told apart from a row that does not exist. The line does not
 say how many are missing. The summary line is 133 bytes, a connection row 80
 to 110, a session row 105 to 115; the gate image's boot (15 connections, 10
@@ -320,7 +320,7 @@ without rows, for its peak (below).
 bytes, about sixty rows), not every Proc. A table that left a row out ends with one
 fixed line, `PROCS_CUT_LINE`:
 
-    (cut: more processes than one read holds; /proc lists them all)
+    (cut: more processes than the table holds; /proc lists them all)
 
 A short table with no sign reads as "no other Proc", and a gate that
 concludes that from a cut table is wrong without knowing it. The line always
@@ -407,8 +407,8 @@ pipe ring. It lives as long as a reference to the open file does. A descriptor
 is one (at most `PROC_HANDLE_MAX`, 1024, per Proc), a mount entry another (at
 most `PGRP_MOUNT_CAP`, 1024, per territory), and so is a Loom registration. A
 file mapping would be one too, kept in the Image cache past the mapper and past
-every close, one per mapping up to 65536 per address space: so devctl sets
-`no_file_mapping`, and both mapping cores answer `ENODEV` (a `/ctl` leaf's size
+every close, one per mapping up to 65536 per address space: so devctl leaves
+`may_back_mapping` unset (opt-in, vote 113), and both mapping cores answer `ENODEV` (a `/ctl` leaf's size
 is 0, so no byte of one was ever mappable; audit round 30 F1). When no page is
 free, the read fails with `ENOMEM` and nothing is kept.
 
@@ -445,7 +445,7 @@ Proc's row or a splice on every try.
 is held), asks both mapping cores to map it through a Proc's handles, drains
 and frees that Proc, and closes the file: both cores answer `ENODEV`, and the
 held count returns to where it began, so no Image entry kept the open file.
-Without the flag a mapping succeeds and the cached entry keeps the snapshot
+With the flag set a mapping succeeds and the cached entry keeps the snapshot
 past the close.
 
 `ps-many.exp`'s second leg is unchanged: `cat`'s first read (8 KiB) holds the
@@ -474,7 +474,7 @@ where the end begins, so the end always fits, and a buffer too small for the
 header and the end renders nothing. A table that left a row out says, after
 its rows:
 
-    (cut: more processes than one read holds)
+    (cut: more processes than the table holds)
 
 Unlike `/ctl/procs`, the walk does not stop there. `format_kstack_cb` goes on
 without rendering, so the peak is taken over every Proc the walk reached, its

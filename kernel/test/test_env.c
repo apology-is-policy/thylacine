@@ -822,7 +822,7 @@ void test_devenv_unlink_answers_its_errno(void) {
     env_free(p);
 }
 
-// A variable backs no file mapping (Dev.no_file_mapping). The open entry passes
+// A variable backs no file mapping (Dev.may_back_mapping unset). The open entry passes
 // every earlier gate of both mapping cores -- it is readable and its size is
 // known -- so ENODEV is that gate's answer and no other's. Measure first, assert
 // last: a broken gate would leave a mapping to drain before any assert returns.

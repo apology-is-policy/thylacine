@@ -1,9 +1,8 @@
 //! The process set, read the Plan 9 way: /proc's directory names every Proc and
 //! each /proc/<pid>/status is one Proc's row.
 //!
-//! /ctl/procs is the same table in one read, and one read holds only the rows
-//! that fit the kernel's buffer (the table ends with a cut line when some did
-//! not). A program that reasons over EVERY Proc -- a listing, a monitor, "is
+//! /ctl/procs is the same table in one file, and the table holds only the rows
+//! that fit one kernel page (it ends with a cut line when some did not). A program that reasons over EVERY Proc -- a listing, a monitor, "is
 //! there a Proc named X" -- reads the directory instead: its listing is whole at
 //! any size (ascending pids, resumed by cookie), and each status is rendered
 //! under the process-table lock, so a row is one instant of its Proc.
