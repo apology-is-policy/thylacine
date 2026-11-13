@@ -412,8 +412,9 @@ compositor never sees an error for a display that is about to return.
 Restoration is owed from the moment a takeover begins (`Seat.displaced`, set
 before `exclude_all_outputs`), not only once it completes: a takeover that
 fails part-way may already have disabled outputs or bound the trusted image.
-`Device::restore` needs only synchronous quiescence
-(`Gpu::synchronous_clear`), so neither a cursor queue poisoned on a live engine
+`Device::restore` needs only an engine that takes a synchronous command
+(`Gpu::takes_commands`: alive, no stall standing, no synchronous chain
+outstanding), so neither a cursor queue poisoned on a live engine
 nor a client's poisoned chain costs the display. Takeover itself asks that and an
 idle cursor queue (`Gpu::takeover_clear`, vote 50): a fenced chain, in flight or
 poisoned, cannot reach the trusted image, whose id `Objects::valid_id` refuses on
@@ -474,12 +475,28 @@ transfer cannot stop this loop for as long as its client queued; the command sta
 the engine, which revives when the chain retires, and what a client sent meanwhile is
 refused. A serving `cursor_command` stalls the same way. A chain past
 `FENCE_ABANDON_MS` is abandoned rather than poisoned: a well-formed late retirement
-frees the lane (`cursor_queue::Queue::abandon`). A restore that returns an error in
-FAILED (the seat's phase 4) is asked again every pass; in RESTORING (phase 3) any
-error from it, a stall included, fails the episode and so cancels its grant.
-Asking again while the engine is stalled is the intended wait. The defects, on the
-Open list below, are that FAILED asks a rebind the device REFUSED again with no
-fallback, and that RESTORING fails on a stall or on a refused rebind. Restoration
+frees the lane (`cursor_queue::Queue::abandon`). A restore says one of four things (`Device::restore`, `Restored`,
+`Unrestored`). `Rebound`: the compositor's last frame is bound again. `Blank`:
+scanout 0 is disabled, because the compositor had bound nothing or because its
+frame could not be bound again -- the ledger no longer holds the resource, or
+the device answered the bind or the flush with an error. Such a frame is given
+up (`presentation` becomes `None`; lictor says `the compositor's frame
+(resource N) was refused at the restore`), so a client that spoils its own
+frame, by detaching its backing on a device that wants one, loses the picture
+until it repaints and costs the episode nothing. `Waiting`: the device has not
+answered, because the engine takes no synchronous command or a stall began
+across the restore's commands (`gpu_api::met`); nothing is concluded from a
+stall, so RESTORING (the seat's phase 3) returns and asks again on the next
+pass, inside the five seconds the kernel gives it at END, and says `restore met
+a stall, waiting for the device` once a generation. `Lost`: the engine is dead,
+or the device refused the disable, which names nothing of a client's; only
+then does RESTORING fail the episode and so cancel its grant. FAILED (phase 4)
+asks again every pass after either error. The restore's binds drain no parked
+free (`Gpu::set_scanout_restore`, `Gpu::set_scanout_blob_restore`): those frees
+are a client's and wait for a client's next accepted bind, so one the device is
+slow to take cannot stand between an ended episode and its return. An episode
+that closes through its restore says `episode closed: frame rebound` or
+`episode closed: output blank`. Restoration
 stays owed until the
 kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
 exited before the commit), the seat fails and rebinds again before it
@@ -644,6 +661,13 @@ holds its retirement until the seat restores, so the restore must go through
 on the control queue alone (`Gpu::test_cursor_stall_next`). The third has the
 kernel's RESTORED refused after a completed restore: lictor must rebind again
 before the seat returns, and the next takeover must exclude and bind afresh.
+The shot before the last (`SeatShot::StallInRestore`, leg T) stalls the engine
+as an ended episode's restore begins: lictor must say the restore waits, the
+seat must not fail, and the episode must close with the frame rebound.
+`ls-graphical-sak` reads its whole transcript at the end and requires that no
+seat failed and that each of its four episodes closed with the frame rebound: a
+seat that fails at the restore recovers by itself, so nothing else in it would
+notice an episode whose grant was cancelled there.
 The fourth stalls the engine under the trusted scanout with the
 retirement withheld, so the engine dies at 30 s. The seat must recover with
 its display lost, and a key typed afterwards must draw lictor's
@@ -886,16 +910,20 @@ Open after that review:
   request in every build. The verb is now refused (`BadField`) without the
   feature, like the four `Test*` verbs beside it; nothing in the tree sends it
   (the backend runs the selftest itself at init).
-- The restore trusts what the compositor left on the device (audit round 25, on
-  main as well; OPEN). `DetachBacking` of the resource on the display is neither
-  refused nor reflected in the presentation, so the restore rebinds a resource the
-  2D device then refuses (by QEMU's source; not yet run in a guest); RESTORING
-  fails the episode after authentication, and FAILED asks the same refused rebind
-  again every pass with no bound, so the seat never returns for the boot.
-  Separately, RESTORING fails on a stall where the other phases wait: a pending
-  synchronous command, or a deferred free drained inside an Image rebind missing
-  its deadline, which fails the flush that follows (the disable and blob arms
-  return Ok over it). What the design holds, and these break: a client may delay a
+- The restore's answer to a refused frame and to a stall (the paragraph on
+  restoration above) is WRITTEN AND NOT YET BUILT OR RUN IN A GUEST. It answers
+  audit round 25: before it, `DetachBacking` of the resource on the display left
+  the restore rebinding a resource the 2D device refuses (by QEMU's source; not
+  yet run in a guest), RESTORING failed the episode after authentication and
+  FAILED asked the same refused rebind every pass with no bound, so the seat
+  never returned for the boot; and RESTORING failed on a stall where the other
+  phases wait. `DetachBacking` itself is still not refused: tapestryd calls it at
+  nine sites that were not read for this change, and the restore no longer
+  depends on what a client detaches. Owed before this item goes: the first build, a
+  compositor that detaches the displayed resource's backing in a guest, leg T,
+  and the plain scenario's closing check, each seen red without its fix. Not
+  witnessed and not planned to be: that the restore drains no free (read the
+  two `_restore` binds). What the design holds: a client may delay a
   command the broker issues for itself -- the exclusion, the trusted bind, the
   restore -- within the kernel's deadline, and may make a takeover fail before
   anything is granted (votes 30, 71, 72, 79); it must not make an authenticated

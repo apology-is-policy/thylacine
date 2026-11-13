@@ -78,3 +78,5 @@ source; not yet run in a guest); RESTORING fails the episode after authenticatio
 and FAILED retries the same refused rebind every pass, for the boot. RESTORING
 also fails on a stall, where the other phases wait it out. Both are in
 sub-lictor's Open list; corona owns the fix as its own chunk.
+
+The fix is written: see 055-the-seats-restore-to-astra.md.

@@ -11,6 +11,22 @@ pub enum Presentation {
     Image { resource: u32, width: u32, height: u32 },
     Blob { resource: u32, width: u32, height: u32, format: u32, stride: u32 },
 }
+/// How the seat's restore left scanout 0.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Restored {
+    /// The compositor's last frame is bound again.
+    Rebound,
+    /// Nothing is bound: there was no frame, or the device refused it.
+    Blank,
+}
+/// Why the seat's restore is not done.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Unrestored {
+    /// The device has not answered, because a stall stands: ask again.
+    Waiting,
+    /// The engine is dead, or the device refused to disable the scanout.
+    Lost,
+}
 struct Backing { resource: u32, _pin: Pin }
 /// The latch lever's size (`create 97 89`, tools/interactive/ls-gpu-dead.exp):
 /// only resources created at it can fire the lever, so a boot probe's
@@ -121,6 +137,9 @@ pub enum SeatShot {
     CursorAbandon,
     /// The kernel's RESTORED refused after a completed restore.
     RefuseRestored,
+    /// A controlq stall standing when the ordinary return's restore begins; the
+    /// device retires it.
+    StallInRestore,
     /// A controlq stall under the trusted scanout whose retirement is
     /// withheld: the engine dies.
     StallHeld,
@@ -374,20 +393,55 @@ impl Device {
     /// Only synchronous work holds it (GPU-DESIGN 4.5.15), so neither a cursor
     /// queue poisoned on a live engine nor a client's poisoned chain costs the
     /// display.
-    pub fn restore(&mut self) -> Result<(), Error> {
-        if !self.gpu.synchronous_clear() { return Err(Error::Hardware); }
-        match self.presentation {
-            Presentation::None => self.gpu.set_scanout(0, 0, 0),
-            Presentation::Image { resource, width, height } => {
-                self.check(resource, Kind::Resource)?;
-                self.gpu.set_scanout(resource, width, height)?;
-                self.gpu.flush(resource, 0, 0, width, height)
-            }
-            Presentation::Blob { resource, width, height, format, stride } => {
-                self.check(resource, Kind::Resource)?;
-                self.gpu.set_scanout_blob_then_flush(resource, width, height, format, stride)
-            }
+    ///
+    /// The frame is the client's, so whether it can be bound again is the
+    /// client's to spoil (a backing detached, on a device that wants one) and
+    /// is not the episode's to pay for: a frame the device REFUSES is given up
+    /// and the output left blank, which the compositor repaints as after any
+    /// episode. A stall is no answer, so nothing is concluded from one and the
+    /// caller asks again. Only the disable, which names nothing of a client's,
+    /// can leave the seat unrestored on a live engine.
+    pub fn restore(&mut self) -> Result<Restored, Unrestored> {
+        if self.gpu.engine_dead() { return Err(Unrestored::Lost); }
+        if !self.gpu.takes_commands() { return Err(Unrestored::Waiting); }
+        let stalls = self.gpu.stalls();
+        let frame = match self.presentation {
+            Presentation::None => None,
+            Presentation::Image { resource, width, height } =>
+                Some((resource, self.rebind_image(resource, width, height))),
+            Presentation::Blob { resource, width, height, format, stride } =>
+                Some((resource, self.rebind_blob(resource, width, height, format, stride))),
+        };
+        match frame {
+            Some((_, Ok(()))) => return Ok(Restored::Rebound),
+            Some((resource, Err(_))) => match met(self.gpu.engine_dead(), stalls, self.gpu.stalls()) {
+                Met::Dead => return Err(Unrestored::Lost),
+                Met::Stalled => return Err(Unrestored::Waiting),
+                Met::Refused => {
+                    self.presentation = Presentation::None;
+                    crate::backend::diagnostic(&alloc::format!(
+                        "lictor: the compositor's frame (resource {}) was refused at the restore; the seat returns to a blank output\n",
+                        resource));
+                }
+            },
+            None => {}
         }
+        match self.gpu.set_scanout_restore(0, 0, 0) {
+            Ok(()) => Ok(Restored::Blank),
+            Err(_) => Err(match met(self.gpu.engine_dead(), stalls, self.gpu.stalls()) {
+                Met::Stalled => Unrestored::Waiting,
+                Met::Dead | Met::Refused => Unrestored::Lost,
+            }),
+        }
+    }
+    fn rebind_image(&mut self, resource: u32, width: u32, height: u32) -> Result<(), Error> {
+        self.check(resource, Kind::Resource)?;
+        self.gpu.set_scanout_restore(resource, width, height)?;
+        self.gpu.flush(resource, 0, 0, width, height)
+    }
+    fn rebind_blob(&mut self, resource: u32, width: u32, height: u32, format: u32, stride: u32) -> Result<(), Error> {
+        self.check(resource, Kind::Resource)?;
+        self.gpu.set_scanout_blob_restore(resource, width, height, format, stride)
     }
     /// The armed latch lever, asked of each pending request before the server
     /// admits it: a retirement of a resource created at `TEST_LATCH_SIZE`
@@ -431,17 +485,18 @@ impl Device {
             return Some(shot);
         }
         let shot = match self.test_seat_shots {
-            12 => SeatShot::StallAfterExclusion,
-            11 => SeatShot::StallInPaint,
-            10 => SeatShot::HoldAfterExclusion,
-            9 => SeatShot::RefuseBind,
-            8 => SeatShot::BehindReadback,
-            7 => SeatShot::StallInFrame,
-            6 => SeatShot::RefuseFrame,
-            5 => SeatShot::HoldRestore,
-            4 => SeatShot::CursorStall,
-            3 => SeatShot::CursorAbandon,
-            2 => SeatShot::RefuseRestored,
+            13 => SeatShot::StallAfterExclusion,
+            12 => SeatShot::StallInPaint,
+            11 => SeatShot::HoldAfterExclusion,
+            10 => SeatShot::RefuseBind,
+            9 => SeatShot::BehindReadback,
+            8 => SeatShot::StallInFrame,
+            7 => SeatShot::RefuseFrame,
+            6 => SeatShot::HoldRestore,
+            5 => SeatShot::CursorStall,
+            4 => SeatShot::CursorAbandon,
+            3 => SeatShot::RefuseRestored,
+            2 => SeatShot::StallInRestore,
             1 => SeatShot::StallHeld,
             _ => return None,
         };
@@ -862,7 +917,7 @@ impl Device {
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
                     if !self.test_declared { return Err(self.test_undeclared(0, crate::gpu_api::TEST_LEVERS_WORD)); }
-                    self.test_latch_shots = 2; self.test_seat_shots = 12; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 13; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     super::intake::test::arm();
                     ().put(&mut out);

@@ -2,7 +2,7 @@
 //! of normal compositor RPC progress: a parked GPU request cannot stall SAK.
 use alloc::{collections::VecDeque, vec::Vec};
 use crate::{endpoint as ep, keymap::{self, Mods}, model::{Model, State}};
-use super::{device::Device, screen::Screen, input::{InputDev, RawInputEvent, Report, EV_KEY}, intake::{self, Entry}};
+use super::{device::{Device, Restored, Unrestored}, screen::Screen, input::{InputDev, RawInputEvent, Report, EV_KEY}, intake::{self, Entry}};
 #[cfg(feature = "test-mode")]
 use super::device::SeatShot;
 
@@ -41,6 +41,8 @@ pub struct Seat {
     renewed: Option<(u64, libthyla_rs::time::Instant)>,
     /// The generation whose takeover was reported held by a cursor lane out of service.
     lane_noted: Option<u64>,
+    /// The generation whose restore was reported waiting behind a stall.
+    restore_waited: Option<u64>,
     /// A generation's first sight in QUIESCING: the reply to the key that made the
     /// chord, so this is the kernel's own start to within one call.
     chord: Option<(u64, libthyla_rs::time::Instant)>,
@@ -91,6 +93,9 @@ pub struct Seat {
     /// Keep the next ordinary return's restore waiting, with the keys left in the ring.
     #[cfg(feature = "test-mode")]
     test_hold_restore: bool,
+    /// Stall the engine as the next ordinary return's restore begins.
+    #[cfg(feature = "test-mode")]
+    test_stall_restore: bool,
     /// The generation whose shot is taken: a takeover that starts over after a
     /// stall is the same takeover.
     #[cfg(feature = "test-mode")]
@@ -395,6 +400,7 @@ impl Seat {
                         self.test_stall_frame |= shot == Some(SeatShot::StallInFrame);
                         screen.test_refuse_frame = shot == Some(SeatShot::RefuseFrame);
                         self.test_hold_restore |= shot == Some(SeatShot::HoldRestore);
+                        self.test_stall_restore |= shot == Some(SeatShot::StallInRestore);
                     }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.
@@ -466,7 +472,28 @@ impl Seat {
                 } else {
                     None
                 };
-                if device.restore().is_err() { self.fail("normal scanout restoration"); return; }
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.test_stall_restore) {
+                    let stalled = device.gpu.test_latch_now(false);
+                    super::diagnostic(&alloc::format!(
+                        "lictor: restore shot: a synchronous chain stalled ahead of the restore stalled={} generation={}\n",
+                        stalled as u8, self.generation));
+                }
+                let restored = match device.restore() {
+                    Ok(restored) => restored,
+                    // A stall is other work ahead of the rebind, not an answer from the
+                    // device: the next pass asks again, inside the kernel's five seconds.
+                    Err(Unrestored::Waiting) => {
+                        if self.restore_waited != Some(self.generation) {
+                            self.restore_waited = Some(self.generation);
+                            super::diagnostic(&alloc::format!(
+                                "lictor: restore met a stall, waiting for the device generation={}\n", self.generation));
+                        }
+                        return;
+                    }
+                    Err(Unrestored::Lost) => { self.fail("normal scanout restoration"); return; }
+                };
+                let generation = self.generation;
                 screen.deactivated();
                 // The trusted scanout is down; restoration stays owed until
                 // the kernel acknowledges it.
@@ -482,6 +509,8 @@ impl Seat {
                 if refused || ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
                 self.adopt(&m); self.displaced = false;
                 self.drain_episode_tail(inputs);
+                super::diagnostic(&alloc::format!("lictor: episode closed: {} generation={}\n",
+                    if restored == Restored::Rebound { "frame rebound" } else { "output blank" }, generation));
             }
             _ => {
                 // The kernel already cancelled any grant and scrubbed the key

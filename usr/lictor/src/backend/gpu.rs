@@ -4266,16 +4266,22 @@ impl Gpu {
     }
 
     /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout). The
-    /// broker's own bind -- the seat's restore, the trusted image -- which no
-    /// lever reaches.
+    /// broker's own bind of the trusted image, which no lever reaches.
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
-        self.set_scanout_as(resource_id, w, h, false)
+        self.set_scanout_as(resource_id, w, h, false, true)
     }
     /// A client's bind: the one the self-test lever reaches.
     pub fn set_scanout_client(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
-        self.set_scanout_as(resource_id, w, h, true)
+        self.set_scanout_as(resource_id, w, h, true, true)
     }
-    fn set_scanout_as(&mut self, resource_id: u32, w: u32, h: u32, client: bool) -> Result<(), Error> {
+    /// The seat's restore: the broker's bind and nothing else, which no lever
+    /// reaches. The frees an accepted bind lets go are a client's, so they wait
+    /// for a client's next accepted bind: one the device is slow to take would
+    /// otherwise stand between an authenticated episode and its return.
+    pub fn set_scanout_restore(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.set_scanout_as(resource_id, w, h, false, false)
+    }
+    fn set_scanout_as(&mut self, resource_id: u32, w: u32, h: u32, client: bool, drain: bool) -> Result<(), Error> {
         self.cmd_seq = self.cmd_seq.wrapping_add(1);
         self.last_scanout_seq = self.cmd_seq;
         let req_va = self.req(REQ_OFF)?;
@@ -4303,7 +4309,9 @@ impl Gpu {
             VIRTIO_GPU_RESP_OK_NODATA,
         );
         if r.is_ok() {
-            self.drain_condemned(resource_id);
+            if drain {
+                self.drain_condemned(resource_id);
+            }
         } else {
             self.condemn_if_stalled(resource_id, stalls);
         }
@@ -4401,6 +4409,31 @@ impl Gpu {
         format: u32,
         stride: u32,
     ) -> Result<(), Error> {
+        self.blob_then_flush(resource_id, w, h, format, stride, true)
+    }
+
+    /// The seat's restore of a blob frame: as `set_scanout_restore`, the pair
+    /// and no free.
+    pub fn set_scanout_blob_restore(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+    ) -> Result<(), Error> {
+        self.blob_then_flush(resource_id, w, h, format, stride, false)
+    }
+
+    fn blob_then_flush(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+        drain: bool,
+    ) -> Result<(), Error> {
         let req_va = self.req(REQ_OFF)?;
         let req2_va = self.req(REQ2_OFF)?;
         unsafe {
@@ -4420,7 +4453,9 @@ impl Gpu {
                 }
                 // Same drain obligation as set_scanout_blob (round-3 F2):
                 // an accepted blob bind changes what the display names.
-                self.drain_condemned(resource_id);
+                if drain {
+                    self.drain_condemned(resource_id);
+                }
                 Ok(())
             }
             Ok(_) => Err(Error::Hardware),
@@ -5007,7 +5042,7 @@ impl Gpu {
 
     /// The engine can stage and publish a synchronous command now. A refusal
     /// made on this answer is a KNOWN outcome: nothing reached the device.
-    fn takes_commands(&self) -> bool {
+    pub fn takes_commands(&self) -> bool {
         !(self.ctrl.refusing() || self.ctrl.sync_pending || self.ctrl.sync2_pending)
     }
 
