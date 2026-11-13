@@ -6333,6 +6333,11 @@ impl Comp {
             Ok(None) => return Followed::NoDisplay,
             Err(_) => return Followed::Failed(E_IO),
         };
+        // A shot aimed for another display is not this one's.
+        #[cfg(feature = "test-mode")]
+        if (host_w, host_h) != self.test_stall_host {
+            self.test_stall_step = None;
+        }
         let Some((w, h)) = self.mode_for_host(host_w, host_h) else {
             say!("tapestryd: no mode for a display of {}x{}; {}x{} stands",
                 host_w, host_h, self.gpu.width, self.gpu.height);
@@ -10194,11 +10199,19 @@ impl Comp {
         for code in 0..KEYCODE_SPAN {
             if self.key_owner[code] != 0 { self.key_event(code as u16, 0, 0, 0); }
         }
+        self.buttons_dropped();
+        self.key_owner.fill(0); self.chord_down.fill(0);
+        self.comp_repaint_pending = true;
+    }
+
+    /// A pointer device's stream lost events (SYN_DROPPED): a release may
+    /// have been among them, so every button still held is let go, which
+    /// also ends a divider drag. The pointer's position is left alone.
+    pub fn buttons_dropped(&mut self) {
         for button in 0..BTNCODE_SPAN {
             if self.btn_owner[button] != 0 { self.ptr_btn(BTN_BASE + button as u16, false, 0); }
         }
-        self.key_owner.fill(0); self.btn_owner.fill(0); self.chord_down.fill(0);
-        self.comp_repaint_pending = true;
+        self.btn_owner.fill(0);
     }
 
     /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).

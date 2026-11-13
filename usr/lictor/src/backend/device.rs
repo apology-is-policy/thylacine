@@ -50,6 +50,15 @@ pub struct Device {
     /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
     #[cfg(feature = "test-mode")]
     test_stall_shots: u8,
+    /// The compositor's unbind drill (`ArmScanoutDisableRefusal`): its own
+    /// next display disable is refused without being issued, so its
+    /// condemn/defer/drain chain has a real driver. Only the client's
+    /// `SetScanout` reads it. `restore` never does: a lever of the
+    /// compositor's that reached the trusted path's own disable would let it
+    /// fail a restoration, and with it the grant the user had just made.
+    disable_drill: bool,
+    /// The last client disable refused was the drill's, not the device's.
+    drill_refused: bool,
 }
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
@@ -71,7 +80,7 @@ impl Device {
         gpu.begin_serving();
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
-            refused_retirements: 0,
+            refused_retirements: 0, disable_drill: false, drill_refused: false,
             #[cfg(feature = "test-mode")] test_declared: false,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
@@ -303,12 +312,11 @@ impl Device {
                 result.put(&mut out);
             }
             Request::ArmScanoutDisableRefusal => {
-                let result = self.gpu.arm_scanout_disable_refusal();
-                result.put(&mut out);
+                self.disable_drill = true;
+                ().put(&mut out);
             }
             Request::TakeInjectedRefusal => {
-                let result = self.gpu.take_injected_refusal();
-                result.put(&mut out);
+                core::mem::replace(&mut self.drill_refused, false).put(&mut out);
             }
             Request::CondemnedCount => {
                 let result = self.gpu.condemned_count();
@@ -447,7 +455,14 @@ impl Device {
             }
             Request::SetScanout { resource_id, w, h } => {
                 if resource_id != 0 { self.ordinary_resource(resource_id)?; }
-                let result = self.gpu.set_scanout(resource_id, w, h);
+                // The drill's refusal is the device's as the client sees it,
+                // and nothing is issued.
+                let result = if resource_id == 0 && core::mem::replace(&mut self.disable_drill, false) {
+                    self.drill_refused = true;
+                    Err(Error::Hardware)
+                } else {
+                    self.gpu.set_scanout(resource_id, w, h)
+                };
                 if result.is_ok() { self.presentation = if resource_id == 0 { Presentation::None } else { Presentation::Image { resource: resource_id, width: w, height: h } }; }
                 result.put(&mut out);
             }

@@ -107,8 +107,10 @@ processes that paint chrome and glyphs, and what the bakes need.
   4) beats everything until it is replaced or put down; `scale auto`
   puts it down and re-derives. An override is the seat's, not a
   session's: the compositor keeps it across a logout, so every session
-  states its scale at its start (section 6) and the override of the one
-  before it ends there. The user's `/env/HALCYON_SCALE` is not a third
+  that declares itself states its scale at its start (section 6) and the
+  override of the one before it ends there; one that does not, or whose
+  statement is refused, leaves it standing, as the login screen between
+  two sessions does. The user's `/env/HALCYON_SCALE` is not a third
   source: the session compositor reads it at start and WRITES the verb
   (section 6).
 - **The platform's declaration** (SC-5, 2026-09-08): `thylacine.scale=<pct>`

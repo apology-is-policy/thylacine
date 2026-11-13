@@ -289,9 +289,11 @@ The rules that keep this out of the trusted path's critical section:
   possibly still there. It is let go of, and that answered for, before it is
   made again; until then the screen stays as it is. The release is always the
   device's to answer, never one the driver has put off for later. One that
-  was not answered is asked again six times, at the session's waits and
-  counted from the making that left it, and a following that is given up on
-  lets go of what its last making may have left, once, there and then. What
+  was not answered is asked again at up to six of the session's waits,
+  counted from the making that left it (a wait whose own query of the
+  display is not answered asks nothing), and a following that is given up
+  on with the engine live lets go of what its last making may have left,
+  once, there and then. What
   is still not answered for after that is the device's until the display
   next changes: an asking the device does not answer is a stall, which holds
   every client's commands, so it is not made without end.

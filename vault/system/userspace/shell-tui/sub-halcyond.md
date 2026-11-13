@@ -2118,8 +2118,8 @@ peak misstated (zune holds the inflated stream beside its output).
 
 ## The session states its scale (2026-11-13)
 
-`request_env_scale` writes the gated `scale` verb once at every session's
-start, after the declaration, whatever `/env/HALCYON_SCALE` holds
+`request_env_scale` writes the gated `scale` verb once at the start of every
+session that declared itself, after the declaration, whatever `/env/HALCYON_SCALE` holds
 (HALCYON-SCALE 6): `scale <pct>` for one of the five values, `scale auto` for
 no word, an empty one or `auto`, and `scale auto` with a line said for anything
 else. The rule is `libhalcyon::scale::stated`, pure and host-tested
@@ -2138,17 +2138,22 @@ had no sender. A session now puts the last one's override down by stating its
 own. `request_env_motion` beside it is sent on the same ground.
 
 What it does not do. The login screen between two sessions keeps the last
-override. A session compositor that is started again states `scale auto`
+override, and so does a session that is not declared (`connect`), whose
+declaration is lost before the verb, or whose statement is refused: it states
+nothing. A session compositor that is started again states `scale auto`
 again, which puts down a chord's step of that same session.
 
 `tools/interactive/ls-halcyon-scale-session.exp` drives it: one user's two
 sessions, Super+= to 125 in the first, and the second must make the compositor
 say `scale 125 -> 100 (auto)` and begin at 100. Against a scripted guest the
-scenario reads as wanted in 18 cases, 16 of them faults. NOT YET RUN IN A
-GUEST. Whether the verb is admitted where it is sent has the motion verb's
-word for it and no more (sent at the same point under the same rule, and a
-real boot's log shows it forwarded). The `scale <pct>` arm has run nowhere but
-in the host test, since nothing sets the variable.
+scenario reads as wanted in 18 cases, 16 of them faults. In a guest
+(2026-11-13, a5f56dd09) it ran green: the verb is admitted at a session's
+start, one Super+Shift+Q logged the first session out, and the second said
+`tapestryd: scale 125 -> 100 (auto)` and `halcyond: scale auto requested
+(/env/HALCYON_SCALE absent)` and began at 100; with the statement taken out
+(a control bake that also kept the pointer's base) the second session began
+at 125. The `scale <pct>` arm has run nowhere but in the host test, since
+nothing sets the variable.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

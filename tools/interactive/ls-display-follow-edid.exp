@@ -108,12 +108,13 @@ expect_before {
 }
 set timeout $lc_boot_timeout
 set what "the boot's first mode"
+# One pattern: the line said first is the one judged.
 expect {
-    -re {tapestryd: mode 1728x1080 for a display of 3456x2160} {
+    -re {tapestryd: (mode 1728x1080 for a display of 3456x2160|serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\))} {
+        if {[string match "serving*" $expect_out(1,string)]} {
+            lc_fail "the compositor serves $expect_out(2,string) with no fitted mode said before it"
+        }
         lc_step "saw: the first mode is fitted"
-    }
-    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} {
-        lc_fail "the compositor serves $expect_out(1,string) with no fitted mode said before it"
     }
     timeout {
         lc_fail "the boot did not get to a fitted mode"
@@ -125,11 +126,11 @@ expect {
 set what "the boot's scale"
 set said ""
 expect {
-    -re {tapestryd: scale (\d+) \(([a-z]+)\)} {
-        set said "$expect_out(1,string) ($expect_out(2,string))"
-    }
-    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} {
-        lc_fail "the compositor serves $expect_out(1,string) with no scale said before it"
+    -re {tapestryd: (scale (\d+) \(([a-z]+)\)|serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\))} {
+        if {[string match "serving*" $expect_out(1,string)]} {
+            lc_fail "the compositor serves $expect_out(4,string) with no scale said before it"
+        }
+        set said "$expect_out(2,string) ($expect_out(3,string))"
     }
     timeout {
         lc_fail "the compositor never said its scale"

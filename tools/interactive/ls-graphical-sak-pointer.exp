@@ -36,6 +36,18 @@
 # screen's Enter would be a mark said before the motion, which is why the
 # positions come first and the key after them.
 #
+# What it cannot see. While the episode is on, the compositor's pass sits in
+# a request the seat's owner parks (the logs say so), so no drain is read
+# then: the leg during the episode holds because of that, not because the
+# compositor hands a drain at a phase that is not 0 to no program, and that
+# rule (`SeatEpoch`'s `Episode` and `away`) has host tests and mutants only.
+# The owner's first reply after the return carries no events (the restoring
+# arm clears them), so the reading that finds the seat back never comes with
+# this scenario's positions, and a compositor that handed a drain's events
+# on before reading its seat would pass too. The fixture says motion, Enter
+# and Escape: another key, a button, a release, or a program other than the
+# focused one would go unseen.
+#
 # Requires the session image:
 #   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]

@@ -226,9 +226,13 @@ then the lever says the query retires past its deadline, the event is said
 not finished and to be asked again, and the second asking is followed at 200.
 With the scale derived only after the answer the lever's line comes first,
 and the scenario fails there. Against a scripted guest it reads as wanted in
-15 cases, 13 of them faults. NOT YET RUN IN A GUEST: the order of the
-compositor's lines is taken from a real follow under a declaration and a real
-stall of a bind, and no run has had both.
+17 cases, 15 of them faults. In a guest (2026-11-13, a5f56dd09) it ran green
+in the order it reads, the stalled query's own line being `tapestryd: gpu
+GET_EDID submit error`, and with the derivation moved after the EDID's answer
+it was red with `the EDID's query was reached before the scale changed`. Its
+boot's two order checks are one pattern each since round R3 F7: as two, the
+wanted line's pattern, listed first, passed a `serving` line said before it
+in the same read.
 
 Tests. The rule, on a host (`own_pct`, `carried_pct` and `nearest_pct`,
 [[sub-libhalcyon]]). The boot's use of it and `derive_scale`'s, in a guest:
@@ -563,8 +567,10 @@ the bind of the next 2D switch to direct, which is the one that follows the
 change, and one for a host 1277 high stalls the EDID query the followed change
 ends with (`StallStep::Edid`, the shot taken in `display_read` after a
 declared scale is derived; `ls-display-follow-edid.exp`'s). A shot is not kept
-for another display: the next aim clears one that found no step, and so does a
-change that fails. Its legs:
+for another display: a display event for another host clears a pending one,
+the next aim clears one that found no step, and so does a change that fails.
+Until round R3 F8 an aim whose change ended before its step (the EDID's, when
+the bind did not yet hold) could fire at a later display's step. Its legs:
 
 - A, from the direct state: the bind on entering the composed state is not
   answered. Wanted, in order: `BIND FAILED`, `mode WxH is set; the display is
@@ -3977,15 +3983,27 @@ pressed its own Enter first, read the kept Enter's mark as that one, and
 failed a step later on a motion of 40 0. THE FORM THAT READS EVERY LINE IS
 NOT YET RUN IN A GUEST; against a scripted guest it reads as wanted in 14
 cases, 12 of them faults. No scenario makes the reading that finds the seat
-back a pointer drain's.
+back a pointer drain's. Its leg during the episode is structural: in this
+harness the pass sits in a request Lictor parks for the whole episode, so no
+drain is read at a phase that is not 0, and the rule's `Episode` arm and
+`away` have no guest witness. Lictor's first reply after the return is empty,
+so the scenario's positions never come with the reading of the return, and a
+pass that handed a drain's events on before reading its seat would pass it
+too (round R3 F5; the scenario's header says so).
 
 A drain the broker does not answer is said once (`tapestryd: the broker did
 not answer the keyboard's drain; its input is not read`); the compositor
 goes on without that device, as it did before in silence. The
 keyboard's `SYN_DROPPED` reaches `seat_resumed` as well and costs the tablet
-one position's motion. A dropped batch of the tablet's own is left as it
-is: the travel it lost is the person's, made for the same program, and the
-next position's difference is its sum.
+one position's motion. A dropped batch of the tablet's own keeps its motion:
+the travel it lost is the person's, made for the same program, and the next
+position's difference is its sum. Its buttons do not keep: a release may have
+been among what was dropped, so the device's `SYN_DROPPED` lets go of every
+button still held (`Comp::buttons_dropped`, the button half of
+`seat_resumed`), which ends a divider drag too, and the mouse's does the same.
+Until round R3 F6 only the keyboard's reset anything, and a release lost in a
+pointer's dropped batch left the button held, or a divider drag taking every
+motion until Escape. No guest makes a pointer's batch overflow.
 
 What this does not order: the loop drains the tablet and then the mouse in
 each wake, so a position and motion that reach it within one wake are taken

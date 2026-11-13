@@ -657,6 +657,11 @@ impl Driver for Tapestryd {
                         }
                         EV_SYN => {
                             commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                            if ev.code == 3 {
+                                #[cfg(feature = "test-mode")]
+                                say!("tapestryd: pointer reset (SYN_DROPPED)");
+                                self.comp.buttons_dropped();
+                            }
                         }
                         EV_KEY if ev.code >= BTN_LEFT => {
                             // A button click must land AT its position even
@@ -707,7 +712,14 @@ impl Driver for Tapestryd {
                     match ev.etype {
                         EV_REL if ev.code == REL_X => dx = dx.saturating_add(ev.value as i32),
                         EV_REL if ev.code == REL_Y => dy = dy.saturating_add(ev.value as i32),
-                        EV_SYN => commit(&mut self.comp, &mut dx, &mut dy),
+                        EV_SYN => {
+                            commit(&mut self.comp, &mut dx, &mut dy);
+                            if ev.code == 3 {
+                                #[cfg(feature = "test-mode")]
+                                say!("tapestryd: pointer reset (SYN_DROPPED)");
+                                self.comp.buttons_dropped();
+                            }
+                        }
                         EV_KEY if ev.code >= BTN_LEFT => {
                             commit(&mut self.comp, &mut dx, &mut dy);
                             self.comp.ptr_btn(ev.code, ev.value != 0, mask);

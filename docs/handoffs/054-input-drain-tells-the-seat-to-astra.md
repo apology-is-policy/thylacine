@@ -69,3 +69,10 @@ for. Nothing in Lictor changed for it.
 - The witness is `tools/interactive/ls-graphical-sak-pointer.exp`, with a fixture in the battery
   (`tapestry-battery --rel-watch`). Its guest run is recorded in `docs/JOURNAL.md` under
   2026-11-13.
+
+## Corrected later on 2026-11-13 (round R3 F4)
+
+"Every arm of `Seat::step` for a phase that is not 0 clears again" (above) is not so: the
+exclusive arm (phase 2) clears nothing. The property stands because `Seat::input` clears every
+input at the end of a call whose phase is not 0 (`seat.rs`, the end of `input`). Round R3 also
+found a lever of yours reachable by the compositor in every image; handoff 055 has it.

@@ -71,3 +71,10 @@ a create made and an attach refused) until the display next changed.
 QEMU's `max_hostmem` refuses the trusted image seven times, and the scenario reads the two
 releases after the seventh and a next display made with nothing to let go of. The first has no
 test: nothing stalls one of Lictor's own commands.
+
+## Corrected later on 2026-11-13 (round R3 F2)
+
+The six askings are at most six. A wait whose own query of the display is not answered asks
+nothing, and the give-up's release is made only with the engine live, as the bullet above says.
+`docs/GRAPHICAL-SAK-OWNERSHIP.md` said six askings and a release at the give-up without those two
+conditions; it says them now.

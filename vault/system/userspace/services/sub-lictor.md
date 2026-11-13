@@ -637,6 +637,21 @@ declare the word; a compositor made to ask on a boot that declares nothing
 says `test-latch-dead arm REFUSED by the broker`; and with the refusal taken
 out of Lictor the same compositor arms, and the first secure attention fails
 at an injected stall and recovers with nothing conferred.
+
+The unbind drill is the compositor's alone. `ArmScanoutDisableRefusal` makes
+the client's own next display disable (`SetScanout` naming resource 0) report
+the device's refusal without the command being issued, so
+`warp_img_selftest` drives its condemn, defer and drain chain with a real
+refusal, and `TakeInjectedRefusal` says whether the last refusal was the
+drill's. Both are read in `Device`'s `SetScanout` arm and nowhere else, and
+the drill needs no word on the boot line, because what it refuses is the
+caller's own request. Until 2026-11-13 it sat in `Gpu::set_scanout`, which
+`Device::restore` calls to put the display back after an episode: a
+compositor that left the presentation at none with the drill armed failed
+the restoration, and the seat's failure cancelled the grant the user had just
+made, in every image (round R3 F1). NOT YET RUN IN A GUEST: a compositor made
+to keep the display disabled and the drill armed is to fail no seat, and with
+the drill read in `restore` again the same compositor is to fail it.
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
 resource can still retire. tapestryd aims three at the
@@ -727,8 +742,9 @@ key content. The witness is `tools/interactive/ls-graphical-sak-refused.exp`.
 A drain is answered with the seat it is of. `InputDrain`'s reply is `gpu_api::Drained`: the
 seat's generation and phase, and the device's events, put together in `main.rs` by the thread
 that gathers them. `Seat::input` gathers nothing for the compositor while the phase is not 0
-and lets go of what was not drained when an episode begins, and every arm of `Seat::step` for
-a phase that is not 0 lets go of it again. So the events of a reply at phase 0 are all of
+and lets go of what was not drained when an episode begins, and it lets go of all of it at
+the end of every call made at such a phase (`Seat::step`'s beginning and restoring arms clear
+as well; its exclusive arm does not). So the events of a reply at phase 0 are all of
 that reply's generation, and a client that deals with the pair before it hands the events on
 has no episode between its reading and its events. Until 2026-11-13 the reply was the events
 alone and the compositor asked `SeatState` beside it: two requests, neither ever parked, and

@@ -2074,14 +2074,6 @@ pub struct Gpu {
     /// Sticky: the park list overflowed, so EVERY unref defers until the next
     /// drain. Over-deferral is the safe direction (round-3 F2).
     condemned_overflowed: bool,
-    /// Self-test lever: fail the next display disable without issuing it.
-    fail_next_scanout_disable: bool,
-    /// Set when the lever (not the device) produced the last refusal, so the
-    /// report can SAY it was injected. The code path stays identical -- that
-    /// is what makes the drill valid -- but the LOG must distinguish, because
-    /// the gate keys on a real refusal being absent and the self-test now
-    /// deliberately produces one every boot.
-    injected_refusal: bool,
     /// Condemnations dropped because the list was full. These leak for the
     /// process's life -- the safe direction (a leaked resource id costs
     /// memory; a freed one the display still scans is a UAF).
@@ -2300,8 +2292,6 @@ impl Gpu {
             collect_retirements: false,
             retired_resources: alloc::vec::Vec::new(),
             condemned_overflowed: false,
-            fail_next_scanout_disable: false,
-            injected_refusal: false,
             condemned_lost: 0,
             num_capsets: 0,
             capset_blob: alloc::vec::Vec::new(),
@@ -3186,24 +3176,6 @@ impl Gpu {
         self.condemned_n += 1;
     }
 
-    /// Test lever, self-test only: make the next display DISABLE
-    /// (`set_scanout(0, ..)`) report a device refusal without issuing it, so
-    /// the condemn/defer/drain chain has a real driver. Deliberately NOT a
-    /// client verb -- `warp_img_selftest` runs pre-READY, before any
-    /// connection exists, so this needs no external surface at all, and giving it one
-    /// "for symmetry" would be the #178 box-wide-kill-switch anti-pattern its
-    /// `ring-inject` sibling is already bounded against.
-    pub fn arm_scanout_disable_refusal(&mut self) {
-        self.fail_next_scanout_disable = true;
-    }
-
-    /// Consume the "that refusal was mine" marker. One-shot: a SECOND refusal
-    /// in the same boot is by definition not the injected one and reports as
-    /// a real device refusal, which is what the gate must catch.
-    pub fn take_injected_refusal(&mut self) -> bool {
-        core::mem::replace(&mut self.injected_refusal, false)
-    }
-
     pub fn condemned_count(&self) -> usize {
         self.condemned_n
     }
@@ -3834,16 +3806,6 @@ impl Gpu {
             w32(req_va + 40, 0); // scanout_id
             w32(req_va + 44, resource_id);
         };
-        // The self-test lever, checked for the DISABLE only. It returns the
-        // same Err the wire path returns, WITHOUT issuing the command, so
-        // everything downstream is driven by a refusal indistinguishable from
-        // a real one -- a lever that took a different path would prove
-        // nothing about the path that matters.
-        if resource_id == 0 && self.fail_next_scanout_disable {
-            self.fail_next_scanout_disable = false;
-            self.injected_refusal = true;
-            return Err(Error::Hardware);
-        }
         let stalls = self.ctrl.stalls;
         let r = self.ctrl.step(
             "SET_SCANOUT",
