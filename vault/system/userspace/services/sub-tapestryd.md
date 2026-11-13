@@ -1111,8 +1111,11 @@ says `test-latch-dead armed` only once the broker has accepted it, and
 dead engine -- the retirement refused, the ctl still answered
 ([[sub-lictor]]). The word is not tapestryd's to vouch for: the broker reads
 the command line itself and refuses an arming whose word it does not find, and
-tapestryd matches the word with the broker's own function
-(`lictor::gpu_api::bootarg_declared`), so the two cannot read one line two ways.
+tapestryd names the word by the broker's constant and matches it with the broker's
+own function (`lictor::gpu_api::TEST_LEVERS_WORD`, `bootarg_declared`). The two
+still read the file separately (tapestryd in one read, the broker to its end), and
+where their readings differ the broker's decides: the arming is refused and both
+say so.
 The same arming lets tapestryd aim one stall at a
 composition health step (below). `thylacine.test-latch-chained` arms the
 broker the same way (`Request::TestArmChained`) to make each of the next two

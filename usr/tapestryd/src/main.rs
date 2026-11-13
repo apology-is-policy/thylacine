@@ -297,14 +297,14 @@ fn declared_scale() -> Option<u16> {
 /// compositor ride it out. Per boot, and set by whoever boots the machine.
 #[cfg(feature = "test-mode")]
 fn latch_dead_declared() -> bool {
-    bootarg_declared(b"thylacine.test-latch-dead")
+    bootarg_declared(lictor::gpu_api::TEST_LEVERS_WORD)
 }
 /// Test lever: `thylacine.test-latch-chained` has lictor make each of the next two
 /// trusted takeovers wait twice in series, the second wait outlasting the takeover's
 /// bound from the chord (vote 80).
 #[cfg(feature = "test-mode")]
 fn latch_chained_declared() -> bool {
-    bootarg_declared(b"thylacine.test-latch-chained")
+    bootarg_declared(lictor::gpu_api::TEST_CHAINED_WORD)
 }
 /// Test lever: `thylacine.test-seat-start`, which halcyond also reads, refuses the
 /// boot's first seat reservation, so the client's retry is reached on every run.

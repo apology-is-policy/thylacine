@@ -48,8 +48,9 @@ true before the broker split and is rewritten.
 ## What did not change
 
 `TestStallShot`, `TestOwedDefer`, `TestOwedStall` and the context hold and abandon
-verbs need no declaration, and none can reach a takeover: a stall shot rides one
-request of its own connection in phase 0 and that request's reap revives it; the
+verbs need no declaration, and none can reach a takeover: a stall shot rides its
+connection's next runnable request and is spent there (only a phase-0 request can
+stage a command, and that request's reap revives the stall); the
 owed-free levers act only in the phase-0 pass and are counted per boot; the hold
 and abandon verbs touch only fenced chains, which a takeover does not wait for
 (`takeover_clear`, vote 50). Lictor takes any context id for the hold verbs; the
@@ -59,6 +60,16 @@ own-context rule (#178) is tapestryd's. The levers' code is still in every image
 ## If you add a lever
 
 A request that sets a seat, latch or stall-next count must ask `test_declared`
-(or a word of its own, read the same way), and no state a client request sets may
-be read by a command the broker issues for itself. The audit row for the trusted
-seat has both as prosecution lines.
+(or a word of its own, read the same way). And a client must not be able to make
+a command the broker issues for itself -- the exclusion, the trusted bind, the
+restore -- fail, stall, be skipped or act on another object. The audit row for the
+trusted seat has both as prosecution lines.
+
+## Known open in the restore (audit round 25; on main as well)
+
+The second rule is not yet true of the restore. `DetachBacking` of the resource on
+the display is neither refused nor reflected in the presentation, so on the 2D
+device the restore's rebind is refused; RESTORING fails the episode after
+authentication and FAILED retries the same refused rebind every pass, for the
+boot. RESTORING also fails on a stall where the other phases wait. Both are in
+sub-lictor's Open list; corona owns the fix as its own chunk.
