@@ -923,11 +923,7 @@ impl Device {
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
                     if !self.test_declared { return Err(self.test_undeclared(0, crate::gpu_api::TEST_LEVERS_WORD)); }
-                    // Three stall shots for the compositor's bring-up and
-                    // health step, three for the display's binds (a mode's
-                    // from the direct state, a mode's from the composed one,
-                    // a switch to direct).
-                    self.test_latch_shots = 2; self.test_seat_shots = 14; self.test_stall_shots = 6;
+                    self.test_latch_shots = 2; self.test_seat_shots = 14; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     super::intake::test::arm();
                     ().put(&mut out);

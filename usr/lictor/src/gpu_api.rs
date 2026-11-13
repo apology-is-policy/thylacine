@@ -1091,6 +1091,25 @@ pub struct Stats {
 }
 record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
     display_events: u32, engine: Engine, stalls: u32, stalls_begun: u32 });
+/// Whether what the device scans is unknown after a scanout command: an
+/// accepted one is the last word; a refusal with a stall inside its own
+/// request (`Stats::stalls_begun` to `stalls`) may still be executed; one
+/// with none was answered, or refused before staging, and leaves `before`.
+pub fn scanout_unsettled_after(before: bool, accepted: bool, stalls_begun: u32, stalls: u32) -> bool {
+    if accepted { false } else if stalls != stalls_begun { true } else { before }
+}
+#[cfg(test)]
+mod scanout_verdict_tests {
+    use super::*;
+    #[test]
+    fn a_scanout_is_unsettled_only_by_a_stall_inside_its_own_request() {
+        assert!(!scanout_unsettled_after(true, true, 4, 5), "accepted is the last word");
+        assert!(scanout_unsettled_after(false, false, 4, 5), "a stall inside the request");
+        assert!(!scanout_unsettled_after(false, false, 5, 5), "a stall before it began staged none of it");
+        assert!(scanout_unsettled_after(true, false, 5, 5), "an answer leaves what was not known");
+        assert!(scanout_unsettled_after(false, false, u32::MAX, 0), "the count wraps");
+    }
+}
 /// The broker's owed frees: owed now; incurred, paid and given up, monotone;
 /// the resources whose retirement has not finished (`retiring`), each owed a
 /// free or still linked to a context; the pass's stand-downs, monotone; and,

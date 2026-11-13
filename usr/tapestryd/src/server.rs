@@ -6393,7 +6393,9 @@ impl Comp {
         self.test_stall_host = (host_w, host_h);
     }
 
-    /// The shot, called just before the step it is for.
+    /// The shot, called just before the step it is for. It is bound to
+    /// this connection's next request, so neither the broker's owed-free
+    /// pass nor a takeover between the two can take it.
     #[cfg(feature = "test-mode")]
     fn test_stall_shot(&mut self, which: StallStep) {
         if self.test_stall_step != Some(which) {
@@ -6405,7 +6407,7 @@ impl Comp {
             StallStep::Switch => "the bind of the switch to direct",
             StallStep::Edid => "the display's EDID",
         };
-        if self.gpu.test_stall_next() {
+        if self.gpu.test_stall_shot() {
             say!("tapestryd: test-latch-dead: {} retires past its deadline", what);
         } else {
             say!("tapestryd: test-latch-dead: {} stall REFUSED by the broker", what);

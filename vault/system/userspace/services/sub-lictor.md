@@ -153,22 +153,24 @@ deadline passes may still be executed, and the broker parks its resource for
 that reason (`condemn_if_stalled`). The proxy keeps the other half of the same
 fact for its client: `Gpu::scanout_unsettled`. Each of the four scanout
 commands (`set_scanout`, `set_scanout_blob`, `set_scanout_blob_then_flush`,
-`set_scanout_blob_probe`) notes the stall count of the last reply the client
-had, of any kind, before it calls. Accepted, it clears the flag: the device
+`set_scanout_blob_probe`) is read against its own request: every reply carries
+the broker's stall count as the request began (`Stats::stalls_begun`) beside
+the count at its end, and `gpu_api::scanout_unsettled_after` decides (round R4
+F4). Accepted, it clears the flag: the device
 takes its commands in order, so an accepted scanout command is the last word.
-Not accepted, with the stall count in its reply moved, it sets the flag. Not
+Not accepted, with the count moved inside its request, it sets the flag. Not
 accepted otherwise, it leaves the flag as it was: the device answered with a
 refusal, or the command was refused before it was sent, or it was sent and the
 engine died under it (a corrupt ring, a fence that does not match, the 30 s
 bound, an interrupt that failed), which moves no count and from which no
 engine returns, so nothing is asked of the flag again. For the probe, accepted
-means the device answered OK. A deadline that passed between the two replies
-for a command that was not this client's reads as this command's own. No
-other client sends the device work (the seat coordinator's client speaks only
-of the seat), so those are the broker's own: the trusted screen's commands and
-the test levers. That errs to "not known", and costs the compositor a bind and
-what follows one: composed, a repaint, a whole-buffer push and a CONFIGURE to
-every client; direct, a CONFIGURE and the bind of the client's present. A
+means the device answered OK. A stall the broker met between two of this
+client's requests (its owed-free pass's, its own screen's, a test lever's)
+staged none of the command, and moves neither count of its reply. Until round
+R4 the proxy read the command against the last reply it had, so such a stall
+read as the command's own: "not known", which cost the compositor a bind and
+what follows one (composed, a repaint, a whole-buffer push and a CONFIGURE to
+every client; direct, a CONFIGURE and the bind of the client's present). A
 client whose
 connection to the broker failed adopts no reply, and its flag stays as it was;
 it has no broker to ask anything of. The flag was added after audit round 3 of
@@ -387,8 +389,14 @@ The unreference is `Gpu::unref_own`, not `Gpu::resource_unref`. That one
 answers Ok for a release it has put off (`condemn`: a resource the display may
 still name, or any resource while its list has overflowed), which would clear
 the flag over a resource the device still holds. The display names no trusted
-resource while the seat is normal, because restoration's accepted bind drains
-the list, so `unref_own` always sends the command. It is no client's command:
+resource while the seat is normal: every return to it from a trusted bind is an
+accepted restore bind queued behind that bind (the device takes its commands in
+order), or a dead engine. Main's restore binds without draining the list
+(`set_scanout_restore`), so a late trusted bind parks nothing
+(`objects::parks_on_late_bind`, round R4 F2): parked, the id would only hold a
+client's slot and its count (`CondemnedCount`, which tapestryd's presentable
+self-test reads) until the next drain. So `unref_own` always sends the command.
+It is no client's command:
 it moves neither the command ticks a reply carries (`cmd_seq`,
 `last_unref_seq`, which [[sub-tapestryd]]'s presentable self-test orders by;
 round R1 F3) nor the journal of retirements clients wait for.
@@ -634,7 +642,7 @@ forgets the marks made before it:
   completes, said with its pins released;
 - on the second shot the chain's retirement is withheld, so the engine dies at
   30 s and the retirement is refused.
-The same arming gives the compositor six stall shots to aim
+The same arming gives the compositor three stall shots to aim
 (`Request::TestStallNext`, refused once spent). Each makes the next synchronous
 command retire, then report its deadline missed (`Gpu::test_stall_next`),
 said as `INJECTED stall shot of test-latch-dead`, a token distinct from the
@@ -665,7 +673,9 @@ The arming's `TestStallNext` shots still ride the next synchronous command
 whoever sends it, so a seat takeover or the owed-free pass landing between the
 compositor's aim and its command would take one, and since both kinds share one
 flag, `test_stall_settle` spends a pending `TestStallNext` shot too; tapestryd
-never has both kinds pending. A takeover needs test-mode, the bootarg and the
+never has both kinds pending. The display's three aims (`ls-display-stall`,
+`ls-display-follow-edid`) take `TestStallShot`s for that reason (round R4); the
+bring-up and health-step aims keep the arming's. A takeover needs test-mode, the bootarg and the
 operator's chord, and vote 30 recovers the seat. The bootarg is Lictor's own
 reading, not the compositor's: the latch, seat and stall-next shots fire only from
 counts `TestArmLatch` sets, and the chained shots only from `TestArmChained`'s.

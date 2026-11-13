@@ -59,5 +59,23 @@ binds through `Gpu::set_scanout_restore`. The other Lictor changes the merge bro
 - `Gpu::unref_wire` (the trusted screen's `unref_own` shares it) now judges an unref's answer as
   main does (`gpu_api::unref_frees`).
 - `Stats` carries both `display_events` (aux) and `stalls_begun` (main).
-- `TestArmLatch` gives 14 seat shots (main) and 6 stall shots (aux: three for the display's binds).
+- `TestArmLatch` gives 14 seat shots and 3 stall shots, as on main; the display's three binds take
+  connection-bound `TestStallShot`s instead (round R4), which neither the owed-free pass nor a takeover
+  can take.
 - The trusted screen's `follow` runs after main's owed-free pass, at phase 0.
+
+## Round R4 (2026-11-13)
+
+Round R4 audited the merge and R3-F9 (Opus on Opus; 0 P0, 0 P1, 0 P2, 4 P3). In Lictor:
+
+- `objects::parks_on_late_bind`: a bind of one of the service's own ids whose deadline passed parks nothing
+  (`Gpu::condemn_if_stalled`). Main's restore binds without draining the list, so a late trusted bind used to
+  leave the trusted image in the condemned list into phase 0, holding a client's slot and moving
+  `CondemnedCount`. `unref_own`'s comment now gives the real reason a phase-0 release is safe: every return
+  from a trusted bind is an accepted restore bind queued behind it, or a dead engine.
+- `gpu_api::scanout_unsettled_after`: the proxy reads a scanout command against `Stats::stalls_begun` and the
+  count at the end of its own request, not against the last reply it had. `Gpu::stalls_seen` is gone.
+- `TestArmLatch` gives 3 stall shots again, as on main: tapestryd's display aims use `TestStallShot`.
+- Open, not changed: a frame `Device::restore` gives up (`Met::Refused`) leaves the output blank and nothing
+  tells the compositor; tapestryd then never binds again while it stays composed. Two designs are written up
+  in the aux track's notes; neither is chosen.

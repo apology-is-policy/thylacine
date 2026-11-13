@@ -10,6 +10,12 @@ pub const TRUSTED_ID_START: u32 = 0x8000_0000;
 /// normal cursor's plane is the third.
 pub const TRUSTED_IMAGES: [u32; 2] = [TRUSTED_ID_START + 1, TRUSTED_ID_START + 3];
 pub const TRUSTED_CURSOR: u32 = TRUSTED_ID_START + 2;
+/// Whether a bind of `id` whose deadline passed parks the id's free until a
+/// later accepted bind. The service's own ids never do: only `unref_own`
+/// frees one, at phase 0, and every return there from a trusted bind is an
+/// accepted restore bind queued behind it, or a dead engine. Parked, one
+/// would only hold a client's slot (and its count) until the next drain.
+pub fn parks_on_late_bind(id: u32) -> bool { id < TRUSTED_ID_START }
 const _: () = assert!(TRUSTED_IMAGES[0] != TRUSTED_IMAGES[1]
     && TRUSTED_IMAGES[0] != TRUSTED_CURSOR && TRUSTED_IMAGES[1] != TRUSTED_CURSOR);
 pub const MAX_OBJECTS: usize = 4096;
@@ -168,6 +174,13 @@ impl Objects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_late_bind_parks_a_clients_id_and_never_the_services_own() {
+        for id in [1, 2, TRUSTED_ID_START - 1] { assert!(parks_on_late_bind(id), "{:#x}", id); }
+        for id in [TRUSTED_ID_START, TRUSTED_IMAGES[0], TRUSTED_IMAGES[1], TRUSTED_CURSOR, u32::MAX] {
+            assert!(!parks_on_late_bind(id), "{:#x}", id);
+        }
+    }
     #[test]
     fn a_retirement_that_left_nothing_is_undone_and_only_by_its_own_ticket() {
         let mut o = Objects::default();

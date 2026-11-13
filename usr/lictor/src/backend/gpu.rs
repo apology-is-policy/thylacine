@@ -3587,9 +3587,11 @@ impl Gpu {
     }
 
     /// Free one of the service's own resources (`objects::TRUSTED_ID_START`
-    /// and up). The display names none of them while the seat is normal
-    /// (restoration binds the client's resource or disables the scanout, and
-    /// that bind drains the list), so nothing is put off: the command is
+    /// and up). The display names none of them while the seat is normal:
+    /// every return to it from a trusted bind is an accepted restore bind
+    /// (the client's resource or a disable) queued behind that bind, or a
+    /// dead engine, and a late trusted bind parks nothing
+    /// (`objects::parks_on_late_bind`). So nothing is put off: the command is
     /// always sent, and Ok or a refusal is the device's own answer. It is no
     /// client's command, so it is in neither the ticks a reply carries nor
     /// the journal of the retirements clients wait for.
@@ -4407,8 +4409,9 @@ impl Gpu {
     /// A bind whose deadline passed may still execute: once the device
     /// catches up the display may name `resource_id`, so its free waits for
     /// a later accepted bind, as a refused unbind's does (GPU-DESIGN 4.5.15).
+    /// Not the service's own (`objects::parks_on_late_bind`).
     fn condemn_if_stalled(&mut self, resource_id: u32, stalls: u32) {
-        if self.ctrl.stalls != stalls {
+        if self.ctrl.stalls != stalls && crate::objects::parks_on_late_bind(resource_id) {
             self.condemn(resource_id);
         }
     }

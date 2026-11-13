@@ -559,7 +559,10 @@ lever (`thylacine.test-latch-dead`, below and in [[sub-lictor]]): the next
 synchronous command is executed and then reported as past its deadline, so the
 reply reads the engine live with the stall count moved, which is the state
 `scanout_unsettled` is derived from. The lever's display half is aimed by the
-host's size (`test_stall_aim`, once a size): a display event for a host 797
+host's size (`test_stall_aim_host`, once a size; each shot a `TestStallShot`,
+bound to the compositor's connection, so it rides the step's own request and
+neither the broker's owed-free pass nor a takeover can take it, round R4): a
+display event for a host 797
 pixels high stalls the bind of its mode's new screen (the change's own bind
 from the composed state, the bind on entering it from the direct state; a bind
 that was owed before the change takes no shot), one for a host 787 high stalls
@@ -3994,8 +3997,8 @@ for the boot (OPEN-BUGS 2026-10-29T11:39Z).
 
 The witness is `tools/warp-host.sh composed-stall` on the GL host: the GL leg
 of `composed-screen.exp` with `thylacine.test-latch-dead`, armed now before
-any bring-up GPU step. tapestryd aims three of the broker's six stall shots
-here (`Gpu::test_stall_next`; the other three are for binds of the display's,
+any bring-up GPU step. tapestryd aims the broker's three stall shots
+here (`Gpu::test_stall_next`; the display's binds take connection-bound shots,
 "The display follows its host"): at the compositor ctx create, at the `slot S`
 convention class's first attempt, and, once GPU composition runs, at the next
 health issue, whose first command then retires past its deadline. The broker revives the engine inside that same

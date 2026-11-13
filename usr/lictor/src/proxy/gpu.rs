@@ -99,18 +99,12 @@ impl Gpu {
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;
         self.engine = s.engine; self.stalls = s.stalls; self.stalls_begun = s.stalls_begun;
     }
-    /// The stall count of the broker's last reply of any kind, a query's
-    /// included, to read a scanout command's own reply against.
-    fn stalls_seen(&self) -> u32 { self.client.borrow().stats().stalls }
-    /// A scanout command's verdict. The count moved if a deadline passed
-    /// inside the call. One that passed for another client since the last
-    /// reply reads the same, which errs to "not known" and costs a bind.
-    fn scanout_answered(&mut self, stalls_before: u32, accepted: bool) {
-        if accepted {
-            self.scanout_unsettled = false;
-        } else if self.stalls != stalls_before {
-            self.scanout_unsettled = true;
-        }
+    /// A scanout command's verdict, read against its own request's span
+    /// (`gpu_api::scanout_unsettled_after`): a stall the broker met between
+    /// two requests (its owed-free pass's, its own screen's) staged none of it.
+    fn scanout_answered(&mut self, accepted: bool) {
+        self.scanout_unsettled = crate::gpu_api::scanout_unsettled_after(
+            self.scanout_unsettled, accepted, self.stalls_begun, self.stalls);
     }
     /// The broker's count of display events as of its last reply of any kind:
     /// a query's reply carries the count as an invocation's does, and no copy
@@ -236,30 +230,26 @@ impl Gpu {
         self.invoke(Request::ResourceCreate3d { resource_id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags }).unwrap_or(Err(Error::Hardware))
     }
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
-        let stalls = self.stalls_seen();
         let r: Result<(), Error> = self.invoke(Request::SetScanout { resource_id, w, h }).unwrap_or(Err(Error::Hardware));
-        self.scanout_answered(stalls, r.is_ok());
+        self.scanout_answered(r.is_ok());
         r
     }
     pub fn cursor(&mut self, shape: u8, scale: u16, x: u32, y: u32, visible: bool) -> Result<(), Error> {
         self.invoke(Request::Cursor { shape, scale, x, y, visible }).unwrap_or(Err(Error::Hardware))
     }
     pub fn set_scanout_blob_probe(&mut self, resource_id: u32, w: u32, h: u32, format: u32, stride: u32) -> Result<u32, ()> {
-        let stalls = self.stalls_seen();
         let r: Result<u32, ()> = self.invoke(Request::SetScanoutBlobProbe { resource_id, w, h, format, stride }).unwrap_or(Err(()));
-        self.scanout_answered(stalls, r == Ok(GPU_RESP_OK_NODATA));
+        self.scanout_answered(r == Ok(GPU_RESP_OK_NODATA));
         r
     }
     pub fn set_scanout_blob(&mut self, resource_id: u32, w: u32, h: u32, format: u32, stride: u32) -> Result<(), Error> {
-        let stalls = self.stalls_seen();
         let r: Result<(), Error> = self.invoke(Request::SetScanoutBlob { resource_id, w, h, format, stride }).unwrap_or(Err(Error::Hardware));
-        self.scanout_answered(stalls, r.is_ok());
+        self.scanout_answered(r.is_ok());
         r
     }
     pub fn set_scanout_blob_then_flush(&mut self, resource_id: u32, w: u32, h: u32, format: u32, stride: u32) -> Result<(), Error> {
-        let stalls = self.stalls_seen();
         let r: Result<(), Error> = self.invoke(Request::SetScanoutBlobThenFlush { resource_id, w, h, format, stride }).unwrap_or(Err(Error::Hardware));
-        self.scanout_answered(stalls, r.is_ok());
+        self.scanout_answered(r.is_ok());
         r
     }
     pub fn create_presentable(&mut self, res_id: u32, ctx_id: u32, len: u32, blob_id: u64) -> Result<(), Error> {
