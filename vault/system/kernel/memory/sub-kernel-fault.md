@@ -158,6 +158,19 @@ address). The bytes and the index must agree, and only the mapping still being i
 place guarantees that. Verify and bail; never recompute. Both the single and the
 cluster path carry the identical check.
 
+**Every fill of an exec-class Burrow is I-cache synced (audit round 32 F2).**
+The page came in through the data path, and instruction fetch is not coherent
+with it on ARMv8, so a page an executable mapping can reach is cleaned to PoU
+and the I-cache invalidated before any leaf names it. `freq->exec` is the
+Burrow's class (`file_exec`), never the faulting mapping's prot: a protect can
+cut an RX mapping down to R, and a page the R piece fills (the cluster fills
+by slot, across mapping boundaries) is then executed by the RX piece -- or by
+another Proc's cached text mapping -- through the resident hit, which syncs
+nothing. A Burrow outside the class skips the sync because `vma_args_ok`
+refuses any executable mapping of it. `demand_page.file_exec_class_syncs_every_fill`
+counts the syncs (`g_file_fill_syncs_for_test`) through an R piece cut from an
+RX mapping, with a non-exec-class Burrow as the control.
+
 The pin is what makes step 3 safe against both use-after-free and address
 reuse: the Burrow cannot be freed *or* have its allocator slot recycled under
 us. It is dropped exactly once, outside `vma_lock`, because the last reference

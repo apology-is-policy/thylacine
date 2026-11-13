@@ -350,7 +350,8 @@ struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
 // page_count/size rounding, but allocates NO backing pages: the per-page
 // physical pages fault in lazily (R-2) into the sparse pagemap (B-1a'), which
 // allocates nothing until a slot is first installed.
-struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length) {
+struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length,
+                                  bool exec) {
     if (!g_vmo_cache) extinction("burrow_create_file before burrow_init");
     if (!spoor)       return NULL;
     if (spoor->magic != SPOOR_MAGIC)
@@ -389,6 +390,7 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
     // spoor_clunks it on the last unref (the I-30 pin held for the Burrow's life).
     v->spoor         = spoor;
     v->file_offset   = file_offset;
+    v->file_exec     = exec;
     // KP_ZERO zeroed the struct, and 0 is a REAL size (an empty file, where
     // every page is past EOF) -- the no-bound default must be explicit (#194).
     v->file_limit    = BURROW_FILE_LIMIT_UNKNOWN;

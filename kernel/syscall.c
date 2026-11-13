@@ -7084,14 +7084,18 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 // (3) fail-close on I/O error is file_demand_page_single's FAULT_USER_BUS;
 // (4) W^X holds because PROT_WRITE cannot reach here (vivarium_mmap_file_decide
 // refuses it) and vma_alloc rejects W+X independently; (5) I-cache sync is the
-// fault arm's, keyed on the VMA's own X bit; (6) Image-cache eviction safety is
+// fault arm's, keyed on the Burrow's exec class (the Image key's `exec`), which
+// vma_args_ok requires of any executable mapping; (6) Image-cache eviction safety is
 // unchanged; (7) pin-at-map replaces pin-at-exec -- the Burrow adopts a Spoor ref
 // for its whole life, so the guest closing the fd cannot pull the backing file
 // out from under a resident mapping.
 //
-// I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (they
-// are shared, so charging them per-mapper would count one physical page N times);
-// the VMA-count axis IS charged inside vma_insert. The per-page slot table is
+// I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (a
+// cached image's are shared, so charging them per-mapper would count one physical
+// page N times; a private image's (vote 114) are shared with nobody, and ride the
+// same posture bounded by the mapping that holds them -- whether to charge those
+// per page is enqueued); each leaf a fault installs IS charged, and the VMA-count
+// axis is charged inside vma_insert. The per-page slot table is
 // the pagemap (B-1a'): a FILE Burrow's nodes are uncharged like its pages, but
 // they exist only as slots fill -- at most one per 512 resident pages plus a
 // root -- so the kernel memory a mapping costs follows what was paged in, never
@@ -7126,6 +7130,28 @@ static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
     return !mount_noexec_covers(p->territory, sp->dc, sp->devno);
 }
 
+// A file mapping's descriptor, judged as Linux's mmap judges it and in its
+// order: one naming nothing, or opened O_PATH (#81: a navigation handle carries
+// no byte-I/O authority, and a mapping is byte I/O by another name), is EBADF;
+// one not open for reading is EACCES (ERRORS.md: a missing right is ACCES).
+// Returns a REF-HELD Spoor the caller spoor_clunks, or NULL with *err set.
+static struct Spoor *sys_lookup_mapping_spoor(struct Proc *p, u64 fd_raw, s64 *err) {
+    struct Handle hh;
+    *err = -(s64)T_E_BADF;
+    if (handle_get(p, sys_hidx_arg(fd_raw), &hh) < 0)  return NULL;
+    struct Spoor *sp = (struct Spoor *)hh.obj;
+    if (hh.kind != KOBJ_SPOOR || (sp->flag & CWALKONLY)) {
+        handle_put(&hh);
+        return NULL;
+    }
+    if (!(hh.rights & RIGHT_READ)) {
+        handle_put(&hh);
+        *err = -(s64)T_E_ACCES;
+        return NULL;
+    }
+    return sp;                                       // ref TRANSFERRED to the caller
+}
+
 // Returns the mapped VA, or a negated T_E_* the caller passes straight out.
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
@@ -7155,8 +7181,10 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // rather than left standing as the in-code twin of a premise the D-close
     // arc round already falsified in scripture.
     // #844: the ref is TRANSFERRED to us -- spoor_clunk on every path below.
-    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
-    if (!sp)                                         return -(s64)T_E_BADF;
+    // An O_PATH handle (#81) is refused here too, as EBADF.
+    s64 derr;
+    struct Spoor *sp = sys_lookup_mapping_spoor(p, fd_raw, &derr);
+    if (!sp)                                         return derr;
 
     // A PLAIN FILE only. A directory has no byte stream to page from; a symlink
     // must be followed, not mapped (the #184 discipline, where the twin's
@@ -7165,13 +7193,6 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // an append-only file's byte positions are not stable under a concurrent
     // writer, which is precisely what a demand-paged mapping assumes.
     if (sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) {
-        spoor_clunk(sp);
-        return -(s64)T_E_INVAL;
-    }
-    // #81: an O_PATH handle is a NAVIGATION capability that deliberately carries
-    // no byte-I/O authority. Mapping through one would be byte I/O by another
-    // name -- the exact bypass CWALKONLY exists to prevent.
-    if (sp->flag & CWALKONLY) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
     }
@@ -7234,7 +7255,9 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
                      EXEC_USER_BURROW_TOP, &vaddr) != 0) {
         spin_unlock(&p->as->lock);
-        burrow_unref(b);                 // the cache's ref keeps it cached
+        // After the unlock: a private or bypass image's last ref frees it, and
+        // that may sleep in spoor_clunk (a cached one stays cached, idle).
+        burrow_unref(b);
         return -(s64)T_E_NOMEM;
     }
     if (burrow_map(p, b, vaddr, length, prot) != 0) {
@@ -7394,12 +7417,13 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     // The same gates as the D-3a arm, and for the same reasons: READ is the
     // authority a mapping consumes; a directory has no byte stream; a symlink
     // must be followed (#184); an append-only file has no stable byte positions;
-    // an O_PATH handle carries no byte-I/O authority (#81); a Dev with no read
-    // slot cannot serve a page-in.
-    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
-    if (!sp)                                         return -(s64)T_E_BADF;
+    // an O_PATH handle carries no byte-I/O authority (#81, EBADF in the lookup);
+    // a Dev with no read slot cannot serve a page-in.
+    s64 derr;
+    struct Spoor *sp = sys_lookup_mapping_spoor(p, fd_raw, &derr);
+    if (!sp)                                         return derr;
     if ((sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) ||
-        (sp->flag & CWALKONLY) || !sp->dev || !sp->dev->read) {
+        !sp->dev || !sp->dev->read) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
     }
@@ -7452,7 +7476,8 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     }
 
     // D-3c re-audit F5 [P1]: a MAP_FIXED exact-cover REPLACES an existing VMA,
-    // whose Burrow may be a 9P-backed FILE image (a bypassed mmap at {h:0,m:1})
+    // whose Burrow may be a FILE image held only by that mapping, {h:0,m:1} (a
+    // private image, vote 114 -- every unlatched 9P file -- or a cache bypass)
     // whose free reaches a possibly-sleeping spoor_clunk. burrow_map_fixed hands
     // that dead Burrow back via `fx_free` instead of freeing it under as->lock;
     // we free it here, past the unlock (the F1 deferred-free pattern).
@@ -15681,14 +15706,17 @@ static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va
 }
 
 // Vote 115: Linux maps /dev/zero as anonymous memory (mmap_zero). So a
-// descriptor naming devzero, open for reading, is rewritten into the anonymous
-// call before any arm judges it: it is then served exactly where MAP_ANONYMOUS
-// is, and declined exactly where that is (MAP_SHARED, PROT_EXEC). The
+// descriptor naming devzero that a file mapping would accept (open for
+// reading, not O_PATH) is rewritten into the anonymous call before any arm
+// judges it: it is then served exactly where MAP_ANONYMOUS is, and declined
+// exactly where that is (MAP_SHARED, PROT_EXEC). Any other descriptor is left
+// to the file arms, whose lookup answers EBADF or EACCES as Linux does. The
 // descriptor is looked up once and not kept: an anonymous mapping holds no file.
 VISIBLE_IF_KERNEL_TESTS
 void viv_mmap_zero_as_anon(struct Proc *p, u64 a[6]) {
     if ((s32)(u32)a[4] < 0) return;
-    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg((u64)(u32)a[4]), RIGHT_READ);
+    s64 derr;
+    struct Spoor *sp = sys_lookup_mapping_spoor(p, (u64)(u32)a[4], &derr);
     if (!sp) return;
     bool zero = sp->dev == &devzero;
     spoor_clunk(sp);

@@ -461,6 +461,11 @@ clone's nodes are uncharged ([[sub-kernel-pagemap]] Seams).
 
 `burrow_create_file` names the system cache as its map's node sponsor: [[sub-kernel-pagemap]].
 
+`burrow_create_file` also takes the Burrow's **exec class** (`file_exec`, the
+Image key's `exec`): the fault arm syncs every page filled into an exec-class
+Burrow, and `vma_args_ok` refuses an executable mapping of a FILE Burrow
+outside the class (audit round 32 F2; [[sub-kernel-fault]], [[sub-kernel-vma]]).
+
 ## Data structures
 
 `struct Burrow`: magic, type, size, page count, the lock, the two counts, the

@@ -37,7 +37,17 @@
 
 #ifdef KERNEL_TESTS
 void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+u64 g_file_fill_syncs_for_test;
 #endif
+
+// I-36: a page filled into an exec-class FILE Burrow is cleaned to PoU and the
+// I-cache invalidated before any leaf can name it (the fill sites say why).
+static void file_fill_sync(void *kva) {
+    arch_icache_sync_range(kva, PAGE_SIZE);
+#ifdef KERNEL_TESTS
+    __atomic_fetch_add(&g_file_fill_syncs_for_test, 1, __ATOMIC_RELAXED);
+#endif
+}
 
 // #806: per-CPU re-entrancy guard for the kernel-fault dispatch. A fault
 // taken WHILE handling a kernel fault (classically a wild current_thread()
@@ -597,7 +607,9 @@ static enum fault_result demand_page_locked(struct Proc *p,
         freq->file_offset = v->file_offset + (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
         freq->page_va     = page_va;
         freq->slot        = slot;
-        freq->exec        = (vma->prot & VMA_PROT_EXEC) != 0;  // text -> I-cache sync
+        // The Burrow's class, not this mapping's prot: an R piece cut from an
+        // RX mapping fills pages the RX piece (or another Proc) executes.
+        freq->exec        = v->file_exec;
         return FAULT_UNHANDLED_USER;    // ignored by the caller (freq->needed set)
     }
     case BURROW_TYPE_ANON_LAZY:
@@ -1029,12 +1041,14 @@ static enum fault_result file_demand_page_single(struct Proc *p,
     // prior occupant of this recycled PA -> wrong-instruction execution. The
     // race-loser's page (a sibling faulter won the slot) is discarded in
     // file_install_locked; whichever page backs the PTE was synced by ITS
-    // creator, so every installed text page is coherent. Non-exec FILE pages
-    // (R-only rodata since #45) skip the sync -- sound because each FILE
-    // Burrow backs ONE segment at ONE prot, so no page ever migrates from a
-    // non-exec to an exec mapping (REVENANT 4.6).
+    // creator, so every installed text page is coherent. A page of a Burrow
+    // outside the exec class (R-only rodata since #45) skips the sync -- sound
+    // because vma_args_ok refuses an executable mapping of such a Burrow and a
+    // protect never adds X. The class, not the faulting mapping's prot, decides:
+    // a protect can cut an exec-class mapping down to R, and a page that piece
+    // fills is one the RX piece then executes (EXEC-LOAD-DESIGN, rodata).
     if (freq->exec)
-        arch_icache_sync_range(kva, PAGE_SIZE);
+        file_fill_sync(kva);
 
     spin_lock(&p->as->lock);
     r = file_install_locked(p, fi, freq, newpg);
@@ -1140,8 +1154,9 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     // Install the leaf PTE at vma->prot (R+X for text, never writable -- W^X /
     // I-12). The asid arg is vestigial (all-ASID tlbi); pass 0.
     // B-1a' audit F8: the faulting page's mapping is charged to the holder (the
-    // read-ahead pages are the cache's until a fault maps them); see the
-    // single-page tail.
+    // read-ahead pages are the system cache's until a fault maps them -- for a
+    // private image (vote 114) they are shared with nobody and no reclaim can
+    // strip them, held only while a mapping lives); see the single-page tail.
     if (!addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
     int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
@@ -1231,7 +1246,7 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
         void *pkva = pa_to_kva(page_to_pa(pg));
         copy_page_words(pkva, sbuf + i * PAGE_SIZE);
         if (freq->exec)
-            arch_icache_sync_range(pkva, PAGE_SIZE);
+            file_fill_sync(pkva);
         clpages[i] = pg;
     }
     free_pages(stage, sorder);           // staging consumed (memcpy'd out)
@@ -1263,8 +1278,9 @@ static enum fault_result file_demand_page_slow(struct Proc *p,
     // #194 / Linux fidelity: a page WHOLLY past the backing file's last page is
     // SIGBUS on Linux, and demand-zeroing it here would mint real memory the
     // I-32 page axis never sees (anonymous in effect, accounted as FILE, i.e.
-    // not at all -- the R-5 uncharged posture is justified by SHARED FILE BYTES,
-    // which these pages are not). Refuse BEFORE any allocation: nothing is
+    // not at all -- the R-5 uncharged posture is justified by FILE BYTES, shared
+    // or, for a private image, bounded by the mapping that holds them; these
+    // pages are neither). Refuse BEFORE any allocation: nothing is
     // minted, so nothing needs charging. The file's final PARTIAL page still
     // zero-fills past EOF (the read-short path), matching Linux. file_limit is
     // creation-time (close-to-open posture); UNKNOWN -- only the immutable

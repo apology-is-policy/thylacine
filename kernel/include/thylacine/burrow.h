@@ -244,6 +244,13 @@ struct Burrow {
     // disables the bound (a backing Dev with no stat_native: the baked,
     // immutable ramfs -- argued at the image.c stamp site).
     u64               file_limit;   // FILE: backing file size in bytes at create
+    // FILE: the exec class, fixed at create (the Image key's `exec`). The fault
+    // arm syncs the I-cache for every page filled into an exec-class Burrow,
+    // whichever mapping's fault filled it: a protect can cut an RX mapping
+    // down to R, so the faulting mapping's prot does not say whether some
+    // other mapping of the Burrow executes the page. vma_args_ok refuses an
+    // executable mapping of a Burrow that is not exec-class.
+    bool              file_exec;
     int               file_dc;      // FILE: cache key — backing dc       (sampled at create)
     u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
@@ -426,6 +433,8 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
 // pinned for the Burrow's life (the I-30 "pin at exec, never re-resolve at
 // fault" discipline). The cache-key scalars (dc/devno/qid.{path,vers}) are
 // sampled from `spoor` here — the R-3 Image-cache key + coherence token.
+// `exec` is the Burrow's exec class (file_exec): only an exec-class Burrow may
+// be mapped executable, and every page filled into one is I-cache synced.
 //
 // The backing pages are NOT allocated here — they are demand-paged one at a
 // time by the R-2 fault arm into the sparse pagemap (initialized here for
@@ -437,7 +446,8 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
 // Returns NULL (taking NO spoor ref) on:
 //   - NULL spoor / corrupted spoor magic, burrow_init not run, length == 0,
 //     length overflow, SLUB OOM, or pagemap OOM.
-struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length);
+struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length,
+                                  bool exec);
 
 // #194: `file_limit` sentinel + validity predicate. A limit in the top page's
 // worth of u64 values would wrap the fault arm's round-up, so the predicate

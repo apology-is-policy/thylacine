@@ -538,7 +538,7 @@ void test_demand_page_file_smoke(void) {
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
     const u64 FILE_OFF = 0x2000;
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
 
     // Map it R+X (text) at USER_VA.
@@ -596,7 +596,7 @@ void test_demand_page_file_nodes_are_the_system_caches(void) {
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
     const u64 size = (PAGEMAP_INLINE_MAX + 8u) * PAGE_SIZE;
-    struct Burrow *v = burrow_create_file(s, 0, size);
+    struct Burrow *v = burrow_create_file(s, 0, size, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     TEST_ASSERT(v->pm.depth > 0, "the premise: a radix map");
     int rc = burrow_map(p, v, USER_VA, size, VMA_PROT_RX);
@@ -631,7 +631,7 @@ void test_demand_page_file_pagein_not_note_interruptible(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX), 0,
                    "burrow_map RX");
@@ -704,7 +704,7 @@ void test_demand_page_file_geometry_shift_bails(void) {
     TEST_ASSERT(s != NULL, "spoor_alloc");
     // TWO pages: enough for a slot 1 to exist, and enough that ncluster == 2 so
     // the fault takes the CLUSTER path.
-    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_file");
 
     int rc = burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ);
@@ -782,7 +782,7 @@ void test_demand_page_file_geometry_shift_bails_single(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_file");
 
     int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
@@ -830,7 +830,7 @@ void test_protect_file_pagein_racing_protect_bails_single(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
     TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 1 page");
@@ -881,7 +881,7 @@ void test_protect_file_pagein_racing_protect_bails_cluster(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     int rc = burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ);
     TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 2 pages");
@@ -916,6 +916,68 @@ void test_protect_file_pagein_racing_protect_bails_cluster(void) {
     burrow_unref(v);
 }
 
+// I-36 (round 32 F2): an RX file mapping protected down to R in part fills pages
+// through the R piece that the RX piece then executes from the resident slot,
+// with no sync of its own. Every fill of an exec-class Burrow syncs, whichever
+// piece faulted; a Burrow outside the class syncs nothing and maps no X.
+void test_demand_page_file_exec_class_syncs_every_fill(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE, true);
+    TEST_ASSERT(v != NULL, "burrow_create_file (exec class)");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX");
+    TEST_EXPECT_EQ(sys_burrow_protect_for_proc(p, USER_VA + ONE_PAGE, ONE_PAGE, 1 /*R*/, 0), 0,
+                   "protect page 1 down to R");
+    struct Vma *v1 = vma_lookup(p, USER_VA + ONE_PAGE);
+    TEST_ASSERT(v1 != NULL && v1->prot == VMA_PROT_READ && v1->burrow == v,
+                "page 1's piece is R over the same Burrow");
+
+    // A data read through the R piece takes the cluster fill: both slots.
+    u64 syncs0 = __atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED);
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + ONE_PAGE + 0x10, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "the R piece's read resolves");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL && burrow_file_slot_for_test(v, 1) != NULL,
+                "both slots filled by the R piece's fault");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED) - syncs0, 2ull,
+                   "both fills synced: the class decides, not the R piece's prot");
+
+    // The RX piece executes slot 0 from the resident hit, which syncs nothing.
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "the RX piece's fetch resolves");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "from the resident slot: no second read");
+    drop_proc(p);
+    burrow_unref(v);
+
+    // Control: outside the class, fills skip the sync and no X mapping is admitted.
+    p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed (control)");
+    s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc (control)");
+    v = burrow_create_file(s, 0, 2 * ONE_PAGE, false);
+    TEST_ASSERT(v != NULL, "burrow_create_file (no exec class)");
+    TEST_ASSERT(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_RX) != 0,
+                "an RX mapping outside the exec class is refused");
+    TEST_ASSERT(vma_lookup(p, USER_VA) == NULL, "and installs nothing");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ), 0, "burrow_map R");
+    syncs0 = __atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED);
+    make_fi(&fi, USER_VA + 0x10, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "the R read resolves");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) != NULL, "the cluster filled slot 1 too");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED) - syncs0, 0ull,
+                   "no sync outside the class");
+    drop_proc(p);
+    burrow_unref(v);
+}
+
 // #45 / REVENANT 4.6: an R-only (rodata) FILE mapping demand-pages with a
 // NON-EXECUTABLE read-only PTE -- the prot-generality the rodata dispatch
 // relies on. Mirrors file_smoke with VMA_PROT_READ + a data-read fault; the
@@ -933,7 +995,7 @@ void test_demand_page_file_rodata_prot(void) {
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
     const u64 FILE_OFF = 0x7000;
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_file");
 
     // Map it R-only (rodata) at USER_VA.
@@ -991,7 +1053,7 @@ void test_demand_page_file_read_error_snare_bus(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX);
     TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
@@ -1031,7 +1093,7 @@ static void dying_page_in_entry(void *arg) {
     struct Proc *p = current_thread()->proc;
     g_dying_ctl_r = g_dying_r = -1;
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
-    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
+    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE, true) : NULL;
     if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
         struct fault_info fi;
         make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
@@ -1081,7 +1143,7 @@ static void no_sleep_after_commit_entry(void *arg) {
     struct Proc *p = t->proc;
     g_ns_r = g_ns_ctl_r = -1;
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
-    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
+    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE, true) : NULL;
     if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
         struct fault_info fi;
         make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/false);
@@ -1132,7 +1194,7 @@ void test_demand_page_file_miss_under_a_lock_refuses(void) {
     g_rev_read_calls = 0;
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX");
     int handles = __atomic_load_n(&v->handle_count, __ATOMIC_ACQUIRE);
@@ -1174,7 +1236,7 @@ static void revoked_latch_page_in_entry(void *arg) {
     struct Thread *t = current_thread();
     struct Proc *p = t->proc;
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
-    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
+    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE, true) : NULL;
     if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
         (void)notes_post(p, "interrupt", 0u, NULL, true);
         g_revoke_armed = thread_die_pending(t) ? 1 : 0;
@@ -1229,7 +1291,7 @@ void test_demand_page_file_multi_page(void) {
     const u64    FILE_OFF = 0x4000;
     const size_t NPAGES   = 200;                    // > one read-ahead cluster
     const u64    SPAN     = (u64)NPAGES * ONE_PAGE;
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, SPAN);
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, SPAN, true);
     TEST_ASSERT(v != NULL, "burrow_create_file 200-page");
     int rc = burrow_map(p, v, USER_VA, SPAN, VMA_PROT_RX);
     TEST_EXPECT_EQ(rc, 0, "burrow_map 200-page FILE RX");
@@ -1283,7 +1345,7 @@ void test_demand_page_file_short_read_fills_page(void) {
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
     const u64 FILE_OFF = 0x6000;
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX);
     TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
@@ -1339,7 +1401,7 @@ void test_demand_page_file_cluster_short_read(void) {
     const u64    FILE_OFF = 0x8000;
     const size_t NPAGES   = 200;                    // > one read-ahead cluster
     const u64    SPAN     = (u64)NPAGES * ONE_PAGE;
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, SPAN);
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, SPAN, true);
     TEST_ASSERT(v != NULL, "burrow_create_file 200-page");
     int rc = burrow_map(p, v, USER_VA, SPAN, VMA_PROT_RX);
     TEST_EXPECT_EQ(rc, 0, "burrow_map 200-page FILE RX");
@@ -1401,7 +1463,7 @@ void test_demand_page_file_eof_tail_zero(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, (u64)NPAGES * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, (u64)NPAGES * ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file 8-page");
     int rc = burrow_map(p, v, USER_VA, (u64)NPAGES * ONE_PAGE, VMA_PROT_RX);
     TEST_EXPECT_EQ(rc, 0, "burrow_map 8-page FILE RX");
@@ -1453,7 +1515,7 @@ void test_demand_page_file_eof_tail_zero(void) {
 
     struct Spoor *s2 = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s2 != NULL, "spoor_alloc (part b)");
-    struct Burrow *v2 = burrow_create_file(s2, FILE_OFF_B, ONE_PAGE);
+    struct Burrow *v2 = burrow_create_file(s2, FILE_OFF_B, ONE_PAGE, true);
     TEST_ASSERT(v2 != NULL, "burrow_create_file 1-page");
     rc = burrow_map(p, v2, USER_VA, ONE_PAGE, VMA_PROT_RX);
     TEST_EXPECT_EQ(rc, 0, "burrow_map 1-page FILE RX");
@@ -1729,7 +1791,7 @@ void test_demand_page_file_past_limit_bus(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
     v->file_limit = ONE_PAGE;                // the image.c stamp, done by hand
 
@@ -1774,7 +1836,7 @@ void test_demand_page_file_partial_page_zero_with_limit(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
     v->file_limit = LIMIT;
 
@@ -1816,7 +1878,7 @@ void test_demand_page_file_cluster_clamps_at_limit(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, 8 * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, 8 * ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file 8-page");
     v->file_limit = LIMIT;
 
@@ -1867,7 +1929,7 @@ void test_demand_page_file_pages_charge_the_holder(void) {
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE, true);
     TEST_ASSERT(v != NULL, "burrow_create_file");
     TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX");
 

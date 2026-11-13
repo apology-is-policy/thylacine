@@ -164,6 +164,8 @@ enum fault_result userland_demand_page(struct Proc *p,
 // the probe and the leaf write) -- the last instant the original's share must
 // still be held. `original` is the page the copy replaced.
 extern void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+// Every I-cache sync of a filled FILE page (the single and the cluster fill).
+extern u64 g_file_fill_syncs_for_test;
 #endif
 
 #endif // THYLACINE_ARCH_ARM64_FAULT_H

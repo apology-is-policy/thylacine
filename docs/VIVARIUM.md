@@ -2438,12 +2438,22 @@ prove the decision; the guest legs prove the plumbing.
 
 **`/dev/zero` is anonymous memory (operator vote 115, 2026-11-13).** Linux maps
 it so (`mmap_zero`), and a program that predates `MAP_ANONYMOUS` still asks for
-memory that way. The shell rewrites a descriptor naming devzero, open for
-reading, into the anonymous call before any arm judges it: flags gain
-`MAP_ANONYMOUS`, `fd` becomes -1, the offset 0. It is then served exactly where
-`MAP_ANONYMOUS` is and declined where that is (`MAP_SHARED`, `PROT_EXEC`). Every
-other device that backs no mapping answers `ENODEV`, which matches Linux for
-`/dev/null`, `/dev/urandom`, procfs and terminals.
+memory that way. The shell rewrites a descriptor naming devzero that a file
+mapping would accept (open for reading, not `O_PATH`) into the anonymous call
+before any arm judges it: flags gain `MAP_ANONYMOUS`, `fd` becomes -1, the
+offset 0. It is then served exactly where `MAP_ANONYMOUS` is and declined where
+that is (`MAP_SHARED`, `PROT_EXEC`). A write-only `/dev/zero` descriptor answers
+`EACCES` and an `O_PATH` one `EBADF`, from the file arm's descriptor check, as
+Linux answers both. A read-only private map of any other device that backs no
+mapping answers `ENODEV`, which matches Linux for `/dev/null`, `/dev/urandom`,
+procfs and terminals; a request no arm admits at all (a writable private file
+map without `MAP_FIXED`, or any `MAP_SHARED` one) answers `ENOSYS` before any
+device is asked, where Linux would answer `ENODEV` for such a device.
+
+Both file arms judge the descriptor as Linux's `mmap` does, and in its order:
+one naming nothing, or opened `O_PATH`, is `EBADF`; one not open for reading is
+`EACCES` (until audit round 32 the cores answered `EBADF` for a write-only
+descriptor and `EINVAL` for an `O_PATH` one).
 
 ### 6.22 Signals — the frame shape (V-6, design)
 

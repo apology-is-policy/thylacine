@@ -434,7 +434,7 @@ void test_vmo_file_create_close_round_trip(void) {
     struct Spoor *s = spoor_alloc(&devnone);
     TEST_ASSERT(s != NULL, "spoor_alloc(&devnone) NULL");
 
-    struct Burrow *v = burrow_create_file(s, /*file_offset=*/0, /*length=*/8192);
+    struct Burrow *v = burrow_create_file(s, /*file_offset=*/0, /*length=*/8192, false);
     TEST_ASSERT(v != NULL, "burrow_create_file(8192) returned NULL");
     TEST_EXPECT_EQ(burrow_get_size(v), (size_t)8192, "FILE size rounds to 2 pages");
     TEST_EXPECT_EQ(burrow_handle_count(v), 1, "fresh FILE Burrow handle_count=1");
@@ -458,7 +458,7 @@ void test_vmo_file_create_failure_retains_spoor(void) {
     struct Spoor *s = spoor_alloc(&devnone);
     TEST_ASSERT(s != NULL, "spoor_alloc NULL");
 
-    struct Burrow *v = burrow_create_file(s, 0, 0);     // length 0 → reject
+    struct Burrow *v = burrow_create_file(s, 0, 0, false);     // length 0 → reject
     TEST_EXPECT_EQ(v, NULL, "burrow_create_file(length=0) must return NULL");
     TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)0,
         "a rejected create must NOT clunk the caller's Spoor (no ref taken)");
@@ -478,7 +478,7 @@ void test_vmo_file_map_unmap_lifecycle(void) {
     struct Spoor *s = spoor_alloc(&devnone);
     TEST_ASSERT(s != NULL, "spoor_alloc NULL");
 
-    struct Burrow *v = burrow_create_file(s, 0, 4096);
+    struct Burrow *v = burrow_create_file(s, 0, 4096, false);
     TEST_ASSERT(v != NULL, "burrow_create_file NULL");
 
     burrow_acquire_mapping(v);                  // mapping_count = 1 (FILE liveness arm)
@@ -522,7 +522,7 @@ void test_vmo_file_resident_pages_freed(void) {
     for (int it = 0; it < ITERS; it++) {
         struct Spoor *s = spoor_alloc(&devnone);
         TEST_ASSERT(s != NULL, "spoor_alloc NULL");
-        struct Burrow *v = burrow_create_file(s, 0, PAGES_PER * 4096);
+        struct Burrow *v = burrow_create_file(s, 0, PAGES_PER * 4096, false);
         TEST_ASSERT(v != NULL, "burrow_create_file NULL");
         for (int i = 0; i < PAGES_PER; i++)
             burrow_file_install_page_for_test(v, (size_t)i);

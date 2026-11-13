@@ -365,12 +365,17 @@ same reason the anon arm is; `len` is still deliberately unjudged.
 
 **`/dev/zero` is anonymous memory (operator vote 115).** Before any arm judges
 an `mmap`, the shell copies its six words and `viv_mmap_zero_as_anon` rewrites a
-descriptor naming devzero, open for reading, into the anonymous call (flags gain
+descriptor naming devzero that a file mapping would accept (the cores' own
+lookup: open for reading, not `O_PATH`) into the anonymous call (flags gain
 `MAP_ANONYMOUS`, `fd` -1, offset 0; the Spoor is looked up once and released), so
 it is served exactly where `MAP_ANONYMOUS` is and declined where that is, as
 Linux's `mmap_zero` does. `vivarium.mmap_dev_zero_is_anonymous` drives it
-through the dispatcher, read-write and read-only, with `/dev/null` as the
-control (`ENOSYS` and `ENODEV`).
+through the dispatcher, read-write and read-only (a lazy anonymous Burrow at
+the asked prot), with `/dev/null` as the control (`ENOSYS` and `ENODEV`), and
+a write-only and an `O_PATH` `/dev/zero` left to the file arm (`EACCES`,
+`EBADF`, as Linux). A request no arm admits answers `ENOSYS` before any device
+is asked (round 32 F4: the scripture had said every such device answers
+`ENODEV`).
 
 **The two anonymous arms changed at B-1a.** `vivarium_mmap_decide`'s allow-list
 (`VIV_MMAP_PROT_ADMITTED` = R|W) is unchanged, but `PROT_NONE` inside it is now
