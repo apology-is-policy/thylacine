@@ -7272,7 +7272,8 @@ static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
     // ours to drop, exactly as map_file_backed does.
     spoor_ref(sp);
     struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec,
-                                              file_limit);
+                                              file_limit, p->as,
+                                              proc_resource_exempt(p));
     if (!b) {
         spoor_clunk(sp);                 // the fresh ref it did not consume
         spoor_clunk(sp);                 // ours
@@ -7523,7 +7524,8 @@ static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
         // NULL, so hand it a fresh one and keep ours to drop.
         spoor_ref(sp);
         b = image_lookup_or_create(sp, offset, (size_t)length,
-                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit);
+                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit,
+                                   p->as, proc_resource_exempt(p));
         if (!b) {
             spoor_clunk(sp);             // the fresh ref it did not consume
             spoor_clunk(sp);             // ours

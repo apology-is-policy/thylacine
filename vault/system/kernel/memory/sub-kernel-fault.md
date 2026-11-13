@@ -514,6 +514,37 @@ pages themselves stay the cache's, which is what the pool's reclaim strips
 under pressure ([[sub-kernel-image]]). `demand_page.file_pages_charge_the_holder`
 is the witness.
 
+### A private image's pages are its payer's (2026-11-13; operator vote 118)
+
+The posture above is a cached image's. A private image (vote 114) has one
+natural payer, the space that created the mapping ([[sub-kernel-image]]), and
+both fills charge every page they mint to it through the Burrow's payer record
+([[sub-kernel-burrow]]), whoever faulted. The single fill charges one page in
+`file_install_locked`, after the geometry checks and before `pagemap_install`,
+and refunds it when the slot went to a sibling or the node allocation failed.
+The cluster charges BEFORE its read: `burrow_file_mint_charge(v, p->as,
+exempt, ncluster)` cuts the request to the payer's headroom, and a cut window
+restarts at the faulting slot and keeps only the pages paid for, so read-ahead
+never mints past the budget. A window cut to one page refunds and takes the
+single fill, which charges its own; with no headroom the fault answers
+`FAULT_UNHANDLED_USER`, as a refused leaf does. Every early exit (a staging or
+page shortfall, a read error) refunds what it charged, and the install reports
+the slots it adopted (`out_adopted`) so the caller refunds the rest.
+
+The leaf rule moved with it. A payer mapping (`VMA_FLAG_FILE_PAYER`,
+[[sub-kernel-vma]]) installs its leaves uncharged, because the mint paid: in
+the resident-hit path (`file_charge`) and in both install tails
+(`leaf_charge`). Every other holder's leaves are charged exactly as above.
+Before deciding a leaf, each path runs `file_payer_adopt_if_due`. A space that
+has just become the payer by minting into a lapsed record (its payer died)
+turns its unflagged mappings of the image into payer mappings: the leaves it
+had paid for are uninstalled and so refunded, and they re-fault free.
+Witnesses: `demand_page.file_private_charges_its_payer`,
+`demand_page.file_private_readahead_clamps_to_headroom`,
+`demand_page.file_private_holder_pays_leaves`,
+`demand_page.file_private_payer_death_hands_over`, and the control
+`demand_page.file_cached_image_takes_no_payer`.
+
 ## The permission a fault is checked against can now change (B-1a, 2026-09-23)
 
 Step 2 -- `vma->prot` against the access, before any Burrow is resolved -- did

@@ -136,7 +136,8 @@ static int find_install_slot(void) {
 }
 
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
-                                      size_t length, bool exec, u64 file_limit) {
+                                      size_t length, bool exec, u64 file_limit,
+                                      struct AddrSpace *payer, bool payer_exempt) {
     if (!spoor)
         return NULL;
     if (spoor->magic != SPOOR_MAGIC)
@@ -163,6 +164,8 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
         if (!own)
             return NULL;                     // no ref taken; caller still owns spoor
         own->file_limit = file_limit;        // private here, as on the miss arm
+        // Vote 118: its pages are the mapper's, so it is born with a payer.
+        burrow_file_set_payer(own, payer, payer_exempt);
         spin_lock(&g_image_lock);
         g_image_private++;
         spin_unlock(&g_image_lock);

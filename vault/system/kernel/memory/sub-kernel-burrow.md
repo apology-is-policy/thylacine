@@ -360,6 +360,46 @@ outright, and is **strictly narrower**: an eager region that was never charged
 now refunds nothing instead of a recomputed occupancy. Attribution rather than
 an enumeration of shapes.
 
+### A private image's payer record (2026-11-13; operator vote 118)
+
+The charge record above is keyed by an address-space id and settled by the
+drop that frees the region. That serves an eager region with one holder. A
+private FILE Burrow (vote 114) needs more. Its pages are charged as faults
+mint them, possibly by a forked holder that cannot name the payer by id, and
+its last mapping may be any holder's. So it carries its own record:
+`file_private`, `file_payer`, `file_charge_pages`, `file_payer_exempt`, and
+the `file_paid_next`/`file_paid_prev` links of the payer's list
+`AddrSpace.file_paid`. Every field but `file_private` lives under one global
+leaf lock, `g_file_payer_lock`. It is global because a dying space must reach
+every record that names it without taking the Burrows' locks in some order,
+and it costs nothing visible because a mint is a 9P read away. Nothing is
+acquired inside it; the charge and refund are the space counter's CAS loops.
+
+The invariant, whenever the lock is free: `file_charge_pages` is the Burrow's
+resident page count, and a non-NULL `file_payer` has paid exactly that many
+pages.
+
+- `burrow_file_set_payer` marks the Burrow private and links the payer, once,
+  before the Burrow is published.
+- `burrow_file_mint_charge` charges up to `want` pages to the payer, cut to its
+  headroom, and adds them to the record. A lapsed record is first handed to the
+  faulter, which is charged the whole residency as well.
+- `burrow_file_mint_refund` takes back mints that did not end resident, from
+  the record and from whoever pays now. A hand-over charged the new payer the
+  whole record, so the refund always belongs to the current payer.
+- The FILE free arm (`burrow_file_payer_release`) refunds the record whole to
+  the current payer and unlinks it.
+- `burrow_file_payers_lapse` runs in `addrspace_destroy` after the drain
+  ([[sub-kernel-addrspace]]). Every record still naming the dying space drops
+  its payer and keeps its count, so the pointer never outlives the descriptor,
+  and the next mint hands the record over.
+- `burrow_map_in` marks a fresh mapping into the payer's space as a payer
+  mapping (`vma_file_payer_mark_fresh`, [[sub-kernel-vma]]).
+
+What a lapsed record leaves -- resident pages no live space pays for until a
+survivor mints -- is the residue ARCH section 28 I-32 states, bounded per
+survivor by the private images it maps.
+
 ### The cross-Proc share
 
 `burrow_share_into` makes one Burrow reachable from **two** Procs — the first

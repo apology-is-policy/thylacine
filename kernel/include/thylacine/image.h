@@ -117,11 +117,18 @@ void image_cache_init(void);
 // cache HIT the entry keeps its creation-time limit and the caller's value is
 // ignored (close-to-open: one sample per cached image).
 //
+// `payer` / `payer_exempt` (vote 118) name the address space the caller is
+// about to map the image into and its I-32 verdict. A PRIVATE image records it
+// as the payer of every page minted into it (burrow_file_set_payer); a cached
+// image ignores both. NULL is legal (the first minting faulter pays).
+//
 // SMP: serialized by the global cache lock; the blocking burrow_create_file runs
 // OUTSIDE the lock with a re-search-on-reacquire (the create race — two Procs
 // exec'ing the same binary concurrently; the loser frees its surplus Burrow).
+struct AddrSpace;
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
-                                      size_t length, bool exec, u64 file_limit);
+                                      size_t length, bool exec, u64 file_limit,
+                                      struct AddrSpace *payer, bool payer_exempt);
 
 #ifdef KERNEL_TESTS
 // Number of live (used) cache entries. Snapshot under the cache lock.

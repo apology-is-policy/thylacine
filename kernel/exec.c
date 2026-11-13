@@ -999,7 +999,7 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
     spoor_ref(exe);
     struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
                                               (seg->flags & PF_X) != 0,
-                                              spoor_file_size(exe));
+                                              spoor_file_size(exe), as, exempt);
     if (!b) { spoor_clunk(exe); return -T_E_NOMEM; }   // the slab (the arguments hold by the gate)
 
     // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X

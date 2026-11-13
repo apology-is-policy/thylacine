@@ -1917,6 +1917,11 @@ length-first order.) It decides the native word and dispatches:
 - FIXED with a file -> `sys_mmap_fixed_file_for_proc` (arm 2: R or R|X
   through the Image cache, RW as `mmap_eager_copy`'s private copy).
 
+Both Image-cache arms pass `image_lookup_or_create` the mapper's space and
+its I-32 verdict (vote 118): a private image's every minted page is charged
+to the space that created the mapping ([[sub-kernel-image]],
+[[sub-kernel-fault]]).
+
 The order is fixed and observable: the prot and flag masks, W|X (`-EACCES`),
 W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`
 without FIXED (`-EINVAL`), fd -1 without FIXED (`-EBADF`), W without FIXED

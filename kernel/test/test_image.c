@@ -75,7 +75,7 @@ void test_image_miss_then_hit_shares(void) {
 
     // First exec: MISS -> create. s1 is ADOPTED into B1.
     struct Spoor *s1 = mk_spoor(0x1000, 1);
-    struct Burrow *b1 = image_lookup_or_create(s1, 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b1 = image_lookup_or_create(s1, 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(b1 != NULL, "first lookup creates a Burrow");
     TEST_EXPECT_EQ(burrow_handle_count(b1), 2, "B1 handle_count = cache 1 + caller 1");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "one live entry");
@@ -83,7 +83,7 @@ void test_image_miss_then_hit_shares(void) {
 
     // Second exec, SAME identity: HIT -> shares B1. s2 is redundant -> clunked.
     struct Spoor *s2 = mk_spoor(0x1000, 1);
-    struct Burrow *b2 = image_lookup_or_create(s2, 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b2 = image_lookup_or_create(s2, 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(b2 == b1, "second lookup SHARES the same Burrow (cross-Proc text share)");
     TEST_EXPECT_EQ(burrow_handle_count(b1), 3, "handle_count = cache 1 + 2 callers");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "still one entry");
@@ -132,9 +132,9 @@ void test_image_private_unless_versioned(void) {
     // assertion returns, and a ref it strands is a live image no later test's
     // eviction can take, which fails every cache count after this one.
     struct Burrow *b1 = image_lookup_or_create(mk_private_spoor(0x7000, 0), 0, PAGE_SIZE,
-                                               /*exec=*/false, 3 * PAGE_SIZE);
+                                               /*exec=*/false, 3 * PAGE_SIZE, NULL, false);
     struct Burrow *b2 = image_lookup_or_create(mk_private_spoor(0x7000, 0), 0, PAGE_SIZE,
-                                               /*exec=*/false, PAGE_SIZE);
+                                               /*exec=*/false, PAGE_SIZE, NULL, false);
     bool both     = b1 != NULL && b2 != NULL;
     bool two      = both && b1 != b2;
     int  hc1      = b1 ? burrow_handle_count(b1) : -1;
@@ -149,7 +149,7 @@ void test_image_private_unless_versioned(void) {
     u64  freed2   = spoor_total_freed() - freed0;
 
     struct Burrow *b3 = image_lookup_or_create(mk_spoor(0x7000, 0), 0, PAGE_SIZE,
-                                               /*exec=*/false, PAGE_SIZE);
+                                               /*exec=*/false, PAGE_SIZE, NULL, false);
     bool control  = b3 != NULL;
     if (b3) burrow_unref(b3);
     u64  live3    = image_cache_live_count_for_test();
@@ -176,8 +176,8 @@ void test_image_private_unless_versioned(void) {
 
 void test_image_distinct_qid_distinct_entry(void) {
     image_cache_evict_idle_for_test();
-    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xA000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xB000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xA000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xB000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
     TEST_ASSERT(b1 != b2, "distinct qid.path -> distinct Burrow");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two entries");
@@ -189,8 +189,8 @@ void test_image_distinct_qid_distinct_entry(void) {
 
 void test_image_qid_vers_bump_new_entry(void) {
     image_cache_evict_idle_for_test();
-    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xC000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xC000, 2), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xC000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xC000, 2), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
     TEST_ASSERT(b1 != b2, "qid.vers bump (atomic replace) -> NEW entry (coherence)");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two entries");
@@ -213,10 +213,10 @@ void test_image_devno_full_width_distinct_entry(void) {
     const u64 lo = 1u, hi = (1ull << 32) + 1u;
     image_cache_evict_idle_for_test();
     u64 hits0 = image_cache_hits_for_test();
-    struct Burrow *b1 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, lo), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    struct Burrow *b2 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b1 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, lo), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     u64 gap_hits = image_cache_hits_for_test() - hits0;
-    struct Burrow *b3 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b3 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     bool created = b1 != NULL && b2 != NULL, distinct = b1 != b2, control = b3 == b2;
     // Every lookup took a ref; drop them BEFORE asserting, so a failure here
     // cannot leave live entries behind for the next test's counts.
@@ -233,8 +233,8 @@ void test_image_devno_full_width_distinct_entry(void) {
 
 void test_image_distinct_offset_distinct_entry(void) {
     image_cache_evict_idle_for_test();
-    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xD000, 1), 0,         PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xD000, 1), PAGE_SIZE, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xD000, 1), 0,         PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xD000, 1), PAGE_SIZE, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
     TEST_ASSERT(b1 != b2, "same qid, distinct file_offset -> distinct segment entry");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two segment entries");
@@ -254,15 +254,15 @@ void test_image_exec_discriminates_key(void) {
     image_cache_evict_idle_for_test();
     u64 creates0 = image_cache_creates_for_test();
     // SAME identity + window; differ only in exec.
-    struct Burrow *bx = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
-    struct Burrow *br = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/false, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *bx = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    struct Burrow *br = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/false, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(bx != NULL && br != NULL, "both created");
     TEST_ASSERT(bx != br, "same window, different X-ness -> DISTINCT Burrows (no dual-prot alias)");
     TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2, "TWO creates, not one");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two entries");
     // A repeat of each exec-class HITS its own entry (sharing still works per class).
     u64 hits0 = image_cache_hits_for_test();
-    struct Burrow *bx2 = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *bx2 = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(bx2 == bx, "exec=true repeat shares the exec entry");
     TEST_EXPECT_EQ(image_cache_hits_for_test() - hits0, 1, "one hit (per-class sharing intact)");
     burrow_unref(bx);
@@ -281,7 +281,7 @@ void test_image_eviction_bounds_cache(void) {
     // caller-ref is dropped (-> idle: handle_count==1, mapping_count==0).
     const int N = IMAGE_CACHE_MAX + 5;
     for (int i = 0; i < N; i++) {
-        struct Burrow *b = image_lookup_or_create(mk_spoor(0x10000 + (u64)i, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+        struct Burrow *b = image_lookup_or_create(mk_spoor(0x10000 + (u64)i, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
         TEST_ASSERT(b != NULL, "create");
         burrow_unref(b);     // -> idle
     }
@@ -298,7 +298,7 @@ void test_image_bad_arg_retains_spoor(void) {
     image_cache_evict_idle_for_test();
     u64 freed0 = spoor_total_freed();
     struct Spoor *s = mk_spoor(0xE000, 1);
-    struct Burrow *b = image_lookup_or_create(s, 0, /*length=*/0, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b = image_lookup_or_create(s, 0, /*length=*/0, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     TEST_ASSERT(b == NULL, "length==0 -> NULL");
     TEST_EXPECT_EQ(spoor_total_freed() - freed0, 0, "bad-arg path does NOT consume the spoor");
     spoor_clunk(s);          // the caller still owns it -> cleans up

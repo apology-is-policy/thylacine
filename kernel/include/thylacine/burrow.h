@@ -255,6 +255,21 @@ struct Burrow {
     u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
+    // Vote 118 (I-32): a PRIVATE image's pages are its payer's. file_private
+    // is fixed before the Burrow is published (image_lookup_or_create's
+    // private arm) and read without a lock. The rest is the payer record,
+    // read and written only under g_file_payer_lock (burrow.c): file_payer is
+    // the address space charged for every resident page -- NULL once it has
+    // died (lapsed) -- and file_charge_pages is the resident count, which a
+    // live payer has paid exactly. The payer's list of the Burrows it pays
+    // for (AddrSpace.file_paid) is what lets its teardown lapse them, so the
+    // pointer never outlives the descriptor it names.
+    bool              file_private;
+    bool              file_payer_exempt;
+    u32               file_charge_pages;
+    struct AddrSpace *file_payer;
+    struct Burrow    *file_paid_next;
+    struct Burrow    *file_paid_prev;
     struct pagemap    pm;           // FILE / ANON_LAZY / CODE: the sparse slot table; not live for other types
 
     // #131/#132: WHO PAID the I-32 page_count for this region, and how much.
@@ -740,6 +755,37 @@ bool burrow_unref_settled(struct Burrow *v, const struct Proc *payer,
 struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
                                                        const struct AddrSpace *payer,
                                                        u32 *out_refund);
+
+// Vote 118: the payer record of a PRIVATE FILE Burrow (ARCH 25.4 REVENANT
+// row, the private-page charge addendum). Every function takes
+// g_file_payer_lock, a leaf: callable under as->lock or v->lock, never
+// across a sleep.
+//
+// burrow_file_set_payer: mark `v` private and, for a non-NULL `as`, make it
+// the payer (an empty record). Called once, before `v` is published; `as`
+// must have a live owner. A NULL `as` leaves the record lapsed, so the first
+// mint makes its faulter the payer.
+void burrow_file_set_payer(struct Burrow *v, struct AddrSpace *as, bool exempt);
+// burrow_file_mint_charge: charge up to `want` pages about to be minted into
+// `v` to its payer, clamped to the payer's headroom. A lapsed record is first
+// handed over to `faulter` (exempt: its I-32 verdict), which is charged the
+// whole residency as well. Returns the pages charged and added to the
+// record, 0 when even one is refused (nothing changes then).
+u32  burrow_file_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+                             u32 want);
+// burrow_file_mint_refund: take back `pages` charged mints that did not end
+// resident -- from the record and from whoever is the payer NOW (it paid the
+// whole record); a lapsed record refunds nobody.
+void burrow_file_mint_refund(struct Burrow *v, u32 pages);
+// burrow_file_payer_is: is `as` the payer of `v` right now?
+bool burrow_file_payer_is(struct Burrow *v, const struct AddrSpace *as);
+// burrow_file_payers_lapse: `as` is dying (its last owner drained it):
+// unlink every record that names it. After this nothing points at `as`.
+void burrow_file_payers_lapse(struct AddrSpace *as);
+#ifdef KERNEL_TESTS
+u32               burrow_file_charge_pages_for_test(struct Burrow *v);
+struct AddrSpace *burrow_file_payer_for_test(struct Burrow *v);
+#endif
 
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
