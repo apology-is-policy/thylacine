@@ -484,6 +484,39 @@ fn cursor_demo(root: i64) -> i64 {
     0
 }
 
+/// Plain fixture for motion. It says each relative motion its surface is
+/// handed, a numbered mark at Enter -- what tells a driver "none" from "not
+/// yet", and counts every Enter the surface was handed -- and exits at
+/// Escape. No privileged test verb or raw GPU access.
+fn rel_watch() -> i64 {
+    let mut surface = match Surface::fullscreen() { Ok(s) => s, Err(_) => return 1 };
+    fill(&mut surface, 0xff17_211d);
+    if surface.present(None).is_err() { return 1; }
+    say!("rel-watch: ready");
+    let mut marks = 0u32;
+    loop {
+        let ev = match surface.wait_event() { Ok(e) => e, Err(_) => return 1 };
+        if ev.kind == TEV_CONFIGURE {
+            if surface.handle_configure(&ev).is_err() { return 1; }
+            fill(&mut surface, 0xff17_211d);
+            if surface.present(None).is_err() { return 1; }
+        } else if ev.kind == TEV_CLOSE { break; }
+        else if ev.kind == TEV_PTR_REL {
+            let dx = (ev.value >> 16) as u16 as i16 as i32;
+            let dy = (ev.value & 0xFFFF) as u16 as i16 as i32;
+            say!("rel-watch: rel {} {}", dx, dy);
+        } else if ev.kind == TEV_KEY && ev.value == 1 {
+            match ev.code {
+                1 => break,
+                28 => { marks += 1; say!("rel-watch: mark {}", marks); }
+                _ => {},
+            }
+        }
+    }
+    say!("rel-watch: done");
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // The driver session (layout ops are compositor-global; surfaces stay
@@ -509,6 +542,10 @@ pub extern "C" fn rs_main() -> i64 {
         }
         unsafe { t_close(root); }
         return if line.is_some() { 0 } else { 1 };
+    }
+    if libthyla_rs::env::args().any(|arg| arg == b"--rel-watch") {
+        unsafe { t_close(root); }
+        return rel_watch();
     }
     if libthyla_rs::env::args().any(|arg| arg == b"--cursor-demo") {
         let verdict = cursor_demo(root);

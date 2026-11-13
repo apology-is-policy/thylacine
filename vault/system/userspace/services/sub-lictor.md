@@ -4,6 +4,7 @@ type: sub
 title: "Lictor - the trusted graphical seat and normal hardware broker"
 parent: moc-userspace
 code:
+  - tools/interactive/ls-graphical-sak-pointer.exp
   - usr/lictor/src/quiescence.rs
   - usr/caps-probe/Cargo.toml
   - usr/caps-probe/src/main.rs
@@ -59,7 +60,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Clipboard cancellation progress boundary
 
@@ -722,6 +723,23 @@ A refused INPUT loses its batch. A refused chord moves no generation, so nothing
 tells the compositor a release it was owed is gone: `Seat::input` clears every device's
 batch and pushes one reset (SYN_DROPPED), unless input is withheld. The reset carries no
 key content. The witness is `tools/interactive/ls-graphical-sak-refused.exp`.
+
+A drain is answered with the seat it is of. `InputDrain`'s reply is `gpu_api::Drained`: the
+seat's generation and phase, and the device's events, put together in `main.rs` by the thread
+that gathers them. `Seat::input` gathers nothing for the compositor while the phase is not 0
+and lets go of what was not drained when an episode begins, and every arm of `Seat::step` for
+a phase that is not 0 lets go of it again. So the events of a reply at phase 0 are all of
+that reply's generation, and a client that deals with the pair before it hands the events on
+has no episode between its reading and its events. Until 2026-11-13 the reply was the events
+alone and the compositor asked `SeatState` beside it: two requests, neither ever parked, and
+a whole episode fits between two requests of a client kept off the processor.
+`proxy::input::InputDev::drain` returns the pair, is `must_use`, and returns `None` for a
+drain the broker did not answer. An event is of the seat that stood when the broker read it
+from the device, not when the hand made it: the device stamps nothing, so a position made in
+an episode's last milliseconds and read after RESTORED is the next seat's first. The witness
+is `tools/interactive/ls-graphical-sak-pointer.exp` (the pointer moved over the trusted
+screen makes no program's motion, and the Enter that ends the episode reaches no program).
+NOT YET RUN IN A GUEST.
 
 Until 2026-10-29 the restore was retried forever: every compositor request
 parked for good and the kernel refused the serial BREAK into the failed

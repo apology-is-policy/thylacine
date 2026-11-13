@@ -1,8 +1,7 @@
 //! Filtered ordinary input. Physical events and secret input terminate in Lictor.
-use alloc::vec::Vec;
 use core::cell::RefCell;
 use libdriver::Error;
-use crate::{gpu_api::Request, rpc_client::Client};
+use crate::{gpu_api::{Drained, Request}, rpc_client::Client};
 pub const INPUT_DMA_SIZE: usize = 4096;
 pub const EV_SYN: u16 = 0;
 pub const EV_KEY: u16 = 1;
@@ -27,10 +26,14 @@ impl InputDev {
     pub fn supports_abs(&self) -> bool { self.abs }
     pub fn supports_rel(&self) -> bool { self.rel }
     pub fn abs_max(&self, axis: u8) -> u32 { if axis == 0 { self.x } else { self.y } }
-    pub fn drain(&mut self, mut f: impl FnMut(RawInputEvent)) {
-        let events: Result<Vec<(u16, u16, u32)>, _> = self.client.borrow_mut().call(Request::InputDrain { index: self.index });
-        if let Ok(events) = events {
-            for (etype, code, value) in events { f(RawInputEvent { etype, code, value }); }
-        }
+    /// The device's events since it was last drained, and the seat's
+    /// generation and phase as the broker answered them in the same reply:
+    /// the seat those events are of. `None` when the broker did not answer.
+    #[must_use = "the seat a drain's events are of is dealt with before they are handed on"]
+    pub fn drain(&mut self, mut f: impl FnMut(RawInputEvent)) -> Option<(u64, u32)> {
+        let reply: Result<Drained, _> = self.client.borrow_mut().call(Request::InputDrain { index: self.index });
+        let (generation, phase, events) = reply.ok()?;
+        for (etype, code, value) in events { f(RawInputEvent { etype, code, value }); }
+        Some((generation, phase))
     }
 }

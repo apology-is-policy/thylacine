@@ -13,6 +13,7 @@
 extern crate alloc;
 
 pub mod chords;
+pub mod epoch;
 pub mod keymap;
 pub mod motion;
 pub mod pane;

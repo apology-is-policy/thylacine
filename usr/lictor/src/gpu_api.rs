@@ -345,6 +345,10 @@ pub const TEST_LEVERS_WORD: &[u8] = b"thylacine.test-latch-dead";
 pub fn bootarg_declared(bootargs: &[u8], word: &[u8]) -> bool {
     bootargs.split(|b| b.is_ascii_whitespace() || *b == 0).any(|w| w == word)
 }
+/// What `InputDrain` answers: the seat's generation and phase, and the events
+/// the device gathered since its last drain. One reply from the one thread
+/// that gathers them, so the events are of the seat it tells.
+pub type Drained = (u64, u32, Vec<(u16, u16, u32)>);
 /// Whether the broker runs `request` now or leaves it parked. A park must end:
 /// a seat episode ends, and in-flight chains retire. A retirement nothing can
 /// clear is admitted at once, and one parked `PARK_BOUND_MS` is admitted

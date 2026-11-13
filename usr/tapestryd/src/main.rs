@@ -72,6 +72,7 @@ use crate::input::{
 };
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
 const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES <= 64);
+use tapestryd::epoch::{Reading, SeatEpoch};
 use tapestryd::keymap::{self, Mods};
 
 // =============================================================================
@@ -341,13 +342,30 @@ struct Tapestryd {
     mods: Mods,
 }
 
+/// A drain the broker does not answer is input that is gone, and nothing
+/// else would say so: the compositor goes on without it. Said once.
+fn unanswered(said: &mut bool, device: &str) {
+    if !core::mem::replace(said, true) {
+        say!("tapestryd: the broker did not answer the {}'s drain; its input is not read", device);
+    }
+}
+
 impl Tapestryd {
-    /// Whether the seat has changed hands since `generation` was read at the
-    /// top of a pass: a trusted-path episode has begun, or begun and ended.
-    fn seat_moved(&self, generation: u64) -> Result<bool, Error> {
-        match self.comp.gpu.seat_state() {
-            Ok((now, phase)) => Ok(phase != 0 || now != generation),
-            Err(error) => { say!("tapestryd: seat state failed {:?}", error); Err(error) }
+    /// Deal with the seat a drain's events are of, before any of them is
+    /// handed on. `false` when an episode is on: what was drained is no
+    /// program's, and the pass starts again.
+    fn seat_read(&mut self, epoch: &mut SeatEpoch, seat: (u64, u32)) -> bool {
+        match epoch.read(seat.0, seat.1) {
+            Reading::Standing => true,
+            Reading::Resumed => {
+                self.comp.interaction_suspend();
+                self.mods = Mods::default();
+                self.comp.seat_resumed();
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: seat back generation={}", seat.0);
+                true
+            }
+            Reading::Episode => false,
         }
     }
 }
@@ -523,22 +541,28 @@ impl Driver for Tapestryd {
         #[cfg(feature = "test-mode")]
         let mut pass_mark = Instant::now();
 
-        let mut seat_generation = 0;
+        let mut epoch = SeatEpoch::new();
+        let mut unanswered_said = false;
         loop {
-            let (generation, phase) = match self.comp.gpu.seat_state() {
-                Ok(state) => state,
-                Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
+            // The pass's first reading of the seat comes with the keyboard's
+            // events; with no keyboard, or a drain the broker did not answer,
+            // the seat is asked alone.
+            raw_events.clear();
+            let read = self.kbd.as_mut().map(|kbd| kbd.drain(|ev| raw_events.push(ev)));
+            if read == Some(None) {
+                unanswered(&mut unanswered_said, "keyboard");
+            }
+            let seat = match read.flatten() {
+                Some(seat) => seat,
+                None => match self.comp.gpu.seat_state() {
+                    Ok(seat) => seat,
+                    Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
+                },
             };
-            if phase != 0 {
+            if !self.seat_read(&mut epoch, seat) {
                 self.comp.interaction_suspend();
                 let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
                 continue;
-            }
-            if generation != seat_generation {
-                seat_generation = generation;
-                self.comp.interaction_suspend();
-                self.mods = Mods::default();
-                self.comp.seat_resumed();
             }
 
             #[cfg(feature = "test-mode")]
@@ -550,51 +574,43 @@ impl Driver for Tapestryd {
                 pass_mark = Instant::now();
             }
             // Residual-2: did any input device drain a raw event this pass?
-            // Set after each of the three drains below; bumps last_input.
-            let mut input_seen = false;
+            // Set after each of the three drains; bumps last_input.
+            let mut input_seen = !raw_events.is_empty();
             // (1) Input drain -> keymap -> the Super chord layer (G-6c:
             // the compositor's reserved plane, intercepted ABOVE the
             // event stream -- a consumed key never reaches a surface) ->
             // the focused surface's events. Modifier keys always flow
             // (clients see mods; Mods::update identifies them).
-            if let Some(kbd) = self.kbd.as_mut() {
-                raw_events.clear();
-                kbd.drain(|ev| raw_events.push(ev));
-                input_seen |= !raw_events.is_empty();
-                for ev in &raw_events {
-                    if ev.etype == EV_SYN && ev.code == 3 {
-                        #[cfg(feature = "test-mode")]
-                        say!("tapestryd: input reset (SYN_DROPPED)");
-                        self.mods = Mods::default(); self.comp.seat_resumed(); continue;
-                    }
-                    if ev.etype != EV_KEY {
-                        continue; // EV_SYN separators etc.
-                    }
-                    let pressed = ev.value != 0;
-                    let was_mod = self.mods.update(ev.code, pressed);
-                    let mask = self.mods.mask();
-                    if !was_mod && self.comp.chord_key(ev.code, ev.value, mask) {
-                        continue;
-                    }
-                    let rune = if pressed {
-                        keymap::resolve(ev.code, mask)
-                    } else {
-                        0
-                    };
-                    self.comp.key_event(ev.code, ev.value, rune, mask);
+            for ev in &raw_events {
+                if ev.etype == EV_SYN && ev.code == 3 {
+                    #[cfg(feature = "test-mode")]
+                    say!("tapestryd: input reset (SYN_DROPPED)");
+                    self.mods = Mods::default(); self.comp.seat_resumed(); continue;
                 }
+                if ev.etype != EV_KEY {
+                    continue; // EV_SYN separators etc.
+                }
+                let pressed = ev.value != 0;
+                let was_mod = self.mods.update(ev.code, pressed);
+                let mask = self.mods.mask();
+                if !was_mod && self.comp.chord_key(ev.code, ev.value, mask) {
+                    continue;
+                }
+                let rune = if pressed {
+                    keymap::resolve(ev.code, mask)
+                } else {
+                    0
+                };
+                self.comp.key_event(ev.code, ev.value, rune, mask);
             }
+
             // An event handled above can have waited out a whole trusted-path
             // episode inside a request the seat's owner parks until it ends
             // (a chord's reconcile, a retirement). What the pointer did
-            // across an episode is no program's: before a pointer device is
-            // drained the seat is asked again, and a seat that has moved is
-            // the top of the loop's to deal with.
-            if input_seen && self.seat_moved(seat_generation)? {
-                last_input = Instant::now();
-                continue;
-            }
-
+            // across an episode is no program's, and each pointer drain below
+            // is answered with the seat its events are of: a seat that has
+            // come back is dealt with before the first of them is handed on.
+            //
             // (1b) Tablet drain (G-7c) -> the under-pointer surface. ABS
             // records update the raw position; the EV_SYN frame boundary
             // commits ONE coalesced MOVE (scaled to display px); BTN_*
@@ -603,7 +619,16 @@ impl Driver for Tapestryd {
             // events flow regardless of held modifiers (clients see mods).
             if let Some(tab) = self.tablet.as_mut() {
                 raw_events.clear();
-                tab.drain(|ev| raw_events.push(ev));
+                let seat = tab.drain(|ev| raw_events.push(ev));
+                if seat.is_none() {
+                    unanswered(&mut unanswered_said, "tablet");
+                }
+                if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat)) {
+                    if input_seen {
+                        last_input = Instant::now();
+                    }
+                    continue;
+                }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
@@ -650,13 +675,6 @@ impl Driver for Tapestryd {
                 // commit anyway -- the next drain's SYN is a no-op then.
                 commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
             }
-            // The same after the tablet's events: a place or a press can wait
-            // in such a request too.
-            if input_seen && self.seat_moved(seat_generation)? {
-                last_input = Instant::now();
-                continue;
-            }
-
             // (1c) The mouse drain: REL_X/REL_Y deltas accumulate per SYN
             // frame then commit as ONE ptr_move_rel (exact deltas to the
             // focused surface + pointer accumulation); BTN_* and the
@@ -665,7 +683,16 @@ impl Driver for Tapestryd {
             // on the wire (i32 as u32).
             if let Some(m) = self.mouse.as_mut() {
                 raw_events.clear();
-                m.drain(|ev| raw_events.push(ev));
+                let seat = m.drain(|ev| raw_events.push(ev));
+                if seat.is_none() {
+                    unanswered(&mut unanswered_said, "mouse");
+                }
+                if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat)) {
+                    if input_seen {
+                        last_input = Instant::now();
+                    }
+                    continue;
+                }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (mut dx, mut dy) = (0i32, 0i32);

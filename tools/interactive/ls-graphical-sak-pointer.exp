@@ -1,0 +1,211 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-pointer -- what the pointer did across a trusted-path
+# episode is no program's.
+#
+# An absolute device says where the pointer is, and the compositor makes a
+# program's motion out of two positions that follow each other. A trusted-path
+# episode comes between two positions: the seat's owner gathers nothing for
+# the compositor while it is on, and the compositor forgets the position
+# before it when the seat comes back, which it learns from the reply that
+# carries the first events after it. So the first position after an episode
+# is a place, and the one after that is its own motion and nothing more.
+#
+# One boot of the session image on a 1280x800 display at scale 100, a plain
+# fixture zoomed over it (`tapestry-battery --rel-watch`: it says each
+# relative motion its surface is handed, and a numbered mark at Enter):
+#
+#   before:  the pointer is put at 200,400 and then at 360,400. The fixture
+#            says one motion, 160 0.
+#   during:  secure attention with nothing pending. On the trusted screen the
+#            pointer goes to 1000,400, and Enter ends the episode. The fixture
+#            says nothing: no motion, and no mark for an Enter that was the
+#            trusted screen's.
+#   after:   the compositor says the seat is back. The pointer is put at
+#            1040,400 and Enter is pressed: the fixture says its first mark
+#            and no motion before it. Counted from 360 the position would
+#            have been a motion of 680, the pointer's way across the trusted
+#            screen. Then 1200,400: the fixture says 160 0.
+#
+# The mark is what makes "no motion" a reading: the fixture is handed its
+# events in the order the compositor made them, so a motion made of the first
+# position would be said before the mark, and the mark shows the fixture
+# could speak.
+#
+# Requires the session image:
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 1280x800
+set ::env(THYLACINE_SCALE) 100
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} {
+        lc_fail $e
+    }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} {
+        lc_fail $e
+    }
+}
+# The tablet's axis value whose pixel, as the compositor scales it to a
+# 1280x800 screen, is exactly x,y.
+proc move {x y} {
+    global repo qmp
+    set ax [expr {min(32767, ((2*$x+1)*32767)/(2*1279))}]
+    set ay [expr {min(32767, ((2*$y+1)*32767)/(2*799))}]
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs $ax $ay"} e]} {
+        lc_fail $e
+    }
+    after 700
+}
+# The next line this scenario reads of the fixture's, the compositor's or
+# corvus's, whichever comes first in the stream. One pattern: expect takes the
+# first ARM that matches anywhere in what it has read, not the first LINE, so
+# an arm a line later would swallow the line before it.
+proc next_line {what} {
+    set line ""
+    lc_within 30 {
+        -re {(rel-watch: rel -?\d+ -?\d+|rel-watch: mark \d+|corvus: imperium: SAK with nothing pending|tapestryd: seat back generation=\d+)[^\r\n]*[\r\n]} {
+            set line $expect_out(1,string)
+        }
+        -re {EXTINCTION:} {
+            lc_extinction_fail "$what"
+        }
+        timeout {
+            lc_fail "30s without $what"
+        }
+        eof {
+            lc_fail "EOF waiting for $what"
+        }
+    }
+    return $line
+}
+# The next of those lines must be the motion dx,dy.
+proc motion {dx dy what} {
+    set line [next_line "the motion $dx $dy ($what)"]
+    if {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
+        if {"$gx $gy" ne "$dx $dy"} {
+            lc_fail "$what: the fixture was handed a motion of $gx $gy, not $dx $dy"
+        }
+    } elseif {[string match "rel-watch: mark *" $line]} {
+        lc_fail "$what: the fixture said a mark where a motion of $dx $dy was due"
+    } else {
+        lc_fail "$what: read '$line' where a motion of $dx $dy was due"
+    }
+    lc_pass "$what: a motion of $dx $dy"
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "boot"
+    }
+    timeout {
+        lc_fail "no login"
+    }
+    eof {
+        lc_fail "EOF before login"
+    }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {
+    }
+    timeout {
+        lc_fail "no password prompt"
+    }
+    eof {
+        lc_fail "EOF before password"
+    }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {
+    }
+    -ex "Thylacine textual shell" {
+        # A lever the image lacks is a SKIP, never a FAIL.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout {
+        lc_fail "no graphical session"
+    }
+    eof {
+        lc_fail "EOF at session start"
+    }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "session"
+    }
+    timeout {
+        lc_fail "welcome and shell did not become ready"
+    }
+}
+
+after 1200
+type "tapestry-battery --rel-watch\n"
+lc_expect "rel-watch: ready" "the motion fixture"
+key meta_l+f
+
+# Before: a place, and then a motion of its own.
+move 200 400
+move 360 400
+motion 160 0 "before the episode"
+
+# During: the pointer moves on the trusted screen, and Enter ends an episode
+# with nothing pending. Corvus's line and the compositor's come from two
+# processes, in either order.
+key ctrl+alt+f10
+lc_expect "lictor: trusted scanout active generation=" "the trusted screen is up"
+move 1000 400
+key ret
+set ended 0
+set back 0
+while {!($ended && $back)} {
+    set line [next_line "the episode's end and the seat's return (ended=$ended back=$back)"]
+    if {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
+        lc_fail "a motion of $gx $gy reached the fixture while the trusted screen was up"
+    } elseif {[string match "rel-watch: mark *" $line]} {
+        lc_fail "an Enter pressed at the trusted screen reached the fixture"
+    } elseif {[string match "corvus: *" $line]} {
+        set ended 1
+    } else {
+        set back 1
+    }
+}
+lc_pass "the episode ended, the compositor said the seat is back, and the fixture was handed nothing"
+
+# After: the first position is a place. The mark shows the fixture could
+# speak, and that it was handed no Enter before this one.
+move 1040 400
+key ret
+set line [next_line "the fixture's mark after the episode"]
+if {[regexp {^rel-watch: rel (-?\d+) (-?\d+)$} $line -> gx gy]} {
+    lc_fail "the first position after the episode was handed on as a motion of $gx $gy: 680 0 is the pointer's way across the trusted screen"
+} elseif {$line ne "rel-watch: mark 1"} {
+    lc_fail "after the episode the fixture's first line is '$line', want its first mark: an Enter pressed at the trusted screen reached it, or the seat came back twice"
+}
+lc_pass "the first position after the episode is a place: the fixture said its first mark and no motion before it"
+move 1200 400
+motion 160 0 "the position after it"
+
+key esc
+lc_expect "rel-watch: done" "the fixture exited"
+lc_pass "the pointer's way across a trusted episode reached no program"
+lc_quit

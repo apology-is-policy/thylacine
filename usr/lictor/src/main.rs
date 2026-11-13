@@ -98,8 +98,12 @@ impl Driver for Lictor {
                     Request::InputDrain { index } => {
                         let mut bytes = Vec::new();
                         if let Some(input) = self.inputs.get_mut(index as usize) {
+                            // The seat and the events in one reply: a client
+                            // that asks the seat and then drains can have a
+                            // whole episode between its two requests.
                             let events = core::mem::take(&mut input.events);
-                            events.put(&mut bytes); Ok(bytes)
+                            let reply: lictor::gpu_api::Drained = (self.seat.generation, self.seat.phase, events);
+                            reply.put(&mut bytes); Ok(bytes)
                         } else { Err(Error::BadField) }
                     }
                     Request::SeatState => {

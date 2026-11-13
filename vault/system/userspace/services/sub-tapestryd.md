@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
+code: [usr/tapestryd/src/epoch.rs, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Cooperative hidden storage (October 4)
 
@@ -3881,20 +3881,51 @@ the code, not seen in a guest; a frontend that sets the guest's mode from
 its window's size reaches it once a resize.
 
 Nor does the base outlive a trusted-path episode. While Lictor has the seat
-for one the loop drains no device, so the first position after it was
-counted from the last one before it, and the focused program was handed, as
-one motion, the pointer's whole way over the trusted screen: input of an
-episode, which reaches no program. `seat_resumed` forgets the base. The
-loop reaches it at the top of a pass, when the seat's generation has moved,
-and that alone left a way through: a pass can itself wait out a whole
-episode, inside a request Lictor parks while the seat is taken (a chord's
-`reconcile`, a retirement from `key_event`), and go on to drain the tablet
-with the base from before it. So after a stage that handled any event the
-loop asks `seat_state` again before it drains a pointer device
-(`Tapestryd::seat_moved`), and a seat that has moved sends it back to the
-top. Events drained before such a wait are handled after it; they are from
-before the episode. None of this is seen in a guest: no scenario makes an
-episode begin inside a pass. The
+for one it gathers nothing for the compositor, so the first position after
+it was counted from the last one before it, and the focused program was
+handed, as one motion, the pointer's whole way over the trusted screen:
+input of an episode, which reaches no program. `seat_resumed` forgets the
+base, and the pass reaches it from a reading of the seat.
+
+A reading is the seat's generation and phase, and the rule for one is
+`epoch::SeatEpoch`, in the lib, where the host tests run it: a phase that
+is not 0 is an episode that is on; a generation the pass has not dealt
+with, at phase 0, is a seat that has come back, told once. The broker
+answers a reading alone (`SeatState`) and with every drain of an input
+device, in the reply that carries the events and from the one thread that
+gathers them (sub-lictor, "A drain is answered with the seat it is of").
+So a drain's events are of the seat its reply tells, and the pass deals
+with the reading (`Tapestryd::seat_read`) before it hands any of them on:
+for a seat that has come back it puts its state down first
+(`interaction_suspend`, the modifiers, `seat_resumed`), and what a drain
+brings while an episode is on is handed to no program and the pass starts
+again. The pass's first reading comes with the keyboard's drain; the seat
+is asked alone only where there is no keyboard or its drain was not
+answered. Under test-mode the return is said: `tapestryd: seat back
+generation=N`.
+
+Until 2026-11-13 the pass asked the seat and then drained, and asked again
+before each pointer drain that followed a stage which had handled an event,
+because a pass can wait out a whole episode inside a request Lictor parks
+while the seat is taken (a chord's `reconcile`, a retirement from
+`key_event`). Asking and draining are two requests, neither of which the
+broker ever parks, and an episode that began and ended between them, with
+the compositor's thread kept off the processor for as long, handed the
+program the way across it. Where the askings stood was also an argument
+about which stages can wait, and a new stage would have voided it unseen.
+Now the case of an episode inside a pass is the ordinary case read at
+another drain: the same function, called on the same kind of reply.
+
+`tools/interactive/ls-graphical-sak-pointer.exp` puts the pointer down
+twice, moves it over the trusted screen, and reads that the first position
+after the episode makes no motion and the second its own, with a fixture
+(`tapestry-battery --rel-watch`) that says every motion and marks every
+Enter it is handed. NOT YET RUN IN A GUEST. No scenario makes the reading
+that finds the seat back a pointer drain's.
+
+A drain the broker does not answer is said once (`tapestryd: the broker did
+not answer the keyboard's drain; its input is not read`); the compositor
+goes on without that device, as it did before in silence. The
 keyboard's `SYN_DROPPED` reaches `seat_resumed` as well and costs the tablet
 one position's motion. A dropped batch of the tablet's own is left as it
 is: the travel it lost is the person's, made for the same program, and the
