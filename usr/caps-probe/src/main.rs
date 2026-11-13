@@ -72,7 +72,7 @@ fn seat_probe(stage: &str) -> i64 {
         "--seat-baseline" | "--seat-restored" | "--seat-denied" | "--seat-cancelled"
         | "--seat-control" | "--seat-poisoned" | "--seat-chain" | "--seat-readback"
         | "--seat-pointer" | "--seat-answered" | "--seat-framed" | "--seat-refused"
-        | "--seat-held" | "--seat-painted" | "--seat-waited" => false,
+        | "--seat-held" | "--seat-painted" | "--seat-waited" | "--seat-bound" => false,
         "--seat-elevated" => true,
         _ => return 2,
     };

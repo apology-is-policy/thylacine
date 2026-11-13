@@ -1020,6 +1020,8 @@ struct Controlq {
     parked: alloc::vec::Vec<Parked>,
     /// The slots parked chains hold: not allocatable, not published.
     fslot_parked: [bool; FENCED_SLOTS],
+    /// The seat is in an episode (`Gpu::hold_parked`): nothing parked goes.
+    parked_held: bool,
     /// Contexts with a released client chain: everything later of theirs parks
     /// and is released too, until a destroy of that device context completes.
     released: crate::gpu_api::Released,
@@ -1622,6 +1624,12 @@ impl Controlq {
     /// stall's revival publishes at the next pump. A context `released` records
     /// has its parked chains released, as a poisoned one's are.
     ///
+    /// Nothing goes while the seat holds them either. A chain published inside an
+    /// episode would be client work the takeover never waited out, and the restore's
+    /// fenced commands retire behind it: a client could time its readback's release
+    /// so that the restore waits past the kernel's deadline, and an authenticated
+    /// episode would fail.
+    ///
     /// A context with an abandoned chain not yet retired has its parked chains
     /// released as refused. The chain may never retire, a parked chain has no
     /// abandonment clock, and it counts in `fenced_outstanding`, so without this
@@ -1631,7 +1639,7 @@ impl Controlq {
     /// do needs them. The compositor's readback is released the same way, which
     /// frees the reserved slot for every other surface.
     fn unpark(&mut self) {
-        if self.parked.is_empty() || self.refusing() {
+        if self.parked.is_empty() || self.refusing() || self.parked_held {
             return;
         }
         let plan = crate::gpu_api::unpark_plan(
@@ -2499,6 +2507,7 @@ impl Gpu {
                 fslot_reach: [ChainReach::default(); FENCED_SLOTS],
                 parked: alloc::vec::Vec::new(),
                 fslot_parked: [false; FENCED_SLOTS],
+                parked_held: false,
                 released: crate::gpu_api::Released::default(),
                 owed_reach: crate::gpu_api::OwedReach::default(),
                 fslot_poison_ring: [0; FENCED_SLOTS],
@@ -4276,8 +4285,10 @@ impl Gpu {
     }
     /// The seat's restore: the broker's bind and nothing else, which no lever
     /// reaches. The frees an accepted bind lets go are a client's, so they wait
-    /// for a client's next accepted bind: one the device is slow to take would
-    /// otherwise stand between an authenticated episode and its return.
+    /// for a later bind that drains: a client's accepted image or blob bind, or
+    /// the next takeover's trusted one (a blob probe drains nothing). Draining
+    /// here, one free the device is slow to take would stand between an
+    /// authenticated episode and its return.
     pub fn set_scanout_restore(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
         self.set_scanout_as(resource_id, w, h, false, false)
     }
@@ -5328,6 +5339,16 @@ impl Gpu {
     /// dies, or the cursor lane is abandoned.
     pub fn bound_takeover(&mut self, chord: Option<Instant>) {
         self.ctrl.takeover_from = chord;
+    }
+
+    /// Set by the seat from each STATUS it reads: held from the chord until the seat
+    /// is NORMAL again, so the client chains parked meanwhile go only after the
+    /// restore. The takeover's synchronous chains are fenced on the device's timeline
+    /// (`fence_sync`), so what a client put on that timeline before the chord has
+    /// retired once the takeover is up; with this, nothing of a client's joins it until
+    /// the seat returns.
+    pub fn hold_parked(&mut self, hold: bool) {
+        self.ctrl.parked_held = hold;
     }
 
     /// What trusted takeover asks of the device. A fenced chain need not have

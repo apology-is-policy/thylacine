@@ -16,7 +16,8 @@ pub enum Presentation {
 pub enum Restored {
     /// The compositor's last frame is bound again.
     Rebound,
-    /// Nothing is bound: there was no frame, or the device refused it.
+    /// Nothing is bound: there was no frame, the ledger no longer holds its
+    /// resource, or the device refused it.
     Blank,
 }
 /// Why the seat's restore is not done.
@@ -140,6 +141,8 @@ pub enum SeatShot {
     /// A controlq stall standing when the ordinary return's restore begins; the
     /// device retires it.
     StallInRestore,
+    /// A controlq stall begun by the restore's own first command; the device retires it.
+    StallInsideRestore,
     /// A controlq stall under the trusted scanout whose retirement is
     /// withheld: the engine dies.
     StallHeld,
@@ -397,9 +400,12 @@ impl Device {
     /// The frame is the client's, so whether it can be bound again is the
     /// client's to spoil (a backing detached, on a device that wants one) and
     /// is not the episode's to pay for: a frame the device REFUSES is given up
-    /// and the output left blank until the client binds a frame again. A stall is no answer, so nothing is concluded from one and the
-    /// caller asks again. Only the disable, which names nothing of a client's,
-    /// can leave the seat unrestored on a live engine.
+    /// and the output left blank until the client binds a frame again. A stall
+    /// is no answer, so nothing is concluded from one and the caller asks again
+    /// within the kernel's deadline; no chain a client parked reaches the device
+    /// while the seat is out of NORMAL (`Gpu::hold_parked`). The one answer that
+    /// leaves the seat unrestored on a live engine is a refused disable, which
+    /// names nothing of a client's.
     pub fn restore(&mut self) -> Result<Restored, Unrestored> {
         if self.gpu.engine_dead() { return Err(Unrestored::Lost); }
         if !self.gpu.takes_commands() { return Err(Unrestored::Waiting); }
@@ -484,18 +490,19 @@ impl Device {
             return Some(shot);
         }
         let shot = match self.test_seat_shots {
-            13 => SeatShot::StallAfterExclusion,
-            12 => SeatShot::StallInPaint,
-            11 => SeatShot::HoldAfterExclusion,
-            10 => SeatShot::RefuseBind,
-            9 => SeatShot::BehindReadback,
-            8 => SeatShot::StallInFrame,
-            7 => SeatShot::RefuseFrame,
-            6 => SeatShot::HoldRestore,
-            5 => SeatShot::CursorStall,
-            4 => SeatShot::CursorAbandon,
-            3 => SeatShot::RefuseRestored,
-            2 => SeatShot::StallInRestore,
+            14 => SeatShot::StallAfterExclusion,
+            13 => SeatShot::StallInPaint,
+            12 => SeatShot::HoldAfterExclusion,
+            11 => SeatShot::RefuseBind,
+            10 => SeatShot::BehindReadback,
+            9 => SeatShot::StallInFrame,
+            8 => SeatShot::RefuseFrame,
+            7 => SeatShot::HoldRestore,
+            6 => SeatShot::CursorStall,
+            5 => SeatShot::CursorAbandon,
+            4 => SeatShot::RefuseRestored,
+            3 => SeatShot::StallInRestore,
+            2 => SeatShot::StallInsideRestore,
             1 => SeatShot::StallHeld,
             _ => return None,
         };
@@ -916,7 +923,7 @@ impl Device {
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
                     if !self.test_declared { return Err(self.test_undeclared(0, crate::gpu_api::TEST_LEVERS_WORD)); }
-                    self.test_latch_shots = 2; self.test_seat_shots = 13; self.test_stall_shots = 3;
+                    self.test_latch_shots = 2; self.test_seat_shots = 14; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     super::intake::test::arm();
                     ().put(&mut out);

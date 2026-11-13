@@ -96,6 +96,9 @@ pub struct Seat {
     /// Stall the engine as the next ordinary return's restore begins.
     #[cfg(feature = "test-mode")]
     test_stall_restore: bool,
+    /// Stall the engine on the next ordinary return's restore's own first command.
+    #[cfg(feature = "test-mode")]
+    test_stall_inside: bool,
     /// The generation whose shot is taken: a takeover that starts over after a
     /// stall is the same takeover.
     #[cfg(feature = "test-mode")]
@@ -287,6 +290,9 @@ impl Seat {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
         self.adopt(&m);
+        // Before any pump this pass, the takeover's included: a chain a client parked
+        // must not reach the device while the episode is open (`Gpu::hold_parked`).
+        device.gpu.hold_parked(self.phase != 0);
         #[cfg(feature = "test-mode")]
         if self.phase != 2 {
             if let Some(stalled) = self.test_frame_stalled.take() {
@@ -401,6 +407,7 @@ impl Seat {
                         screen.test_refuse_frame = shot == Some(SeatShot::RefuseFrame);
                         self.test_hold_restore |= shot == Some(SeatShot::HoldRestore);
                         self.test_stall_restore |= shot == Some(SeatShot::StallInRestore);
+                        self.test_stall_inside |= shot == Some(SeatShot::StallInsideRestore);
                     }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.
@@ -479,10 +486,19 @@ impl Seat {
                         "lictor: restore shot: a synchronous chain stalled ahead of the restore stalled={} generation={}\n",
                         stalled as u8, self.generation));
                 }
+                // The restore's own first command retires late, so the stall begins inside
+                // it: the baseline it reads before staging is what tells this from a refusal.
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.test_stall_inside) {
+                    device.gpu.test_stall_next();
+                    super::diagnostic(&alloc::format!(
+                        "lictor: restore shot: the restore's first command will stall generation={}\n", self.generation));
+                }
                 let restored = match device.restore() {
                     Ok(restored) => restored,
-                    // A stall is other work ahead of the rebind, not an answer from the
-                    // device: the next pass asks again, inside the kernel's five seconds.
+                    // A stall is work ahead of the rebind, not an answer from the device, so
+                    // the next pass asks again; the kernel's five seconds bound the wait. No
+                    // chain a client parked reaches the device meanwhile (`Gpu::hold_parked`).
                     Err(Unrestored::Waiting) => {
                         if self.restore_waited != Some(self.generation) {
                             self.restore_waited = Some(self.generation);
@@ -509,14 +525,24 @@ impl Seat {
                 if refused || ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
                 self.adopt(&m); self.displaced = false;
                 self.drain_episode_tail(inputs);
-                super::diagnostic(&alloc::format!("lictor: episode closed: {} generation={}\n",
-                    if restored == Restored::Rebound { "frame rebound" } else { "output blank" }, generation));
+                // The kernel fails an expired episode lazily, at the next call, and then
+                // takes RESTORED from FAILED and retires the generation: an episode whose
+                // deadline passed during the restore comes back NORMAL with its grant
+                // cancelled, and only the generation says so.
+                if self.generation != generation {
+                    super::diagnostic(&alloc::format!(
+                        "lictor: seat failed: the kernel's deadline passed before the restore was acknowledged generation={}\n",
+                        generation));
+                } else {
+                    super::diagnostic(&alloc::format!("lictor: episode closed: {} generation={}\n",
+                        if restored == Restored::Rebound { "frame rebound" } else { "output blank" }, generation));
+                }
             }
             _ => {
                 // The kernel already cancelled any grant and scrubbed the key
                 // queue, so what is left is giving the workspace back. Say
                 // what happened first, then restore and tell the kernel; a
-                // refused restore (a stalled engine) is retried every pass and
+                // restore that meets a stall is asked again every pass and
                 // confers nothing in the meantime. A dead engine can restore
                 // nothing, so the seat goes back without its display.
                 for input in inputs.iter_mut() { input.events.clear(); }
@@ -536,9 +562,14 @@ impl Seat {
                 // the held cursor chain is let go here.
                 #[cfg(feature = "test-mode")]
                 if self.test_cursor_release_at.take().is_some() { device.gpu.test_cursor_release(); }
-                // A chained shot's second wait is armed only inside the takeover it breaks.
+                // A chained shot's second wait is armed only inside the takeover it breaks,
+                // and a shot armed for this episode's frame or return dies with it.
                 #[cfg(feature = "test-mode")]
-                { self.test_then_cursor = false; self.test_then_control = false; self.test_cursor_due = false; self.test_fail_late = false; }
+                {
+                    self.test_then_cursor = false; self.test_then_control = false; self.test_cursor_due = false; self.test_fail_late = false;
+                    self.test_stall_frame = false; self.test_hold_restore = false; self.test_refuse_restored = false;
+                    self.test_stall_restore = false; self.test_stall_inside = false;
+                }
                 if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
                 if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {
