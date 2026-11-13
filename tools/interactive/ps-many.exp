@@ -9,7 +9,9 @@
 # asserts:
 #   - /ctl/procs has no cut line on the small system and ends with it on the
 #     large one. The pair is one variable apart: a line that is always there,
-#     or never, fails one leg.
+#     or never, fails one leg. cat reads to end of file and every read renders
+#     the file afresh, so when a later rendering is longer cat also prints its
+#     last bytes: after the cut line only the end of a cut line may follow.
 #   - every pid /proc lists both before and after a ps is in that ps. Such a
 #     Proc was alive throughout the listing (pids are never reused), and the
 #     listing owes it a row. Reading the sixty rows that fit omits the rest.
@@ -55,6 +57,8 @@ proc start_job {cmd what} {
 # ls prints one name per line; a directory may carry its classify suffix.
 set ls_row {\n([0-9]+)/?\r}
 set ps_row {\n([0-9]+) {4}[0-9]+ {4}[^ \r\n]+ {4}[A-Z?]+ {4}}
+# One whole /ctl/procs row: nine columns, the last a number or `-`.
+set row9 {[0-9]+ +[0-9]+ +[^ \r\n]+ +[A-Z?]+ +[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +(?:[0-9]+|-)}
 
 # ---- (1) a freshly booted system fits one read: no cut line -----------------
 lc_send "cat /ctl/procs; echo many-small-end"
@@ -78,14 +82,25 @@ for {set i 1} {$i <= 70} {incr i} {
 }
 lc_send "cat /ctl/procs; echo many-large-end"
 set timeout 30
+set after_cut ""
 expect {
-    -re "$cutline\[\r\n\]+many-large-end" {}
+    -re "\n$row9\r*\n$cutline\r*\n((?:\[^\n\]*\n)*)many-large-end" { set after_cut $expect_out(1,string) }
     -re "\[\r\n\]many-large-end" { lc_fail "/ctl/procs with seventy more Procs ends without the cut line (2)" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction reading /ctl/procs (2)" }
     timeout           { lc_fail "no end of /ctl/procs (2)" }
     eof               { lc_fail "qemu exited reading /ctl/procs (2)" }
 }
-lc_pass "ps-many(2): /ctl/procs with more rows than fit ends with the cut line"
+set plain [string map [list "\\" ""] $cutline]
+set spliced 0
+foreach line [split [string map [list "\r" ""] $after_cut] "\n"] {
+    if {$line eq ""} continue
+    set at [expr {[string length $plain] - [string length $line]}]
+    if {$at < 0 || [string range $plain $at end] ne $line} {
+        lc_fail "/ctl/procs with seventy more Procs: `$line` follows the cut line and is not the end of a later rendering's (2)"
+    }
+    incr spliced [string length $line]
+}
+lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table, after a whole row, with the cut line (cat's read to end of file added $spliced byte(s) of a later rendering)"
 
 # ---- (3) ps lists every Proc alive throughout it ----------------------------
 set before [pids_of "ls /proc | cat" $ls_row "ls1"]
@@ -111,7 +126,7 @@ lc_send {cp /bin/sleep '/tmp/a b'}
 lc_send {chmod 755 '/tmp/a b'}
 set odd [start_job {'/tmp/a b' 900} "the program named `a b`"]
 lc_send "cat /proc/$odd/status"
-lc_expect_re {name: +a\?b\r?\n} "the status shows the space in the file name as ? (4)"
+lc_expect_re {name: +a\?b\r*\n} "the status shows the space in the file name as ? (4)"
 lc_send "ps --color=never --beacon=never; echo many-name-end"
 set timeout 60
 set saw_row 0

@@ -207,7 +207,11 @@ stops after the last whole row and ends with this line:
 (cut: more processes than one read holds; /proc lists them all)
 ```
 
-A table without that line holds every process the reader may see. `ps` and
+A table without that line holds every process the reader may see. The table
+is produced again for each read, so read it with one read. A program that
+reads on to the end of the file, as `cat` does, asks a second time, and when
+the second table is longer than the first it prints that table's last few
+characters after the first one. `ps` and
 `prowl` take their rows from `/proc`: they list the directory, which has no
 such limit, and read each process's status file, so they show every process on
 a system of any size. Their rows are read one after another. Each row describes

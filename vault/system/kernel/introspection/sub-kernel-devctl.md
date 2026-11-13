@@ -342,7 +342,13 @@ table's first rows by pid, the cut line present exactly when a row is
 missing, and at least one size that holds rows and the line together. It
 compares shape, not bytes, because `CPU_NS` moves between two renders.
 `tools/interactive/ps-many.exp` reads the file on a freshly booted guest and
-requires no cut line, then with seventy more Procs and requires it last.
+requires no cut line, then with seventy more Procs and requires it after a
+whole nine-column row. It reads with `cat`, which reads to end of file, and
+every read renders the file afresh: when the second rendering is longer,
+`cat` prints its last bytes after the first. So the scenario lets only the
+end of a cut line follow the cut line. Its first boot showed exactly that, a
+lone `)` line, and the leg as first written (the cut line directly before
+the marker) read it as a table without the line.
 
 ### A cut kernel-stack table says so, and keeps its peak (2026-11-13)
 
