@@ -375,15 +375,21 @@ every record that names it without taking the Burrows' locks in some order,
 and it costs nothing visible because a mint is a 9P read away. Nothing is
 acquired inside it; the charge and refund are the space counter's CAS loops.
 
-The invariant, whenever the lock is free: `file_charge_pages` is the Burrow's
-resident page count, and a non-NULL `file_payer` has paid exactly that many
-pages.
+The invariant: `file_charge_pages` is the Burrow's resident page count plus at
+most the one page a fill has charged and is installing (charge and install in
+one hold of the faulting space's `as->lock`, no sleep between), and a non-NULL
+`file_payer` has paid exactly `file_charge_pages`.
 
 - `burrow_file_set_payer` marks the Burrow private and links the payer, once,
   before the Burrow is published.
 - `burrow_file_mint_charge` charges up to `want` pages to the payer, cut to its
   headroom, and adds them to the record. A lapsed record is first handed to the
-  faulter, which is charged the whole residency as well.
+  faulter, which is charged the whole residency as well. The cap binds unless
+  both the payer and the faulter are exempt (audit round 34 F6: the payer's
+  recorded exemption alone used to waive it for any holder). Callers charge a
+  page right before installing it, never across a read (round 34 F1).
+- `burrow_file_mint_headroom` answers how many of `want` the same charge could
+  take now, charging nothing; the cluster sizes its window with it.
 - `burrow_file_mint_refund` takes back mints that did not end resident, from
   the record and from whoever pays now. A hand-over charged the new payer the
   whole record, so the refund always belongs to the current payer.

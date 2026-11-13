@@ -375,15 +375,21 @@ Linux's `mmap_zero` does; a write-only one is `EACCES`. The file arms run their
 window (`mmap_file_window` / `mmap_fixed_file_window`, shared with the native
 door), then `EACCES` for an unreadable descriptor, then the shared bodies
 (`mmap_file_body` / `mmap_fixed_file_body`, which consume the Spoor). A shape no
-arm serves answers `EACCES` for an unreadable descriptor and `ENOSYS` for a
-readable one, before any device is asked (round 32 F4: the scripture had said
-every such device answers `ENODEV`). `vivarium.mmap_dev_zero_is_anonymous`
+arm serves is judged on its map type first: one that is not shared,
+shared-validate or private (`VIV_MAP_TYPE`) is `EINVAL` whatever the descriptor,
+as `do_mmap`'s switch is (round 34 F5). Past that it answers `EACCES` for an
+unreadable descriptor and `ENOSYS` for a readable one, before any device is
+asked (round 32 F4: the scripture had said every such device answers
+`ENODEV`). A `MAP_SHARED_VALIDATE` call with a flag Linux does not know is
+declined that way where Linux says `EOPNOTSUPP`, a divergence VIVARIUM 6.21
+records. `vivarium.mmap_dev_zero_is_anonymous`
 drives the devzero cases through the dispatcher (read-write and read-only map a
 lazy anonymous Burrow at the asked prot; `/dev/null` is the control, `ENOSYS`
 and `ENODEV`; write-only `EACCES`, `O_PATH` `EBADF`), and
 `vivarium.mmap_order_is_linux` pins the order, each refusal beside a call one
 step later that answers the next step's errno, with the native door's
-length-first order as a control.
+length-first order as a control; its last pair is a call with no map type
+(`EINVAL`) beside the same descriptor in a served type (`EACCES`).
 
 **The two anonymous arms changed at B-1a.** `vivarium_mmap_decide`'s allow-list
 (`VIV_MMAP_PROT_ADMITTED` = R|W) is unchanged, but `PROT_NONE` inside it is now

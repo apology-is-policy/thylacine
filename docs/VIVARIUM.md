@@ -2465,9 +2465,12 @@ looks could turn a file map into `ENODEV`). A zero length is `EINVAL` next, then
 the arm's window (`ENOMEM` past the length cap or outside the burrow window,
 `EINVAL` for a range that wraps), then the access mode: `EACCES` for a
 descriptor not open for reading, which Linux asks at `do_mmap`'s `FMODE_READ`,
-after its window. Past that the arms keep their own gates in Linux's relative
+after its window. A call no arm serves is judged on its map type first: one
+that is not shared, shared-validate or private is `EINVAL` whatever the
+descriptor, as `do_mmap`'s switch is, and only then the access mode (round 34
+F5). Past that the arms keep their own gates in Linux's relative
 order: `EPERM` for an executable map off a noexec mount, then `ENODEV` for a
-device that backs no mapping. Three divergences remain: a range that wraps is `EINVAL` where Linux says `EOVERFLOW`; a
+device that backs no mapping. Four divergences remain: a `MAP_SHARED_VALIDATE` call carrying a flag Linux does not know is declined (`ENOSYS`, or `EACCES` for an unreadable descriptor) where Linux answers `EOPNOTSUPP`; a range that wraps is `EINVAL` where Linux says `EOVERFLOW`; a
 write-only descriptor in a shape no arm serves, or a write-only `/dev/zero`,
 has no arm window to judge first, so a length too large to map answers `EACCES`
 there where Linux answers `ENOMEM`; and a `MAP_FIXED` request outside the burrow

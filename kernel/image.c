@@ -224,6 +224,10 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
         // frees at unmap. Fail-safe degrade, never an exec failure.
         g_image_bypass++;
         spin_unlock(&g_image_lock);
+        // Vote 118 (round 34 F2): never registered, never served to another
+        // mapper, never idle-reclaimable -- a private image in all but how it
+        // got here, so its pages are its payer's like any private image's.
+        burrow_file_set_payer(fresh, payer, payer_exempt);
         return fresh;
     }
 

@@ -730,9 +730,12 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // never the other way round. A mint is a 9P read away, so one lock for the
 // machine costs nothing that shows.
 //
-// The record's invariant, whenever this lock is free: file_charge_pages is the
-// Burrow's resident page count, and a non-NULL file_payer has paid exactly
-// that many pages for it. Every transition below keeps both halves.
+// The record's invariant: file_charge_pages is the Burrow's resident page
+// count plus the one page a fill may have charged and not yet installed (the
+// cluster charges slot by slot at its install, the single fill its one page,
+// each under the faulting space's as->lock with no sleep between the charge
+// and the install), and a non-NULL file_payer has paid exactly
+// file_charge_pages. Every transition below keeps both halves.
 // =============================================================================
 
 static spin_lock_t g_file_payer_lock = SPIN_LOCK_INIT;
@@ -768,37 +771,69 @@ void burrow_file_set_payer(struct Burrow *v, struct AddrSpace *as, bool exempt) 
     spin_unlock(&g_file_payer_lock);
 }
 
+// Who would pay a mint into `v` now, what that payer still owes before it can
+// take one (a hand-over's residency), and whether the cap binds. The cap is
+// waived only when both the payer and the faulter are exempt: the faulter's
+// verdict decides every other charge a fault takes, and a payer's recorded
+// exemption must not carry a non-exempt holder past it.
+static struct AddrSpace *mint_payer_locked(struct Burrow *v, struct AddrSpace *faulter,
+                                           bool exempt, u32 *owed, bool *pexempt,
+                                           bool *capfree) {
+    struct AddrSpace *payer = v->file_payer;
+    *pexempt = v->file_payer_exempt;
+    *owed    = 0;
+    // A lapsed record: the faulter becomes the payer, and a payer pays the
+    // whole residency -- the pages its dead predecessor paid for are still
+    // resident, and the invariant says the payer has paid every one of them.
+    if (!payer) {
+        payer    = faulter;
+        *pexempt = exempt;
+        *owed    = v->file_charge_pages;
+    }
+    *capfree = *pexempt && exempt;
+    return payer;
+}
+
+// How many of `want` the payer could take now, after what it owes (0..want).
+static u32 mint_take_locked(struct AddrSpace *payer, u32 owed, bool capfree, u32 want) {
+    u32 take = want;
+    if (!capfree) {
+        u32 budget = __atomic_load_n(&payer->page_budget, __ATOMIC_RELAXED);
+        u32 used   = __atomic_load_n(&payer->page_count,  __ATOMIC_RELAXED);
+        u32 head   = budget > used ? budget - used : 0;
+        if (head <= owed) return 0;                     // not even one page
+        if (take > head - owed) take = head - owed;
+    }
+    if (take > 0xFFFFFFFFu - owed) return 0;            // the sum would wrap: refuse
+    return take;
+}
+
+u32 burrow_file_mint_headroom(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+                              u32 want) {
+    if (!v || !v->file_private || !faulter || want == 0) return 0;
+    spin_lock(&g_file_payer_lock);
+    u32 owed; bool pexempt, capfree;
+    struct AddrSpace *payer = mint_payer_locked(v, faulter, exempt, &owed, &pexempt, &capfree);
+    u32 take = mint_take_locked(payer, owed, capfree, want);
+    spin_unlock(&g_file_payer_lock);
+    return take;
+}
+
 u32 burrow_file_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
                             u32 want) {
     if (!v || !v->file_private || !faulter || want == 0) return 0;
     spin_lock(&g_file_payer_lock);
-    struct AddrSpace *payer = v->file_payer;
-    bool pexempt = v->file_payer_exempt;
-    // A lapsed record: the faulter becomes the payer, and a payer pays the
-    // whole residency -- the pages its dead predecessor paid for are still
-    // resident, and the invariant says the payer has paid every one of them.
-    u32 owed = 0;
-    if (!payer) {
-        payer   = faulter;
-        pexempt = exempt;
-        owed    = v->file_charge_pages;
-    }
+    u32 owed; bool pexempt, capfree;
+    struct AddrSpace *payer = mint_payer_locked(v, faulter, exempt, &owed, &pexempt, &capfree);
     u32 n = 0;
     for (;;) {
-        u32 take = want;
-        if (!pexempt) {
-            u32 budget = __atomic_load_n(&payer->page_budget, __ATOMIC_RELAXED);
-            u32 used   = __atomic_load_n(&payer->page_count,  __ATOMIC_RELAXED);
-            u32 head   = budget > used ? budget - used : 0;
-            if (head <= owed) break;                    // not even the faulting page
-            if (take > head - owed) take = head - owed;
-        }
-        if (take > 0xFFFFFFFFu - owed) break;           // the sum would wrap: refuse
+        u32 take = mint_take_locked(payer, owed, capfree, want);
+        if (!take) break;
         // The CAS loop re-decides against the cap; a refusal here means the
         // count grew past this snapshot's headroom, so look again. Each lap
         // follows a charge that landed, so the loop ends.
-        if (addrspace_charge_pages(payer, owed + take, pexempt)) { n = take; break; }
-        if (pexempt) break;                             // only a wrapping counter refuses it
+        if (addrspace_charge_pages(payer, owed + take, capfree)) { n = take; break; }
+        if (capfree) break;                             // only a wrapping counter refuses it
     }
     if (n) {
         if (payer != v->file_payer) file_paid_link_locked(v, payer, pexempt);

@@ -298,8 +298,8 @@ void test_vivarium_mmap_order_is_linux(void) {
     bool empty = handle_get(p, (hidx_t)none, &probe) < 0;
     if (!empty) handle_put(&probe);
     bool ok = rfd >= 0 && wfd >= 0 && ofd >= 0 && empty;
-    s64 r[13];
-    for (int i = 0; i < 13; i++) r[i] = 0;
+    s64 r[15];
+    for (int i = 0; i < 15; i++) r[i] = 0;
     bool anon_fd = false, anon_dead = false, anon_canon = false;
     if (ok) {
         r[0]  = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, none, 0x10);
@@ -318,6 +318,8 @@ void test_vivarium_mmap_order_is_linux(void) {
         r[10] = viv_mmap_args(p, fixed, BURROW_RESERVE_MAX + PAGE_SIZE, R, FIX, (u64)wfd, 0);
         r[11] = viv_mmap_args(p, fixed, PAGE_SIZE, R, FIX, (u64)wfd, 0);
         r[12] = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, (u64)rfd, 0);
+        r[13] = viv_mmap_args(p, 0, PAGE_SIZE, R, 0, (u64)wfd, 0);
+        r[14] = viv_mmap_args(p, 0, PAGE_SIZE, R, VIV_MAP_SHARED, (u64)wfd, 0);
     }
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
@@ -340,6 +342,8 @@ void test_vivarium_mmap_order_is_linux(void) {
     TEST_EXPECT_EQ(r[10], -(s64)T_E_NOMEM, "the fixed arm's window is judged before the access mode");
     TEST_EXPECT_EQ(r[11], -(s64)T_E_ACCES, "control: within it, EACCES");
     TEST_EXPECT_EQ(r[12], -(s64)T_E_NODEV, "control: a readable descriptor passes to the opt-in floor");
+    TEST_EXPECT_EQ(r[13], -(s64)T_E_INVAL, "no map type is EINVAL, before the access mode");
+    TEST_EXPECT_EQ(r[14], -(s64)T_E_ACCES, "control: a served type with the same descriptor reaches it: EACCES");
 }
 
 // A T2 shell narrows its own words by its own Linux prototype. readlinkat's

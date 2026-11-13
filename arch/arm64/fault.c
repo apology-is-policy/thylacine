@@ -964,6 +964,8 @@ static enum fault_result file_install_locked(struct Proc *p,
             free_pages(newpg, 0);
             return FAULT_UNHANDLED_USER; // the payer has no headroom: refused as a leaf is
         }
+        // A hand-over this charge made: adopt before anything below can bail.
+        file_payer_adopt_if_due(p, vma, v);
     }
     struct page *resident = NULL;
     int irc = pagemap_install(&v->pm, &v->lock, freq->slot, newpg, NULL,
@@ -979,7 +981,6 @@ static enum fault_result file_install_locked(struct Proc *p,
     } else {
         resident = newpg;                // we win -- the Burrow owns newpg now
     }
-    file_payer_adopt_if_due(p, vma, v);
 
     // B-1a audit F1: the prot may have moved while we slept. The slot keeps
     // its page; no PTE is installed under a prot that never admitted this
@@ -1131,13 +1132,38 @@ out:
 // which FILE BYTES were read as well as which slots receive them, so a moved
 // geometry invalidates the cluster's whole contents at once. Since cstart is
 // derived from freq->slot, re-proving freq->slot re-proves the range.
+// One slot of a cluster: install `*pg` at slot `s` unless it is resident.
+// Returns the slot's resident page (ours or a sibling's), or NULL on a node
+// OOM or when the payer of a private image cannot take the page (then
+// *spent, and the caller mints no more). An adopted page is taken from *pg;
+// anything else stays there for the caller to free. Caller holds p->as->lock.
+static struct page *file_cluster_install_slot(struct Proc *p, struct Burrow *v, size_t s,
+                                              struct page **pg, bool *spent) {
+    bool exempt = proc_resource_exempt(p);
+    if (v->file_private) {
+        // A resident slot mints nothing, so it is charged nothing.
+        spin_lock(&v->lock);
+        struct page *have = pagemap_get(&v->pm, s);
+        spin_unlock(&v->lock);
+        if (have) return have;
+        if (!burrow_file_mint_charge(v, p->as, exempt, 1)) { *spent = true; return NULL; }
+    }
+    struct page *winner = NULL;
+    int irc = pagemap_install(&v->pm, &v->lock, s, *pg, NULL, exempt, &winner);
+    if (irc == 0) {
+        winner = *pg;                    // we win -- the Burrow owns it now
+        *pg = NULL;                      // adopted: the caller must not free it
+        return winner;
+    }
+    if (v->file_private) burrow_file_mint_refund(v, 1);   // not minted after all
+    return irc < 0 ? NULL : winner;      // irc 1: a sibling won; *pg stays a loser
+}
+
 static enum fault_result file_install_cluster_locked(struct Proc *p,
                                                      const struct fault_info *fi,
                                                      struct file_fault_req *freq,
                                                      size_t cstart, size_t ncluster,
-                                                     struct page **clpages,
-                                                     size_t *out_adopted) {
-    *out_adopted = 0;                    // the slots this call made resident (vote 118)
+                                                     struct page **clpages) {
     struct Vma *vma = vma_lookup(p, fi->vaddr);
     if (!vma || vma->burrow != freq->burrow ||
         vma->burrow->magic != VMO_MAGIC ||
@@ -1151,36 +1177,32 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;     // geometry moved -> the cluster is stale
     struct Burrow *v = vma->burrow;
 
-    struct page *fault_pg = NULL;
     if (!pagemap_live(&v->pm) || cstart + ncluster > v->page_count)
         return FAULT_UNHANDLED_USER;     // impossible shape change; caller frees clpages
+    // freq->slot is in [cstart, cstart+ncluster) by construction; the
+    // defensive bail keeps the invariant local.
+    if (freq->slot < cstart || freq->slot >= cstart + ncluster)
+        return FAULT_UNHANDLED_USER;
     // B-1a': one install-once per slot, each taking v->lock itself and
     // allocating the map's missing nodes outside it (no address-space charge
-    // for the nodes, the pool's; a private image's pages were charged to its
-    // payer before the read, vote 118, and the caller refunds every one this
-    // loop does not adopt). A node OOM midway leaves the earlier slots
+    // for the nodes, the pool's). A node OOM midway leaves the earlier slots
     // adopted -- the bytes are the Burrow's -- and the rest in clpages for the
-    // caller to free; the faulting slot decides the verdict below exactly as
-    // a lost race would.
-    for (size_t i = 0; i < ncluster; i++) {
-        size_t s = cstart + i;
-        struct page *winner = NULL;
-        int irc = pagemap_install(&v->pm, &v->lock, s, clpages[i], NULL,
-                                  proc_resource_exempt(p), &winner);
-        if (irc == 0) {
-            winner = clpages[i];             // we win -- the Burrow owns it now
-            clpages[i] = NULL;               // adopted: caller must not free it
-            (*out_adopted)++;
-        } else if (irc < 0) {
-            winner = NULL;                   // node OOM: clpages[i] stays the caller's
-        }                                    // irc == 1: a sibling won; clpages[i] stays a loser
-        if (s == freq->slot) fault_pg = winner;
-    }
-
-    // freq->slot is in [cstart, cstart+ncluster) by construction, so fault_pg is
-    // always set; defensive bail keeps the invariant local.
-    if (!fault_pg) return FAULT_UNHANDLED_USER;
+    // caller to free. Vote 118: a private image's page is charged to its payer
+    // here, slot by slot under this lock, never across the read (round 34
+    // F1); the faulting slot goes first, so a payer short of headroom refuses
+    // the fault rather than a read-ahead page, and the read-ahead stops at the
+    // first page it cannot pay for.
+    size_t fi0 = freq->slot - cstart;
+    bool spent = false;
+    struct page *fault_pg = file_cluster_install_slot(p, v, freq->slot, &clpages[fi0], &spent);
+    // A hand-over this fault made turns its mappings into payer mappings
+    // before any leaf of theirs is decided -- even if the fault fails below.
     file_payer_adopt_if_due(p, vma, v);
+    if (!fault_pg) return FAULT_UNHANDLED_USER;     // refused, lost to an OOM, or no headroom
+    for (size_t i = 0; i < ncluster && !spent; i++) {
+        if (i == fi0) continue;
+        (void)file_cluster_install_slot(p, v, cstart + i, &clpages[i], &spent);
+    }
 
     // B-1a audit F1: the cluster is adopted (the bytes are the Burrow's), but
     // the faulting page's PTE goes in only under a prot that still admits it.
@@ -1239,27 +1261,20 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     if (!freq->spoor || !freq->spoor->dev || !freq->spoor->dev->read)
         return FAULT_USER_BUS;           // no backing read -> fail closed (never zero-fill)
 
-    // Vote 118: a private image's read-ahead is its payer's. Charge the cluster
-    // BEFORE the read, cut to the payer's headroom: the window restarts at the
-    // faulting slot and keeps only the pages paid for (at least that one; with
-    // none the fault is refused, as a refused leaf is). Every exit below that
-    // does not leave a page resident refunds it.
-    u32 minted = 0;
+    // Vote 118: a private image's read-ahead is its payer's. The payer's
+    // headroom SIZES the window here, charging nothing: the pages are charged
+    // one by one as the install adopts them (file_cluster_install_slot), so no
+    // charge is held across the read below. A window cut short restarts at the
+    // faulting slot and keeps what the payer could take; with no headroom at
+    // all the fault is refused, as a refused leaf is.
     if (v->file_private) {
-        minted = burrow_file_mint_charge(v, p->as, proc_resource_exempt(p), (u32)ncluster);
-        if (!minted) return FAULT_UNHANDLED_USER;
-        if (minted < ncluster) {
+        u32 room = burrow_file_mint_headroom(v, p->as, proc_resource_exempt(p), (u32)ncluster);
+        if (!room) return FAULT_UNHANDLED_USER;
+        if (room < ncluster) {
             cstart = freq->slot;
-            if (cend > cstart + minted) cend = cstart + minted;
+            if (cend > cstart + room) cend = cstart + room;
             ncluster = cend - cstart;
-            if (ncluster < minted) {
-                burrow_file_mint_refund(v, minted - (u32)ncluster);
-                minted = (u32)ncluster;
-            }
-            if (ncluster <= 1) {
-                burrow_file_mint_refund(v, minted);   // the single fill charges its own
-                return file_demand_page_single(p, fi, freq);
-            }
+            if (ncluster <= 1) return file_demand_page_single(p, fi, freq);
         }
     }
 
@@ -1269,10 +1284,8 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     unsigned sorder = 0;
     while ((size_t)(1u << sorder) < ncluster) sorder++;
     struct page *stage = alloc_pages(sorder, KP_ZERO);
-    if (!stage) {
-        burrow_file_mint_refund(v, minted);
+    if (!stage)
         return file_demand_page_single(p, fi, freq);
-    }
     u8 *sbuf = (u8 *)pa_to_kva(page_to_pa(stage));
 
     u64    cl_file_off = v->file_offset + (u64)cstart * PAGE_SIZE;
@@ -1288,7 +1301,6 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
                                         (s64)(cl_file_off + got));
         if (n < 0) {
             free_pages(stage, sorder);
-            burrow_file_mint_refund(v, minted);
             return FAULT_USER_BUS;
         }
         if (n == 0) break;               // EOF -> remaining tail stays zero
@@ -1316,20 +1328,17 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     if (!alloc_ok) {
         for (size_t i = 0; i < ncluster; i++)
             if (clpages[i]) free_pages(clpages[i], 0);
-        burrow_file_mint_refund(v, minted);
         return file_demand_page_single(p, fi, freq);
     }
 
     // Install under the re-acquired vma_lock; free any un-adopted (loser/bail)
     // pages OUTSIDE v->lock (file_install_cluster_locked NULL'd the adopted ones).
-    size_t adopted = 0;
     spin_lock(&p->as->lock);
     enum fault_result r =
-        file_install_cluster_locked(p, fi, freq, cstart, ncluster, clpages, &adopted);
+        file_install_cluster_locked(p, fi, freq, cstart, ncluster, clpages);
     spin_unlock(&p->as->lock);
     for (size_t i = 0; i < ncluster; i++)
         if (clpages[i]) free_pages(clpages[i], 0);
-    if (minted) burrow_file_mint_refund(v, minted - (u32)adopted);
     return r;
 }
 

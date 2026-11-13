@@ -257,11 +257,12 @@ struct Burrow {
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
     // Vote 118 (I-32): a PRIVATE image's pages are its payer's. file_private
     // is fixed before the Burrow is published (image_lookup_or_create's
-    // private arm) and read without a lock. The rest is the payer record,
-    // read and written only under g_file_payer_lock (burrow.c): file_payer is
-    // the address space charged for every resident page -- NULL once it has
-    // died (lapsed) -- and file_charge_pages is the resident count, which a
-    // live payer has paid exactly. The payer's list of the Burrows it pays
+    // private arm, or the cache's bypass) and read without a lock. The rest
+    // is the payer record, read and written only under g_file_payer_lock
+    // (burrow.c): file_payer is the address space charged for every resident
+    // page -- NULL once it has died (lapsed) -- and file_charge_pages is the
+    // resident count (plus a page a fill has charged and is installing under
+    // its as->lock), which a live payer has paid exactly. The payer's list of the Burrows it pays
     // for (AddrSpace.file_paid) is what lets its teardown lapse them, so the
     // pointer never outlives the descriptor it names.
     bool              file_private;
@@ -769,10 +770,17 @@ void burrow_file_set_payer(struct Burrow *v, struct AddrSpace *as, bool exempt);
 // burrow_file_mint_charge: charge up to `want` pages about to be minted into
 // `v` to its payer, clamped to the payer's headroom. A lapsed record is first
 // handed over to `faulter` (exempt: its I-32 verdict), which is charged the
-// whole residency as well. Returns the pages charged and added to the
-// record, 0 when even one is refused (nothing changes then).
+// whole residency as well. The cap binds unless both the payer and the
+// faulter are exempt. Returns the pages charged and added to the record, 0
+// when even one is refused (nothing changes then). A caller charges a page
+// right before it installs it, never across a sleep: a charge held across a
+// read would refuse the payer's own concurrent allocations (round 34 F1).
 u32  burrow_file_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
                              u32 want);
+// burrow_file_mint_headroom: how many of `want` such a charge could take now,
+// charging nothing -- what sizes a read-ahead window before its read.
+u32  burrow_file_mint_headroom(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+                               u32 want);
 // burrow_file_mint_refund: take back `pages` charged mints that did not end
 // resident -- from the record and from whoever is the payer NOW (it paid the
 // whole record); a lapsed record refunds nobody.

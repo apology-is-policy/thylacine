@@ -59,7 +59,9 @@ versioned entry's Burrow (round 32 F4 corrected the reason given here).
 the image into and its I-32 verdict (`payer`, `payer_exempt`). The private arm
 hands both to `burrow_file_set_payer` before the Burrow is returned, so the
 image is born with a payer: the mapping cores pass the mapper's space, exec the
-space it is building. A cached image ignores both; its pages stay the system
+space it is building. So does the BYPASS arm (audit round 34 F2): an image the
+full cache cannot register is never served to another mapper and never
+idle-reclaimable, a private image in all but how it got there. A cached image ignores both; its pages stay the system
 cache's, shared and idle-reclaimable (below). A NULL payer is legal and leaves
 the record lapsed, so the first faulter that mints pays; the unit tests that
 never fault pass it. The record, the mint charge and the refund are
