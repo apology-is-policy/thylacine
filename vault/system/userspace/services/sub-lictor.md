@@ -417,9 +417,15 @@ display that changes delays other work by eight commands at most.
 on a 2560x1600 display declared at 200, told new sizes as a VNC viewer's
 resize tells them. It reads Lictor's line and a dump of the scanout under
 secure attention: 1600x1000 at one (the rule on device row 47); a change to
-3456x2160 while that screen is up, which must say nothing and leave the
-scanout; and after the episode 3456x2160 at two (the rule on rows 94 and 95),
-which needs 29 chunks of backing where the boot made 16. Not shown by any
+3456x2160 while that screen is up, after which the picture is read again and
+the rule and the background must be where they were; and after the episode
+3456x2160 at two (the rule on rows 94 and 95), which needs 29 chunks of
+backing where the boot made 16. The picture is what the middle leg can read:
+`backend::diagnostic` prints nothing in the exclusive phase, so a line of
+Lictor's would not be seen there, and a scanout whose image is let go of
+shows QEMU's placeholder at the size it had, so the dump's size would not
+change. The leg's first version read only those two, and a Lictor made to
+follow while its screen is up passed it. Not shown by any
 test: a failed making and its retries, the spare that is owed and its release
 asked again, the lever's shot set aside, memory that cannot be had, a display
 that changes during entry or restoration, and the EDID's millimetres on this

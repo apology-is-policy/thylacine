@@ -29,16 +29,20 @@
 #      line `bound, late` is never said.
 #   B  from the composed state (the console's pane split in two): the change's
 #      own bind of the new screen is not answered, so the change is given up
-#      and the device may scan the screen just given up. The pass binds the
-#      standing screen again BEFORE the host is asked again, and the second
-#      asking makes the change.
+#      and the device may scan the screen just given up. A change that fails
+#      reads the display it was for, since the mode that stood is shown on
+#      that display now, and the reading binds the standing screen again.
+#      Under the lever the stall is over when the change returns, so the line
+#      `bound, late` is said BEFORE the event is said not followed. A failure
+#      that read nothing would leave the bind to a later pass, after that
+#      line. The second asking makes the change.
 #   D  from the composed state, with nothing stalled: the change begins with
 #      the composed line, the device scans the new screen, the picture on it
 #      changes when something is typed.
 #
-# The order of two lines from different passes is read with one pattern that
-# is either of them, which matches the one said first; two patterns in a list
-# would be taken in the order listed whatever the order said.
+# The order of two lines is read with one pattern that is either of them,
+# which matches the one said first; two patterns in a list would be taken in
+# the order listed whatever the order said.
 #
 # NOT reached: a stall that the device never recovers from (ls-gpu-dead), a
 # stall inside a client's direct present (the same rule, `scans`, and the
@@ -222,9 +226,10 @@ follow_expect [begun 1238x787 1400x797 composed] "B: the change begins from the 
 follow_expect $shot_mode "B: the shot is aimed at the change's own bind"
 follow_expect $injected "B: the bind is executed and reported as past its deadline"
 follow_expect {tapestryd: mode rebind failed; old geometry retained} "B: the change is given up"
+first_of [late 1238x787] {tapestryd: display event \d+: not followed[^\r\n]*} \
+    "B: the change that failed reads its display, and the standing screen is bound again before the event is said not followed" \
+    "the event was said not followed before the standing screen was bound again: a change that failed did not read the display it was for, and until a later pass binds it the device may scan a screen that was given up"
 follow_expect {tapestryd: display event \d+: not followed \(errno \d+\), to be asked again} "B: the event is to be asked again"
-first_of [late 1238x787] $asking "B: the pass binds the standing screen again, before the host is asked again" \
-    "the host was asked again before the standing screen was bound again: between the two the device may scan a screen that was given up"
 arm 1
 follow_expect $asking "B: the host is asked again"
 follow_expect [begun 1238x787 1400x797 composed] "B: the change begins again"

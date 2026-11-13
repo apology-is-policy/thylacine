@@ -115,14 +115,18 @@ processes that paint chrome and glyphs, and what the bakes need.
   after this one) -- `scale auto` and a `mode` change return to it, not
   to the EDID -- because a declaration outranks a measurement: it exists for
   the display whose EDID cannot say (QEMU's synthetic one claims 100 DPI at
-  any size -- the cocoa backend passes no physical size and virtio-gpu has
-  no DPI property -- so a 2560x1600 scanout shown 1:1 on a retina panel
-  derived 100 and cost four chords per boot) and for the panel whose EDID
-  lies. (Read 2026-11-12 in QEMU's source, `ui/cocoa.m` at v10.0.2 and at
-  v11.1.3: the cocoa backend does fill the millimetres, from the window's
-  share of the host's screen. The 100 above was measured under 10.0.2;
-  what a guest reads from a cocoa window under 11 has not been measured
-  since.) Prior art: plan9.ini's `monitor=`/`vgasize=` (the boot side
+  any size -- the guest of a cocoa window is told no physical size at its
+  start and virtio-gpu has no DPI property -- so a 2560x1600 scanout shown
+  1:1 on a retina panel derived 100 and cost four chords per boot) and for
+  the panel whose EDID lies. (QEMU's source, `ui/cocoa.m` at v10.0.2 and at
+  v11.1.3, does fill the millimetres, from the window's share of the host's
+  screen. Measured 2026-11-13 under 10.0.2, the QEMU `tools/run-vm.sh`
+  runs: the guest of a cocoa window with `THYLACINE_HIDPI=1` read `edid
+  650x406 mm for 2560x1600 px` at its start, which is the synthetic 100
+  DPI. Why the window's first report carries no size is not known. Not
+  measured: what a guest reads once the window is resized or moved to
+  another screen, and any of it under 11.) Prior art: plan9.ini's
+  `monitor=`/`vgasize=` (the boot side
   declares the display; the component that owns the decision reads it),
   Linux's `video=` parameter, Fuchsia's board-level `display_pixel_density`
   (a device-tier declaration that outranks the EDID). Not a pool file: the

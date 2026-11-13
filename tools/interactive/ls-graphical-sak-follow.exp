@@ -17,8 +17,12 @@
 #                reaches the trusted screen at all. Not followed, the scanout
 #                under secure attention is 2560x1600.
 #   while up:    with that screen up, the display becomes 3456x2160. Nothing
-#                is made while the trusted screen is up: Lictor says no line,
-#                and the scanout stays 1600x1000.
+#                is made while the trusted screen is up, and what shows it is
+#                the picture, read again: the rule and the background are
+#                where they were. Lictor prints nothing in the exclusive
+#                phase, so no line of its would say, and a scanout whose image
+#                was let go of shows the host's placeholder at the size it
+#                had, so the dump's size would not say either.
 #   afterwards:  the episode ends, and then Lictor makes 3456x2160 at two. The
 #                image's backing grows from 16 chunks to 29 and its workspace
 #                with it. Secure attention again: the scanout is 3456x2160, the
@@ -36,7 +40,8 @@
 # that changes while entry or restoration is under way; the EDID's
 # millimetres, which a VNC viewer does not tell and the declaration outranks.
 #
-# LS_SAK_FOLLOW_SHOTS=<directory> keeps the two dumps there, as one.ppm and
+# LS_SAK_FOLLOW_SHOTS=<directory> keeps the three dumps there, as one.ppm,
+# one-after.ppm (the same screen after the display changed under it) and
 # two.ppm, to be put beside the host renderer's pictures of those screens. No
 # gate does that.
 #
@@ -216,22 +221,28 @@ off 0 94 1600 96 $GROUND "device rows 94 and 95 are the background, the whole wi
 lc_pass "a display that became 1600x1000 has a trusted screen of 1600x1000 at one"
 
 # While it is up. The wait is twenty times the quiet time a following waits
-# out, and what follows it is the positive: the same change, made afterwards.
+# out. Lictor prints nothing in the exclusive phase, so a line of its screen
+# inside the wait says the episode is not up. What a making would change is
+# the picture, so that is read again; and what follows is the positive, the
+# same change made afterwards.
 tell 3456x2160
 set ::what "the display changed while the trusted screen was up"
 lc_within 4 {
     -re {lictor: trusted screen[^\r\n]*[\r\n]} {
-        lc_fail "Lictor made a screen while its trusted screen was up: [string trim $expect_out(0,string)]"
+        lc_fail "a line of Lictor's screen within 4s of the display's change, and it prints none while its screen is up: the episode had ended, or the line was said inside it: [string trim $expect_out(0,string)]"
     }
     -re {lictor: seat failed[^\r\n]*[\r\n]} { lc_fail "the display changed during the episode: [string trim $expect_out(0,string)]" }
     -re {EXTINCTION:} { lc_extinction_fail "the display changed during the episode" }
-    timeout { lc_step "4s after the display changed Lictor has said nothing of its screen" }
+    timeout { lc_step "4s after the display changed under the trusted screen" }
     eof { lc_fail "qemu exited after the display changed during the episode" }
 }
 set d [dims]
 if {[lrange $d 0 1] ne {1600 1000}} {
     lc_fail "the scanout under secure attention is no longer 1600x1000 after the display changed (width height colours = $d; $::dims_why)"
 }
+dumped 1600 1000 one-after "the trusted screen after the display changed under it"
+off 0 47 1600 48 $RULE "after the display changed under it the rail's rule is still device row 47, the whole width"
+off 0 94 1600 96 $GROUND "and device rows 94 and 95 are still the background, the whole width"
 # The prompt of an episode with nothing waiting ends by itself after 60s.
 set took [expr {[clock seconds] - $::up_at}]
 if {$took > 50} {

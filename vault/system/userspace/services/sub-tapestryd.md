@@ -166,8 +166,16 @@ and a display event while the mode follows the host) and by `display_under_pin`
 change that fails (`change_mode`: a bind that is owed and refused, a screen
 that cannot be made) writes it too, before the change is asked again: the
 mode that stood is shown on the display that was read, so the rect is not
-lost when every asking fails (round R1 F1; read from the code, since no lever
-makes six askings fail). With a
+lost when every asking fails (round R1 F1). The write is `display_read`'s,
+which then goes on as for any display that was read: it binds a composed
+screen the device is not known to scan (`composed_bind_holds`) and derives
+the scale. So where the change failed by a bind that was not answered, and
+the engine answers again by the time the change returns, the standing screen
+is bound again there, before the event is said not followed.
+`ls-display-stall.exp`'s leg B reads that order; a failed change that reads
+nothing says the two lines the other way round, as the compositor did until
+f5e8bd028. That the rect outlasts six failed askings is read from the code:
+no lever makes six fail. With a
 declaration, `Comp::new` and `derive_scale` give
 `display::carried_pct(display, mode, declared)` ([[sub-libhalcyon]]): the
 declaration times the larger of the mode's two shares of the rect, brought to
@@ -448,8 +456,11 @@ stays composed binds its screen once, so nothing else would have.
    A bind that is not taken frees the new screen and leaves the old geometry
    (`tapestryd: mode rebind failed; old geometry retained`). If the device
    refused it, the device still scans the standing screen and nothing is
-   owed. If it was not answered, the scanout is unsettled and `bind_pump`
-   binds the standing screen again.
+   owed. If it was not answered, the scanout is unsettled and the standing
+   screen is bound again: by the reading of the display that a followed
+   change makes when it fails (`display_read`), where the engine answers
+   again by then, and by `bind_pump` where it does not or where a verb asked
+   for the change.
 6. Held presents are dropped. Only now, when nothing is left that can fail: a
    change that is not made sends no CONFIGURE, and a present dropped for it
    would not be made again.
@@ -543,18 +554,22 @@ found no bind, and so does a change that fails. Its legs:
   is never said: the leg reads which of the two lines comes first. This is
   round 3's finding.
 - B, from the composed state (the console's pane split by Super+H): the
-  change's own bind is not answered. Wanted: `mode rebind failed`, `not
-  followed (errno E), to be asked again`, then `bound, late` for the standing
-  mode before the host is asked again, then the second asking makes the
-  change. This is round 2's finding: between the two lines the device scans
-  the screen that was given up.
+  change's own bind is not answered. Wanted: `mode rebind failed`, then
+  `bound, late` for the standing mode, then `not followed (errno E), to be
+  asked again`, then the second asking makes the change. The bind is the
+  failed change's own: it reads the display it was for (round R1 F1), and
+  under the lever the stall is over when the change returns. Until f5e8bd028
+  the bind was `bind_pump`'s, a pass later, and the leg read it after `not
+  followed` and before the host was asked again (round 2's finding: between
+  the two the device scans the screen that was given up). The leg fails on
+  that older order, so it also knows a failed change that reads nothing.
 - D, from the composed state with nothing stalled: `mode AxB -> WxH (scanout
   composed)`, the dump at the new size, and a dump that differs after typing,
   which here is read off the composed screen.
 
-The order of two lines that come from different passes is read with one
-pattern that is either of them, which matches the earlier; a list of two
-patterns is taken in the order listed.
+The order of two lines is read with one pattern that is either of them,
+which matches the earlier; a list of two patterns is taken in the order
+listed.
 
 The dumps are taken with `tools/screendump.sh -P`, which hands out a true P6.
 QEMU writes each row of its PPM at pixman's stride, the row rounded up to four

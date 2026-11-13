@@ -797,8 +797,9 @@ case "${THYLACINE_DISPLAY:-none}" in
     gpu|gpu-headless|app) append_tokens+=("thylacine.display=gpu") ;;
 esac
 # HALCYON-SCALE 3 (SC-5): the platform's scale declaration. QEMU's synthetic
-# EDID claims 100 DPI at any size (cocoa passes no physical size; virtio-gpu
-# has no DPI property), so a HiDPI scanout derived 100 and cost four chords
+# EDID claims 100 DPI at any size (the guest of a cocoa window is told no
+# physical size at its start; virtio-gpu has no DPI property), so a HiDPI
+# scanout derived 100 and cost four chords
 # per boot. THYLACINE_SCALE=<pct> declares it (tapestryd reads the token at
 # boot; one of 100/125/150/175/200, anything else is said and ignored);
 # THYLACINE_HIDPI=1 implies 200 unless THYLACINE_SCALE says otherwise.
