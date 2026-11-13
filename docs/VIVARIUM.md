@@ -2436,6 +2436,15 @@ breaking only the *shell* — leaving the table intact — keeps the unit suite 
 full **1239/1239 PASS** while the in-guest leg fails at `L16`. The pure tests
 prove the decision; the guest legs prove the plumbing.
 
+**`/dev/zero` is anonymous memory (operator vote 115, 2026-11-13).** Linux maps
+it so (`mmap_zero`), and a program that predates `MAP_ANONYMOUS` still asks for
+memory that way. The shell rewrites a descriptor naming devzero, open for
+reading, into the anonymous call before any arm judges it: flags gain
+`MAP_ANONYMOUS`, `fd` becomes -1, the offset 0. It is then served exactly where
+`MAP_ANONYMOUS` is and declined where that is (`MAP_SHARED`, `PROT_EXEC`). Every
+other device that backs no mapping answers `ENODEV`, which matches Linux for
+`/dev/null`, `/dev/urandom`, procfs and terminals.
+
 ### 6.22 Signals — the frame shape (V-6, design)
 
 R-3 (§1.4) called signals "the genuine hard part", and §5.4 sized Tier 1 as

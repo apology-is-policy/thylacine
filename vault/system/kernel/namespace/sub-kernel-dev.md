@@ -289,15 +289,19 @@ order) and before the Image cache. It is opt-in, as `may_back_exec` is
 of 2026-10-28), and only dev9p and devramfs set it. The Image cache keys
 pages on (dc, devno, qid.path, qid.vers), holds a Spoor reference past the
 mapper and past every close, and serves a later mapper of the same key the
-bytes the first mapper's Spoor read. A Dev may opt in only when its files
-are sized content versioned by `qid.vers` and the same for every reader:
-devenv's variables have no version and their Spoor holds an environment,
-a `/ctl/procs` open file holds a snapshot page rendered for its reader, a
-pipe end holds its ring, a `/srv` endpoint its connection (audit round 30
-F1). `dev_register` refuses a Dev that sets `may_back_exec` without
+bytes the first mapper's Spoor read. So a Dev whose files keep state per
+open or render per reader stays out: devenv's variables have no version and
+their Spoor holds an environment, a `/ctl/procs` open file holds a snapshot
+page rendered for its reader, a pipe end holds its ring, a `/srv` endpoint
+its connection (audit round 30 F1). Sharing is a second question, the
+per-file slot `content_versioned` (vote 114, round 31 F1): dev9p, which
+reaches every userspace server, answers per session from the Larder's L1e
+latch; devramfs answers yes; a NULL slot means no, and the file maps
+privately, its own Burrow, never cached, freed with its last mapping. `dev_register` refuses a Dev that sets `may_back_exec` without
 `may_back_mapping`: an exec image is served from the same cache, and the
 phenotype maps executables through the mapping cores. `dev.mapping_is_opt_in`
-holds the registered set to exactly dev9p and devramfs.
+holds the registered set to exactly dev9p and devramfs, holds that no Dev
+outside it answers `content_versioned`, and that devramfs files answer yes.
 
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.

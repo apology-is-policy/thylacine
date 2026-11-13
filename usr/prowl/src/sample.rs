@@ -37,7 +37,7 @@ pub struct ProcRow {
 pub use libthyla_rs::procs::State;
 
 /// The sampler's rows from the process set (`procs::list`): every Proc /proc
-/// lists, where one read of /ctl/procs holds only the rows that fit it.
+/// lists, where the /ctl/procs table holds only the rows that fit it.
 pub fn rows_from(set: Vec<procs::Row>) -> Vec<ProcRow> {
     set.into_iter()
         .map(|r| ProcRow {

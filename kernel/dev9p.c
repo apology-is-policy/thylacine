@@ -116,6 +116,15 @@ bool dev9p_spoor_remote(struct Spoor *c) {
     return p && p->client && p->client->remote;
 }
 
+// Vote 114: a session is versioned content once its server has proven it the
+// way the Larder already requires (the L1e latch, set by an answered
+// Twalkgetattr). Before that, and for every server that never answers one
+// (netd, ptyfs, a Haul export), a mapping is private.
+static bool dev9p_content_versioned(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    return p && p->client && __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED);
+}
+
 void dev9p_stamp_origin(struct Spoor *root, const struct Spoor *transport) {
     struct dev9p_priv *p = priv_of(root);
     if (!p || !transport) return;
@@ -692,20 +701,19 @@ static void wb_patch_stat_size(struct dev9p_priv *p, struct t_stat *out) {
 // Map a 9P qid type to a Plan 9 QT* bit. The wire constants
 // (P9_QT*) and the in-kernel constants (QT*) happen to share the
 // same numeric values for the bits we care about (DIR=0x80, FILE=0x00,
-// SYMLINK=0x02, AUTH=0x08, TMP=0x04). This is the 9P-spec mapping;
-// pinned by inspection. We copy explicitly rather than rely on the
-// numeric coincidence.
-static u8 qid_type_p9_to_kernel(u8 p9) {
-    // The 9P qid type bits we model at v1.0: DIR / SYMLINK / AUTH /
-    // TMP. APPEND-mode + EXCL-mode aren't surfaced in the 9P2000.L
-    // qid type byte directly (Linux v9fs carries those through mode
-    // bits separately). At v1.0 the kernel-side QT* superset only
-    // distinguishes DIR vs FILE for walk-time directory checks; we
-    // can refine if more callers need finer-grained types.
+// SYMLINK=0x02, AUTH=0x08, TMP=0x04, APPEND=0x40). This is the 9P-spec
+// mapping; pinned by test_dev9p_qid_type_from_wire. We copy explicitly
+// rather than rely on the numeric coincidence.
+VISIBLE_IF_KERNEL_TESTS u8 qid_type_p9_to_kernel(u8 p9) {
+    // EXCL is not carried: nothing in the kernel reads it.
     u8 out = 0;
     if (p9 & P9_QTDIR)     out |= QTDIR;
     if (p9 & P9_QTAUTH)    out |= QTAUTH;
     if (p9 & P9_QTTMP)     out |= QTTMP;
+    // A Plan 9 server marks a DMAPPEND file so (9P2000.L reserves the bit with
+    // the same meaning). Both mapping cores refuse it, because a write lands at
+    // the end whatever offset it names; uncarried, that refusal could not fire.
+    if (p9 & P9_QTAPPEND)  out |= QTAPPEND;
     // DISTRO D-1: carry the symlink marker so the resolver can expand
     // (stalk.c; docs/DISTRO.md section 4). A server that never sets it ->
     // links are invisible, which is the pre-D-1 status quo (fail-safe).
@@ -3364,6 +3372,7 @@ VISIBLE_IF_KERNEL_TESTS struct Dev dev9p = {
     .lock_ident     = dev9p_lock_ident,
     .lock_held      = dev9p_lock_held,
     .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
+    .content_versioned = dev9p_content_versioned,
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

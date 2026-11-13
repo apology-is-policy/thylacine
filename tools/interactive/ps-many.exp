@@ -1,6 +1,6 @@
 #!/usr/bin/expect -f
 # tools/interactive/ps-many.exp -- the process listing with more Procs alive
-# than one read of /ctl/procs holds.
+# than the /ctl/procs table holds.
 #
 # /ctl/procs is rendered into one page per open file (4092 bytes of text), about
 # sixty rows. ps and

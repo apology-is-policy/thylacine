@@ -117,7 +117,9 @@ side), the shared `P9_TWALKGETATTR` **140**/141, `P9_TWEFT` **142**/143,
 `P9_TWEFTIO` **144**/145. The Weft pair was born 134/135/136/137 and
 renumbered at #371 after latently colliding with Stratum's Tfadvise/Tpin —
 the standing rule is: allocate from the shared registry document, never from
-one project's enum alone. `P9_QTPOLL` (0x01) is the readiness-file qid bit
+one project's enum alone. `P9_QTAPPEND` (0x40) is 9P's append-only bit, which
+dev9p carries to the kernel's `QTAPPEND` (round 31 F5). `P9_QTPOLL` (0x01) is
+the readiness-file qid bit
 [[sub-kernel-ninep-dev9p-poll]] keys on, and `P9_POLL_MASK` /
 `P9_POLL_SNAPSHOT` encode a readiness Tread's offset: the poll events in the
 low 16 bits, bit 16 asking for a snapshot the server answers at once, any

@@ -363,6 +363,15 @@ writable file mapping exists" true by construction, and it is an allow-list
 (`PROT_BTI`/`PROT_MTE`/`PROT_GROWSDOWN` fall outside it unenumerated) for the
 same reason the anon arm is; `len` is still deliberately unjudged.
 
+**`/dev/zero` is anonymous memory (operator vote 115).** Before any arm judges
+an `mmap`, the shell copies its six words and `viv_mmap_zero_as_anon` rewrites a
+descriptor naming devzero, open for reading, into the anonymous call (flags gain
+`MAP_ANONYMOUS`, `fd` -1, offset 0; the Spoor is looked up once and released), so
+it is served exactly where `MAP_ANONYMOUS` is and declined where that is, as
+Linux's `mmap_zero` does. `vivarium.mmap_dev_zero_is_anonymous` drives it
+through the dispatcher, read-write and read-only, with `/dev/null` as the
+control (`ENOSYS` and `ENODEV`).
+
 **The two anonymous arms changed at B-1a.** `vivarium_mmap_decide`'s allow-list
 (`VIV_MMAP_PROT_ADMITTED` = R|W) is unchanged, but `PROT_NONE` inside it is now
 minted EXACTLY rather than degraded: the shell mints the Linux prot through

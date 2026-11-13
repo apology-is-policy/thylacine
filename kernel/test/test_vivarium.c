@@ -38,6 +38,11 @@
 #include <thylacine/rendez.h>       // the TSLEEP_* outcomes a sleep row judges
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
+#include <thylacine/burrow.h>       // vote 115: the /dev/zero mapping's type
+#include <thylacine/dev.h>          // devzero, devnull
+#include <thylacine/exec.h>         // EXEC_USER_BURROW_BASE / TOP
+#include <thylacine/page.h>
+#include <thylacine/vma.h>
 #include <thylacine/cons.h>          // C2-k1b: CONS_* flags + the cons test hooks
 #include <thylacine/spoor.h>         // C2-k1b F1: struct Spoor for the identity test
 #include <thylacine/dev.h>           // C2-k1b F1: devcons/devramfs + spoor_is_console
@@ -151,6 +156,57 @@ static s64 viv_shell_call(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3) {
     bool native = viv_linux_dispatch_for_test(&c, kproc());
     current_thread()->note_interruptible = false;   // syscall_dispatch's job on the way out
     return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
+}
+
+// Vote 115: Linux maps /dev/zero as anonymous memory, so the phenotype serves a
+// /dev/zero descriptor exactly as it serves MAP_ANONYMOUS: read-write (an arm a
+// file never reaches) and read-only (the file arm, which refuses every Dev but
+// dev9p and devramfs). The control, one variable away: the same calls on
+// /dev/null, which Linux refuses too.
+static s64 viv_mmap_call(struct Proc *p, u64 prot, u64 fd) {
+    struct exception_context c;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_MMAP;
+    c.regs[1] = PAGE_SIZE;
+    c.regs[2] = prot;
+    c.regs[3] = VIV_MAP_PRIVATE;
+    c.regs[4] = fd;
+    bool native = viv_linux_dispatch_for_test(&c, p);
+    current_thread()->note_interruptible = false;
+    return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
+}
+
+static bool viv_anon_at(struct Proc *p, s64 va) {
+    if (va <= 0 || ((u64)va & (PAGE_SIZE - 1))) return false;
+    if ((u64)va < EXEC_USER_BURROW_BASE || (u64)va >= EXEC_USER_BURROW_TOP) return false;
+    struct Vma *v = vma_lookup(p, (u64)va);
+    return v && v->burrow && v->burrow->type == BURROW_TYPE_ANON;
+}
+
+void test_vivarium_mmap_dev_zero_is_anonymous(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t zfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devzero.attach(""));
+    hidx_t nfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devnull.attach(""));
+    s64 zrw = -1, zro = -1, nrw = 0, nro = 0;
+    bool zrw_anon = false, zro_anon = false;
+    if (zfd >= 0 && nfd >= 0) {
+        zrw = viv_mmap_call(p, VIV_PROT_READ | VIV_PROT_WRITE, (u64)zfd);
+        zro = viv_mmap_call(p, VIV_PROT_READ, (u64)zfd);
+        nrw = viv_mmap_call(p, VIV_PROT_READ | VIV_PROT_WRITE, (u64)nfd);
+        nro = viv_mmap_call(p, VIV_PROT_READ, (u64)nfd);
+        zrw_anon = viv_anon_at(p, zrw);
+        zro_anon = viv_anon_at(p, zro);
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(zfd >= 0 && nfd >= 0, "handle_alloc");
+    TEST_ASSERT(zrw_anon, "a read-write private map of /dev/zero is anonymous memory");
+    TEST_ASSERT(zro_anon, "a read-only one is too");
+    TEST_EXPECT_EQ(nrw, -(s64)T_E_NOSYS, "control: /dev/null read-write is in no arm's domain");
+    TEST_EXPECT_EQ(nro, -(s64)T_E_NODEV, "control: /dev/null read-only is refused by the file arm");
 }
 
 // A T2 shell narrows its own words by its own Linux prototype. readlinkat's

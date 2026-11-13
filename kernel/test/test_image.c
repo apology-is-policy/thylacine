@@ -38,12 +38,19 @@
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
+// Models a content server: its images are shared and cached (vote 114).
+static bool fake_content_versioned(struct Spoor *c) {
+    (void)c;
+    return true;
+}
+
 // A trivial backing Dev. The cache never reads it (only R-4's fault path will),
 // and the test spoors are never opened, so spoor_clunk skips dev->close -- no
 // .read / .close hook is needed.
 static struct Dev g_image_test_dev = {
     .dc   = 'I',
     .name = "imgtest",
+    .content_versioned = fake_content_versioned,
 };
 
 // Mint a fresh stub Spoor with a chosen qid identity (path + vers). spoor_alloc
@@ -94,6 +101,60 @@ void test_image_miss_then_hit_shares(void) {
     TEST_EXPECT_EQ(ev, 1, "one idle image evicted");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cache empty after evict");
     TEST_EXPECT_EQ(spoor_total_freed() - freed0, 2, "s1 clunked at B1 free (2 spoors total)");
+}
+
+// Vote 114: the same identity off a Dev that does not answer content_versioned
+// (a netd file, an unproven dev9p session) is two private images, each holding
+// its Spoor only until its last unref and keeping its own size. The control,
+// one variable away: the same identity off the versioned fake is cached.
+static struct Dev g_image_private_dev = {
+    .dc   = 'I',
+    .name = "imgpriv",
+};
+
+static struct Spoor *mk_private_spoor(u64 qpath, u32 qvers) {
+    struct Spoor *s = spoor_alloc(&g_image_private_dev);
+    if (s) {
+        s->qid.path = qpath;
+        s->qid.vers = qvers;
+        s->qid.type = QTFILE;
+    }
+    return s;
+}
+
+void test_image_private_unless_versioned(void) {
+    image_cache_evict_idle_for_test();
+    u64 freed0   = spoor_total_freed();
+    u64 priv0    = image_cache_private_for_test();
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Burrow *b1 = image_lookup_or_create(mk_private_spoor(0x7000, 0), 0, PAGE_SIZE,
+                                               /*exec=*/false, 3 * PAGE_SIZE);
+    struct Burrow *b2 = image_lookup_or_create(mk_private_spoor(0x7000, 0), 0, PAGE_SIZE,
+                                               /*exec=*/false, PAGE_SIZE);
+    TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
+    TEST_ASSERT(b1 != b2, "one identity off an unversioned Dev is two private images");
+    TEST_EXPECT_EQ(burrow_handle_count(b1), 1, "a private image's only ref is the caller's");
+    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "nothing was cached");
+    TEST_EXPECT_EQ(image_cache_private_for_test() - priv0, 2, "two private creates");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 0, "no cached create");
+    TEST_EXPECT_EQ(b1->file_limit, 3 * PAGE_SIZE, "the first keeps its own size");
+    TEST_EXPECT_EQ(b2->file_limit, PAGE_SIZE, "the second keeps its own size");
+    burrow_unref(b1);
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 1,
+                   "the last unref clunks a private image's Spoor: nothing else holds it");
+    burrow_unref(b2);
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 2, "and the second's");
+
+    struct Burrow *b3 = image_lookup_or_create(mk_spoor(0x7000, 0), 0, PAGE_SIZE,
+                                               /*exec=*/false, PAGE_SIZE);
+    TEST_ASSERT(b3 != NULL, "control created");
+    burrow_unref(b3);
+    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "control: the versioned image is cached");
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 2,
+                   "control: its Spoor outlives its last caller");
+    TEST_EXPECT_EQ(image_cache_evict_idle_for_test(), 1, "control evicted");
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 3, "control Spoor clunked at eviction");
 }
 
 void test_image_distinct_qid_distinct_entry(void) {

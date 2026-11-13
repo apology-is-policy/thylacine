@@ -46,6 +46,11 @@
 // un-registered — it lives on its mapping, just not shared), never an exec
 // failure.
 //
+// Only a file whose Dev answers content_versioned is cached at all (vote 114):
+// any other is created un-registered, like a bypass, and frees with its last
+// mapping, so the cache never holds an open past its mappers for a file
+// whose open carries server state, nor serves one reader another's bytes.
+//
 // Resource accounting (I-32, condition 7) is the map/exec layer's job (R-4),
 // like ANON's attach-time charge — shared text is charged once via the I-7 dual
 // refcount. The cache itself charges nothing.
@@ -127,6 +132,7 @@ int image_cache_evict_idle_for_test(void);
 u64 image_cache_hits_for_test(void);
 u64 image_cache_creates_for_test(void);
 u64 image_cache_evictions_for_test(void);
+u64 image_cache_private_for_test(void);           // mapped privately (vote 114)
 u64 image_cache_reclaims_for_test(void);         // reclaim calls that freed a page
 u64 image_cache_reclaimed_pages_for_test(void);
 #endif

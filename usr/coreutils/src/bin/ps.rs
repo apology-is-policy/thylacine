@@ -1,7 +1,7 @@
 // ps [--color[=WHEN]] [--beacon=WHEN] -- list processes, the Thylacine way.
 //
 // Every Proc /proc lists, one row each from its /proc/<pid>/status (Plan 9's
-// ps): the directory is whole at any size, where one read of /ctl/procs holds
+// ps): the directory is whole at any size, where the /ctl/procs table holds
 // only the rows that fit it. Each row is one instant of its Proc; the set is
 // not one instant (a Proc that ends during the listing is skipped). Columns PID
 // PPID NAME STATE THREADS PAGES TABLES CHILDREN CPU_NS, ascending by pid.

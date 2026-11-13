@@ -360,6 +360,7 @@ void test_vmo_file_create_failure_retains_spoor(void);
 void test_vmo_file_map_unmap_lifecycle(void);
 void test_vmo_file_resident_pages_freed(void);
 void test_image_miss_then_hit_shares(void);
+void test_image_private_unless_versioned(void);
 void test_image_distinct_qid_distinct_entry(void);
 void test_image_qid_vers_bump_new_entry(void);
 void test_image_devno_full_width_distinct_entry(void);
@@ -1148,6 +1149,7 @@ void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_cons_drain_tap_mirrors_output(void);       // G-4
 void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
+void test_vivarium_mmap_dev_zero_is_anonymous(void);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_git_chunk_rows(void);
@@ -1934,6 +1936,8 @@ void test_larder_downgrade_guards_raced_populate(void);
 void test_larder_gen_scope_qid(void);
 
 void test_dev9p_registered(void);
+void test_dev9p_qid_type_from_wire(void);
+void test_dev9p_content_versioned_follows_latch(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
 void test_dev9p_walk_clone(void);

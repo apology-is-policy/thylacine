@@ -600,6 +600,13 @@ static struct Block *devramfs_bread(struct Spoor *c, long n, s64 off) {
     return NULL;
 }
 
+// The archive is baked and read-only, so every file is the same bytes for
+// every reader for the life of the boot: its Images may be shared (vote 114).
+static bool devramfs_content_versioned(struct Spoor *c) {
+    (void)c;
+    return true;
+}
+
 static long devramfs_write(struct Spoor *c, const void *buf, long n, s64 off) {
     (void)c; (void)buf; (void)n; (void)off;
     return -1;        // read-only
@@ -753,6 +760,7 @@ struct Dev devramfs = {
     .attach   = devramfs_attach,
     .walk     = devramfs_walk,
     .walk_attrs = devramfs_walk_attrs,   // POUNCE: native (RAM-table) fused walk+attrs
+    .content_versioned = devramfs_content_versioned,
     .stat     = devramfs_stat,
     .stat_native = devramfs_stat_native,
     .seekable = true,   // file content: read/write honor the byte offset (RW-4 R2-F2)
