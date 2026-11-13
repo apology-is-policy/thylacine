@@ -248,6 +248,10 @@ only reads the console surface.
 
 **This is the key mechanism for fast agentic development.**
 
+**Status (read 2026-11-13): not built.** The launcher passes the `virtfs` device
+(`tools/run-vm.sh`), but the guest has no virtio-9p transport and nothing mounts `/host`. This
+section is the design.
+
 QEMU's `virtfs` exposes a host directory (`./share/`) inside the VM as a 9P filesystem, mounted at `/host` inside Thylacine. The agent writes new binaries to `./share/` on the host; the VM reads them from `/host/` without rebooting.
 
 ```

@@ -453,8 +453,10 @@ Gatekeeper flow the operator chose (P2) exists from macOS 15. KosmicKrisp needs 
 
 **E1. Transports available on a macOS QEMU.** virtio-9p local export: supported on
 macOS (`qemu-10.1:meson.build:2394-2400` requires Linux or macOS + `pthread_fchdir_np`;
-`hw/9pfs/9p-util-darwin.c`), and the dev loop already uses it (`tree:tools/run-vm.sh:474-476`
-`-virtfs local,...,mount_tag=host0,security_model=none`). virtio-serial / virtconsole /
+`hw/9pfs/9p-util-darwin.c`), and the dev loop's launcher passes it (`tree:tools/run-vm.sh:497-501`
+`-virtfs local,...,mount_tag=host0,security_model=none`), though nothing in the guest drives or
+mounts that share yet (read 2026-11-13: no guest virtio-9p transport; TOOLING.md section 4 is its
+design). virtio-serial / virtconsole /
 virtserialport: present (measured on the M2 device list). vhost-user (hence virtiofs /
 vhost-user-fs) and vhost-kernel: Linux only (`meson.build:230-238`); vsock needs vhost ->
 **no vsock on a macOS host** (measured: no vhost-* devices). passt: Linux only
@@ -802,38 +804,158 @@ without 3D at all and must be fully usable.
 
 ### 4.4 Interop: `/mnt/mac`, drawterm turned around
 
-The app serves ONE 9P tree the guest mounts at `/mnt/mac`. The one new guest piece is a
-virtio-serial driver: a userspace Proc under a warden allowance that relays the port's
-bytes to a pipe pair, on which the session attaches 9P and mounts the root (E1). The
-kernel gains no interface. Everything host-side is a file:
+The app serves the guest a 9P2000.L tree, and each session mounts it at `/mnt/mac`. The
+operator decided this in votes M5 (2026-11-10) and M10 to M12 (2026-11-13). The kernel gains
+no interface. There are three pieces.
+
+- **The virtio-serial driver** (new, `usr/virtio-serial`).
+  - It is a persistent, warden-bound userspace driver for the virtio console device (id 3,
+    `VIRTIO_CONSOLE_F_MULTIPORT`). It opens the port named `org.thylacine.mac` and posts
+    `/srv/mac` as a 9P service.
+  - Each open of `/srv/mac` is a new connection (devsrv), and the driver gives it a channel on
+    the port (the framing below).
+  - So each connection is its own 9P2000.L session with the app. The kernel runs Tversion and
+    Tattach over it, stamps the opener's principal as `n_uname`, and uses `/srv`'s message size
+    (32 KiB, or 128 KiB for a bulk service), where a pipe pair would give 4 KiB.
+  - The driver relays bytes and parses no 9P.
+- **login** mounts `/srv/mac` at `/mnt/mac` (MREPL) in every session it starts, before the
+  session's first program runs.
+  - `mac` is one of login's RESIDENT names, so the boot registry's post reaches the session.
+  - With no port (not on a Mac) there is no `/srv/mac`, so there is no mount, and nothing is
+    said.
+- **The app's 9P server** runs one 9P2000.L session for each channel.
+
+**The channel framing (ABI; version `mac1`).**
+
+The framing is little-endian, as virtio and 9P are, and every frame is
+
+```
+size[4] type[1] chan[4] data[size-9]      size counts the whole frame
+```
+
+| type | name | direction | chan | data | meaning |
+|---|---|---|---|---|---|
+| 0 | HELLO | both | 0 | `version[s] maxframe[4]` | the first frame each side sends on a fresh line |
+| 1 | OPEN | driver -> app | new id | none | a guest connection; the app starts a 9P2000.L session on it |
+| 2 | DATA | both | open id | bytes | the next bytes of that channel's 9P stream (stream, not message, boundaries) |
+| 3 | CLOSE | both | open id | none | the sender sends no more on the channel |
+| 4 | RESET | driver -> app | 0 | none | the driver found the line malformed; the app ends its connection and connects again |
+
+- `version[s]` is a 9P string (`len[2]` then UTF-8). This version is `mac1`, and a peer that
+  answers another version ends the line.
+- `maxframe` is the largest frame the sender accepts, at least 4096. No side sends a frame
+  larger than its peer's `maxframe`.
+- The driver chooses channel ids, never 0.
+- An id is free again only once each side has sent CLOSE for it. A guest hang-up makes the
+  driver send CLOSE. A CLOSE from the app makes the driver hang up that connection, and the
+  guest's mount reads EIO.
+- One channel never stalls another. The driver keeps a bounded queue per channel toward its
+  guest connection, and closes a channel whose queue passes its bound.
+
+**A fresh line, and stale bytes.**
+
+QEMU drops the guest's writes while no app is connected. It takes one socket client at a time
+and accepts again after a disconnect, so a restarted app connects again. It tells the guest
+which with `VIRTIO_CONSOLE_PORT_OPEN` 1 or 0 (`hw/char/virtio-serial-bus.c`). The following
+rules keep one connection's bytes out of the next.
+
+1. The driver puts only whole frames in each transmit buffer it hands the device. QEMU
+   discards whole buffers at a disconnect, so a new connection begins at a frame.
+2. At PORT_OPEN 0 (the app went away), the driver:
+   1. closes every channel (each guest connection hangs up and its mount reads EIO);
+   2. discards every byte the receive queue has already delivered. QEMU handles a
+      connection's reads and its close in order on its one main loop, so its bytes are
+      pushed before the control event; the driver reads the data queue's used index after
+      it reads the event;
+   3. drops its parser's state.
+3. At PORT_OPEN 1, the driver sends HELLO before anything else.
+4. The app, on connecting, discards whole frames until the driver's HELLO arrives. It then
+   sends its own HELLO, and sends nothing before that.
+5. A malformed frame (unknown type, size below 9 or above `maxframe`, DATA or CLOSE on a
+   channel that is not open, OPEN on one that is) ends the line.
+   - If the app finds it, the app closes its connection and connects again.
+   - If the driver finds it, the driver sends RESET and discards input until the next
+     PORT_OPEN 0.
+
+**The tree, version 1 (ABI).**
+
+The attach takes the empty `aname`, and any other answers ENOENT; other anames are reserved
+for later trees. A file added later is not a format break; a name or format changed is.
 
 ```
 /mnt/mac/
-  snarf            the Mac pasteboard (UTF-8 text; read = current, write = set);
-                   snarfseq: NSPasteboard.changeCount, poll-free via 9P read-blocking
-  display/         size (w h px), scale (pct), refresh (mHz), name -- what SetUIInfo sent
-  open             write "<path|url>" -> NSWorkspace.open on the host (policy-gated)
-  power            read: battery/ac state; write "sleep-ahead"/"resume" events arrive here
-  time             host wall clock (ns) + tz, for a resync after resume
-  folders/<name>/  the shared folders, served by the app from the chosen host directories
-  session          write "shutdown"/"reboot" requests; read = app state
+  snarf              the Mac pasteboard's text
+  folders/<name>/    each folder the person shares in the app
 ```
 
-Policy lives in the app (which folders, whether `open` is allowed, clipboard direction),
-exactly the way a drawterm server decides what it exports. The guest's clipboard broker
-(halcyond, corona's arc) decides when `snarf` is read or written (E6): the file is an
-offer, not a second clipboard. Shared folders are served by the app's own 9P server, not
-QEMU's `-virtfs local`: one transport and one policy point (vote M5). `-virtfs` stays what
-it is today, the dev loop's host share (E1).
+- **`snarf`** is drawterm's `/dev/snarf`, served by the Mac.
+  - A read at offset 0 takes the pasteboard's current plain text as UTF-8, and reads at later
+    offsets continue that snapshot. A pasteboard with no text reads as empty.
+  - A fid opened for writing (with or without O_TRUNC) collects what is written. Its clunk sets
+    the pasteboard to those bytes, replacing what it held; with nothing written, that is empty.
+    Invalid UTF-8 becomes U+FFFD.
+  - Opening O_RDWR answers EACCES.
+  - Past 16 MiB, a write answers EFBIG, and so does a read of a larger pasteboard text.
+  - Its stat shows size 0 and mode 0600.
+  - It cannot be created, removed or renamed.
+  - When to read it and when to write it is the guest's clipboard broker's business (corona's
+    policy). The file is an offer, never a second clipboard.
+- **`folders/`** lists one directory per folder the app shares, named as the app's setting
+  names it (non-empty, no `/` or NUL, not `.` or `..`). The list is empty when nothing is
+  shared.
+  - Each directory is that host folder's tree, read-only or read-write as the app's setting
+    says. A modifying operation on a read-only folder answers EROFS.
+  - The app never follows a host symbolic link while it resolves a walk or an open. A link is
+    served as a link (readlink), and every open stays beneath the folder's root (macOS
+    `O_NOFOLLOW_ANY` on each step).
+  - The app does the I/O as the Mac user. A host file that user cannot reach answers EACCES.
+- **Errors** are the Linux errno values 9P2000.L carries in Rlerror. The app translates macOS's
+  numbering, which differs (ENOTEMPTY is 66 on macOS and 39 on Linux).
 
-**This tree is ABI.** The file names and formats above are a draft; the interop station
-fixes them in this section before the first byte of either side is written, and from
-then a change to them is a format break.
+**Ownership.**
 
-Transport detail: `-device virtio-serial-pci -device virtserialport,chardev=mac,
-name=org.thylacine.mac -chardev socket,id=mac,...` is QEMU's side; the app side is a Unix
-socket or an inherited fd; the guest driver relays the port to the pipe pair of E1.
-9P over a byte stream is exactly what Plan 9 does over `cpu`/`drawterm` lines.
+Every file and directory is reported as owned by the attaching user: uid and gid are the
+attach's `n_uname`, which is the principal the kernel's permission check compares
+(`kernel/include/thylacine/perm.h`).
+
+- The owner bits are the host file's owner bits, with write taken away on a read-only folder.
+- Group and other have none.
+- A setattr that changes ownership answers EPERM.
+
+This is WSL's drvfs rule, and it avoids UTM's virtfs problem, where files keep the macOS uid
+and only root can reach them. A session's mount is in its own namespace, so no other user
+reaches it.
+
+**Policy** lives in the app: which folders are shared, read-only or read-write, and whether the
+clipboard goes both ways. This is the way a drawterm server decides what it exports.
+Shared folders are served by the app's own 9P server, not by QEMU's `-virtfs local`: one
+transport and one policy point (vote M5).
+
+**When the app goes away.** Every channel closes, and every mount of the line reads EIO, as a
+Plan 9 mount does when its server hangs up. The namespace is copied at spawn, so a remount
+mends only the program that remounts and its later children. The next login mounts the new
+line. The app's lifetime is the VM's, except after an app crash that leaves the helper
+running.
+
+**Quit (vote M12).**
+
+The app asks QEMU to press the `virt` machine's power button (QMP `system_powerdown`). The
+press reaches the device tree's `gpio-keys` node, `KEY_POWER` on the PL061
+(`hw/arm/virt.c:1606-1621`).
+
+- A new guest power-key driver, warden-bound to the PL061, turns the press into an orderly
+  shutdown. Power control therefore rides no interop file and needs no interop line.
+- If the guest has not powered off within a bound the app chooses, the app asks the person
+  before it stops QEMU.
+
+**Not in version 1:** `display/` (virtio-gpu already carries the size and the scale), `power`,
+`time` and `open`. Each would be an addition. Suspend's clock resync (M-10) and the Dock's
+`open` come with their stations.
+
+Transport detail: QEMU's side is `-device virtio-serial-pci -device
+virtserialport,chardev=mac,name=org.thylacine.mac -chardev socket,id=mac,...`. The app's side
+is the socket or an inherited fd. 9P over a byte stream is exactly what Plan 9 does over `cpu`
+and `drawterm` lines.
 
 ### 4.5 App structure (Rust)
 
@@ -975,7 +1097,10 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
 6. **The new guest driver**: virtio-serial (device id 3) joins the warden's allowance
    table (I-34) and the launcher's `thylacine.virtio-pci-serial` token
    (`run-vm.sh:840-890` derives tokens from `-device`). It is an audit-trigger surface:
-   its row lands with it.
+   its row lands with it. The launcher's rule names the device ID, so `virtio-serial-pci`
+   must map to `thylacine.virtio-pci-console` (today it would give `serial`,
+   `run-vm.sh:929-938`). The power-key driver of vote M12 joins the allowance table the same
+   way, with its own row.
 7. **`docs/ROADMAP.md`**: the arc's entry, and its bound: it takes no Phase 7 ship risk.
 8. **`docs/TAPESTRY.md` and `usr/tapestryd` (main and corona)**: a position that follows
    motion from the mouse seeds the made-up deltas and makes none (4.2, the captured
@@ -987,8 +1112,9 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
   headless build with hvf + dbus-display + virtfs + coreaudio + slirp; the in-kernel GIC
   boot (M-1). A2: the Rust app -- AppKit window, Metal layer, Unix.Map listener, keyboard/
   tablet input, fullscreen, menus; the helper an XPC service from the start (vote M1). A3: resize + HiDPI via SetUIInfo (A3a, the app tells the size; A3b, the guest takes a mode for any size told and follows a change: B5 as built). A4: the
-  virtio-serial guest driver + mount-on-fd + the app's 9P server with `snarf`, `display`,
-  `power`, `session`, and one shared folder under `folders/` (vote M5). A5: packaging -- ad-hoc signed
+  virtio-serial guest driver posting `/srv/mac`, login's mount at `/mnt/mac`, the app's 9P
+  server with `snarf` and one shared folder under `folders/` (votes M5, M10, M11), and the
+  power-key driver that Quit presses (vote M12). A5: packaging -- ad-hoc signed
   bundle, DMG, the Open Anyway walkthrough; clonefile first run. Exit: a stranger installs
   it from the DMG and uses Halcyon for an hour, retina-crisp, copy/paste both ways.
 - **Beta (3D, audio in the app, suspend, updates).** B1: ANGLE + libepoxy + virglrenderer
@@ -1234,7 +1360,7 @@ overturn any of them.
 | F4 3D route | virgl GL over ANGLE first, Venus (MoltenVK; KosmicKrisp on 26+) second, one build | vote M2 | Venus only; Apple CoreGL in place of ANGLE (kept as a measured alternative, 4.3); gfxstream |
 | F5 display transport | Unix.Map shared memory at alpha, an IOSurface scanout (new D-Bus interface, XPC object) at beta | recommended | IOSurface from day one; in-band `Update` pixels |
 | F6 interop transport | 9P over a virtio-serial port, served by the app, mounted at `/mnt/mac`, shared folders inside it | vote M5 | folders via `-virtfs local`; 9P over TCP through slirp |
-| F7 clipboard | `/mnt/mac/snarf` and `snarfseq`, consumed by halcyond's broker under corona's policy | recommended | QEMU's D-Bus Clipboard interface (it bypasses the guest's broker) |
+| F7 clipboard | `/mnt/mac/snarf` (a read from offset 0 takes the pasteboard's text, a write replaces it at close), used by the session's clipboard broker under corona's policy; no change counter in version 1 | vote M11 (2026-11-13; recommended 2026-11-10 with `snarfseq`) | QEMU's D-Bus Clipboard interface (it bypasses the guest's broker); a `snarfseq` counter now |
 | F8 audio | `-audiodev coreaudio` in the helper at alpha; `-audiodev dbus` to the app at product | recommended | dbus from day one; coreaudio for good |
 | F9 floor | Apple silicon, macOS 15+; no Intel build | vote M3 | macOS 12+ with the emulated GICv2 fallback; a universal binary with a TCG Intel slice |
 | F10 updates | Sparkle 2 with EdDSA, pending M-7 | vote M7 | an in-app updater (the fallback if M-7 fails); none |
@@ -1244,6 +1370,9 @@ overturn any of them.
 | F14 HVF bug fixes | in the guest for H1 and H2, in the fork queue for H3, all gated by M-2 and M-9 before beta | recommended | a beta that ships around them |
 | F15 scripture | this document, plus the I-45, GPU-DESIGN and TOOLING amendments of section 7, each before the code it governs | recommended | folding it into GPU-DESIGN and TOOLING |
 | F16 the pointer's path | QMP `input-send-event` on the monitor the app attached through; the launcher binds the tablet to `gpu0` (4.2) | aux, 2026-11-12, under the 2026-09-01 authorization | the display connection's `SetAbsPosition` and `RelMotion` (a console has one mode); binding the tablet and nothing else; HMP `mouse_set` at each capture (UTM) |
+| F18 the sessions' way to the one port | channels: the virtio-serial driver frames the port into one channel per connection and posts `/srv/mac`; login mounts it at `/mnt/mac` in each session; each is its own 9P2000.L session, attached as that user, at `/srv`'s message size (4.4) | vote M10 (2026-11-13) | one pipe-pair mount for the graphical session, haul's model (4 KiB messages, one session); a 9P multiplexer inside the driver (a 9P parser and fid/tag rewriting in a driver) |
+| F19 the tree's version 1 | `snarf` and `folders/<name>/`; `display/` dropped (virtio-gpu carries the size and the scale); `power`, `time` and `open` later, as additions (4.4) | vote M11 (2026-11-13) | all of the 2026-11-10 draft at once; drawterm's `/mnt/term` shape (`dev/snarf`) |
+| F20 Quit's request | the `virt` machine's power button: QMP `system_powerdown`, the device tree's gpio-keys `KEY_POWER` on the PL061, a new guest power-key driver, an orderly shutdown (4.4) | vote M12 (2026-11-13) | a verb on the interop line (power control in the interop ABI); a `session` file in `/mnt/mac` (a system action on a per-session tree) |
 | F17 capturing the pointer | the person's chord, Control-Command-G, now; a surface's own request once the guest can reach the app (4.2, 4.4) | aux, 2026-11-12, under the 2026-09-01 authorization | capture on a click or on full screen; a chord of modifiers alone; motion straight from the device |
 
 ## 12. What was not read, and what is UNVERIFIED
