@@ -341,8 +341,10 @@ namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`. Its title
 deck says what `/` is mounted from: `ns_root_source`, in the pure lib and
 host-tested, takes the source of the `mount / <src>` line, unescaped (the
 kernel writes space, tab, newline and backslash as `\040 \011 \012 \134`,
-vote 97), and none for a union's covered entry; the herald shows a control
-character in it as `?`. The tour's
+vote 97), and none for a union's covered entry; it splits the listing on
+newlines only, so a name ending in a carriage return keeps it, and the caller
+decodes the listing lossily, so a name elsewhere that is not UTF-8 costs only
+its own line. The herald shows a control character in the name as `?`. The tour's
 "Loaded systems" list is init's children among every Proc `/proc` lists
 ([[sub-libthyla-rs]] `procs::list`), at most ten by pid; a set it cannot read
 whole shows no list. A tile's output is pixels, so the tour says one line on the

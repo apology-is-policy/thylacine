@@ -713,8 +713,10 @@ name with and without ` remote`, windows inside the name, short of the
 newline and inside the binds line (the listing is read in windows since the
 dynamic mount table, [[sub-kernel-territory]]), a clone walk carrying no origin and refusing the stamp, a covered entry on a
 stamped root keeping its own name, the root's close releasing the reference,
-a nameless transport's device spec, and a cached-open priv refusing what the
-same priv shaped as a root takes.
+a nameless transport's device spec, an origin named `/srv/a b\c` written as
+`/srv/a\040b\134c` (operator vote 97's escapes, at the origin as at the other
+names), and a cached-open priv refusing what the same priv shaped as a root
+takes.
 
 ## Data structures
 

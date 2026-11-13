@@ -108,7 +108,9 @@ the suffixes the boxed view used to drop (`noexec`, `pheno-linux`,
 `mount list incomplete` instead of a bind count when the kernel cut the
 list. Names come unescaped from `nsmount` (vote 97), and a control character
 in one -- a tab or newline the kernel escaped, or an escape sequence -- shows
-as `?` in its cell, so no name breaks a row or drives the terminal. With
+as `?` in its cell, so no name breaks a row or drives the terminal. `ns`
+decodes the listing lossily and splits it on newlines only, so a name that is
+not UTF-8 spoils only its own line. With
 colour off it passes the kernel text through
 untouched, which is the right escape hatch for a tool whose subject is
 already text, and through the same failing-write path as the box, so a text

@@ -151,7 +151,8 @@ impl MountRealms {
     pub fn from_text(text: &str) -> MountRealms {
         let mut points: Vec<(String, bool)> = Vec::new();
         let mut whole = false;
-        for line in text.lines() {
+        // Newlines only: `lines` would take a name's trailing carriage return.
+        for line in text.split('\n') {
             let m = match parse_line(line) {
                 Line::Mount(m) => m,
                 Line::Binds(_) => {
@@ -312,6 +313,19 @@ mod tests {
         assert_eq!(r.realm("/a b"), Some("remote"), "the escaped point is the name");
         assert_eq!(r.realm("/a"), None, "no part of it is a point");
         assert_eq!(r.realm("/c"), Some("mount"));
+    }
+
+    #[test]
+    fn a_carriage_return_stays_in_its_name() {
+        let r = MountRealms::from_text("mount /a\r #9 remote\nmount /b\r #s\nbinds: 0\n");
+        assert_eq!(r.realm("/a\r"), Some("remote"), "a point ending in a carriage return");
+        assert_eq!(r.realm("/b\r"), Some("mount"));
+        assert_eq!(r.realm("/a"), None);
+        assert!(!r.truncated());
+        let Line::Mount(m) = parse_line("mount /s /srv/boot\r") else {
+            panic!("not a mount line");
+        };
+        assert_eq!(&*m.source, "/srv/boot\r", "the last field keeps it too");
     }
 
     #[test]

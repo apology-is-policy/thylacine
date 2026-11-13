@@ -2994,8 +2994,8 @@ per entry — the source column is its Spoor's `→path` when it has a namespace
 the file its session came over (operator vote 2026-09-28; Plan 9's mount line names the
 channel, not the tree) — plus a `binds: <N>` count. Both names write space, tab,
 newline and backslash as `\040 \011 \012 \134` (operator vote 97), so a line splits
-on spaces and the listing on newlines whatever the names hold. That name is the transport file's
-own: `SYS_ATTACH_9P_SRV` reads its connection's namespace name (`/srv/home-<user>`, given
+on spaces and the listing on newlines whatever the names hold. A session root's name is the
+transport file's own: `SYS_ATTACH_9P_SRV` reads its connection's namespace name (`/srv/home-<user>`, given
 to the connection by the stalk adoption arm when it was opened) and `SYS_ATTACH_9P` its
 transmit fd's, else that file's device spec (`#|` for a pipe, which has no name). The
 handler stamps it on the root's `dev9p_priv` (`origin`) before the root is published, so

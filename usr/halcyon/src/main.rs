@@ -1448,8 +1448,9 @@ fn own_ns_path() -> String {
 /// control character in the name shows as `?`.
 fn root_source() -> Option<String> {
     let bytes = read_capped(&own_ns_path(), 64 * 1024).ok()?;
-    let text = core::str::from_utf8(&bytes).ok()?;
-    let src = halcyon::ns_root_source(text)?;
+    // Lossy: a name that is not UTF-8 spoils its own line, not the root's.
+    let text = String::from_utf8_lossy(&bytes);
+    let src = halcyon::ns_root_source(&text)?;
     Some(src.chars().map(|c| if c.is_control() { '?' } else { c }).collect())
 }
 

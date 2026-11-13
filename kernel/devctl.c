@@ -1202,8 +1202,9 @@ static int devctl_close(struct Spoor *c) {
     return 0;
 }
 
-// prowl-1 bumped 512 -> 2048: /ctl/procs formats the WHOLE listing into this
-// stack buffer (paginated by `off`), and the NAME + CPU_NS columns widen each
+// prowl-1 bumped 512 -> 2048: /ctl/procs renders into this stack buffer (into
+// less when the read is shorter; it has no read past offset 0), and the NAME +
+// CPU_NS columns widen each
 // proc line ~2x, so 512 would truncate (via the format_procs_cb overflow
 // early-return) at ~9 procs -- fewer than a booted system runs. 2048 fits ~30
 // proc lines; a 2 KiB frame on the 16 KiB kstack is safe on the shallow Dev-read
@@ -1263,8 +1264,8 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     // is rendered to the caller's buffer, so a short read holds the rows that fit,
     // each whole, then the cut line. A second read would render the table again,
     // and its tail after the first read's head is a table no moment ever had. A
-    // buffer without room for the header and the cut line is refused, as getcwd
-    // refuses one shorter than the path: an empty answer would read as no Procs.
+    // buffer without room for the header and the cut line is refused: an empty
+    // answer would read as end of file, a table with no Proc.
     size_t cap = DEVCTL_READ_BUF;
     if (kind == CTL_KIND_PROCS) {
         if (off > 0) return 0;
@@ -1273,7 +1274,7 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
 
     char content[DEVCTL_READ_BUF];
     size_t total = leaf->fmt(reader, content, cap);
-    if (kind == CTL_KIND_PROCS && total == 0) return -T_E_RANGE;   // ERRORS.md: below the one-read minimum
+    if (kind == CTL_KIND_PROCS && total == 0) return -T_E_RANGE;   // below the header and the cut line
 
     if ((size_t)off >= total) return 0;
     size_t avail = total - (size_t)off;

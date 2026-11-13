@@ -183,12 +183,14 @@ deliberate:
   table, which is not reported as cut, and every entry falls back to the
   inference, as before LR-1.
 
-Names are not quoted in the kernel's text, so a name with whitespace splits
-into the wrong fields; such a line lends no realm and nothing panics (queued
-in OPEN-BUGS as a format limit). The host tests cover every suffix, the
-covered skip, the cleaned-name compare, a broken list, the cut list and the
-space-split name; sabotaging the covered skip and the cut detection each
-turned them red.
+The kernel writes space, tab, newline and backslash in a name as octal escapes
+(vote 97), so a name with whitespace parses whole and lends its realm. The
+callers decode the listing with `from_utf8_lossy` and split it on `\n`, so a
+name that is not UTF-8 spoils only its own line and a name ending in `\r` keeps
+it. The host tests cover every suffix, the covered skip, the cleaned-name
+compare, a broken list, the cut list, the four escapes and what is not one,
+and an escaped name's realm; sabotaging the covered skip and the cut detection
+each turned them red.
 
 **`netpump` encodes one non-obvious fact about the network daemon**: its data
 write is non-blocking, so a full send window returns a zero-count write rather

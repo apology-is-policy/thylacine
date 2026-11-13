@@ -267,7 +267,9 @@ escapes): unescaped, a name's tail moved into the next field, and a name
 holding a newline and the text of a line forged a mount line of its own.
 `territory.render_escapes_names` mounts a point whose name holds all four and
 a whole mount line's text, under a source whose name holds a space, and
-requires exactly one mount line, escaped, then `binds: 0`.
+requires exactly one mount line, escaped, then `binds: 0`; the 9P origin
+site is witnessed by `dev9p.origin_format_ns` ([[sub-kernel-ninep-dev9p]]).
+The contract in territory.h says the same.
 The listing is as long as the table, so the function copies a window of
 it — the bytes from the read's offset, at most the caller's room, ending at
 the last line end among them (#66b F2: no partial line where a whole one

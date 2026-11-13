@@ -128,11 +128,13 @@ fn run(args: Args) -> i64 {
         return out.finish("ns", 0);
     }
 
-    let text = core::str::from_utf8(&data).unwrap_or("");
+    // Lossy, and split on newlines only: a name that is not UTF-8 spoils its own
+    // line, and a name ending in a carriage return keeps it.
+    let text = String::from_utf8_lossy(&data);
     let mut mounts: Vec<Mount> = Vec::new();
     let mut binds: Option<u64> = None;
     let mut root_pheno = false;
-    for line in text.lines() {
+    for line in text.split('\n') {
         match nsmount::parse_line(line) {
             Line::Mount(m) => mounts.push(m),
             Line::Binds(n) => binds = Some(n),
@@ -175,9 +177,6 @@ fn flags_cell(m: &Mount) -> String {
     }
 }
 
-/// Render the boxed namespace view: MOUNTPOINT / SOURCE / REALM / FLAGS, each
-/// cell colored by kind (mountpoint slate, source + realm by the realm, flags
-/// dim). A namespace-level `root: pheno-linux` rides the bottom rule.
 /// A name in a table cell: a control character (a tab or newline the kernel
 /// escaped, an escape sequence) would break the row or drive the terminal, so it
 /// shows as `?`.
@@ -185,6 +184,9 @@ fn cell(name: &str) -> String {
     name.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
 }
 
+/// Render the boxed namespace view: MOUNTPOINT / SOURCE / REALM / FLAGS, each
+/// cell colored by kind (mountpoint slate, source + realm by the realm, flags
+/// dim). A namespace-level `root: pheno-linux` rides the bottom rule.
 fn render(out: &mut io::OutSink, pid: i64, mounts: &[Mount], binds: Option<u64>, root_pheno: bool, on: bool) {
     let realms: Vec<(&'static str, &'static str)> = mounts.iter().map(entry_realm).collect();
     let flags: Vec<String> = mounts.iter().map(flags_cell).collect();

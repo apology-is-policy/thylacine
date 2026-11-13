@@ -1314,10 +1314,13 @@ void test_devctl_procs_rows_whole(void) {
 // rendering's tail follows the first; a buffer one byte short of the table gets
 // whole rows and the cut line, never the table's first bytes; a buffer without
 // room for the header and the cut line is refused with ERANGE, not answered
-// with nothing.
+// with nothing. The table can lose a byte between two reads (a thread reaped, a
+// count dropping a digit) and then fits one byte short uncut on a correct kernel,
+// so the short read is taken again until the table reads the same after it.
 void test_devctl_procs_one_read(void) {
     static char buf[4096];     // devctl's own cap: a larger buffer reads no more
     static char whole[4096];
+    static char later[4096];
 
     struct Proc *own[2] = { proc_alloc(), proc_alloc() };
     TEST_ASSERT(own[0] != NULL && own[1] != NULL, "proc_alloc for the table's own rows");
@@ -1327,14 +1330,24 @@ void test_devctl_procs_one_read(void) {
     }
 
     struct Spoor *c = open_ctl_leaf("procs");
-    long full = c ? devctl.read(c, whole, (long)sizeof whole, 0) : -1;
-    long past = c ? devctl.read(c, buf, (long)sizeof buf, 1) : -1;
-    long late = c ? devctl.read(c, buf, (long)sizeof buf, full > 0 ? full / 2 : 1) : -1;
-    struct prw_shape ref = { 0 }, sh = { 0 };
-    if (full > 0) prw_shape_of(whole, (size_t)full, &ref);
-    long shy = (c && full > 1) ? devctl.read(c, buf, full - 1, 0) : -1;
-    if (shy > 0) prw_shape_of(buf, (size_t)shy, &sh);
-    long tiny = c ? devctl.read(c, buf, 8, 0) : 0;
+    struct prw_shape ref = { 0 }, sh = { 0 }, again = { 0 };
+    long full = -1, shy = -1;
+    bool still = false;
+    for (int attempt = 0; c && attempt < 4 && !still; attempt++) {
+        full = devctl.read(c, whole, (long)sizeof whole, 0);
+        if (full <= 1) break;
+        prw_shape_of(whole, (size_t)full, &ref);
+        shy = devctl.read(c, buf, full - 1, 0);
+        if (shy > 0) prw_shape_of(buf, (size_t)shy, &sh);
+        long after = devctl.read(c, later, (long)sizeof later, 0);
+        if (after > 0) prw_shape_of(later, (size_t)after, &again);
+        still = after == full && again.rows == ref.rows;
+        for (int i = 0; still && i < ref.rows && i < PRW_PIDS; i++)
+            if (again.pids[i] != ref.pids[i]) still = false;
+    }
+    long past = c ? devctl.read(c, later, (long)sizeof later, 1) : -1;
+    long late = c ? devctl.read(c, later, (long)sizeof later, full > 0 ? full / 2 : 1) : -1;
+    long tiny = c ? devctl.read(c, later, 8, 0) : 0;
     if (c) spoor_clunk(c);
 
     for (int i = 0; i < 2; i++) {
@@ -1346,6 +1359,7 @@ void test_devctl_procs_one_read(void) {
     TEST_ASSERT(c != NULL, "open /ctl/procs");
     TEST_ASSERT(full > 0 && !ref.torn && !ref.cut && ref.rows >= 3,
                 "the whole table, three rows or more, in one read");
+    TEST_ASSERT(still, "the table read the same before and after the short read, within four tries");
     TEST_EXPECT_EQ(past, 0, "a read at offset 1 answers end of file");
     TEST_EXPECT_EQ(late, 0, "a read in the table's middle answers end of file");
     TEST_ASSERT(shy > 0 && shy < full, "a buffer one byte short is answered, shorter");

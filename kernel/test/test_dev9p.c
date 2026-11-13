@@ -5641,6 +5641,25 @@ void test_dev9p_origin_format_ns(void) {
     territory_unref(t);
     teardown(root);
 
+    // A transport whose name holds a space and a backslash: the origin writes
+    // them as \040 and \134 (operator vote 97), as the other names do.
+    struct Spoor *odd = spoor_alloc(&devnone);
+    TEST_ASSERT(odd != NULL, "a transport for a name to escape");
+    odd->path = d9_name2("srv", "a b\\c");
+    root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL && odd->path != NULL, "client + root (a name to escape)");
+    dev9p_stamp_origin(root, odd);
+    TEST_ASSERT(dev9p_spoor_origin(root, &on, &od) && on == odd->path, "premise: the root takes that name");
+    t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory 6");
+    TEST_EXPECT_EQ(mount(t, root, mp, 0), 0, "mount it at /m");
+    d9_ns(t, buf, sizeof(buf) - 1);
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /srv/a\\040b\\134c\nbinds: 0\n"),
+                "the origin's space and backslash are written as their escapes");
+    territory_unref(t);
+    teardown(root);
+    spoor_unref(odd);
+
     // A cached-open priv owns no fid, like the root, but is not one: it refuses
     // the stamp. The same priv shaped as a root takes it (the control).
     d9_forged_zero();

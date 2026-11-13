@@ -584,7 +584,8 @@ fn ns_unescape(field: &str) -> String {
 /// union begun with `bind -a` lists the directory underneath first (`mount / /
 /// covered`): the root is then no mount's source.
 pub fn ns_root_source(text: &str) -> Option<String> {
-    for line in text.lines() {
+    // Newlines only: `lines` would take a name's trailing carriage return.
+    for line in text.split('\n') {
         let mut it = line.split(' ').filter(|f| !f.is_empty());
         if it.next() == Some("mount") && it.next() == Some("/") {
             let src = it.next()?;
@@ -610,6 +611,8 @@ mod ns_tests {
         assert_eq!(ns_root_source("mount /a\\040/ #9\nbinds: 0\n"), None, "an escaped space is not a field break");
         assert_eq!(ns_root_source("mount /x #s\nbinds: 0\n"), None);
         assert_eq!(ns_root_source("mount /\n"), None, "a line cut short");
+        assert_eq!(ns_root_source("mount / /srv/boot\r\nbinds: 0\n").as_deref(), Some("/srv/boot\r"),
+                   "a carriage return ending the name stays in it");
     }
 
     #[test]
