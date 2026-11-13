@@ -1434,10 +1434,10 @@ Open after that review:
   episode fail, cancel its grant, keep the seat from returning, or make a broker
   command be skipped or act on another object.
 - The compositor told of a blank restore (R4-F3, the restore paragraph above) is
-  host-tested: seven mutants of `gpu_api` turn its tests red. Its scenario has run
-  against a scripted guest, every fault red. It is NOT YET RUN IN A GUEST, and is
-  not yet audited (round R5). Owed: `ls-graphical-sak-blank` in a guest, and red with
-  the proxy's marking taken out.
+  host-tested: seven mutants of `gpu_api` turn its tests red. `ls-graphical-sak-blank`
+  is green in a guest (2026-11-13, at bcad0f8d0), and red without the proxy's marking
+  (the output stays blank) and without the cause (the rebind says `bound, late`). It is
+  not yet audited (round R5).
 - There is no layout under 800x720 layout pixels. A display smaller than that
   is given a screen of twice or more its size (since 2026-11-11; before that it
   refused the whole seat at startup), which the frontend shows scaled down.

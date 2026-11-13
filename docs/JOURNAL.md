@@ -31,6 +31,8 @@ Stamped 2026-11-13T22:11Z. Branch aux-3-mac after 5d674a326's entry: 39d8ca95b (
 - **The input station's residue.** Round R3's F6 and F8 had no regression test because the code sat in tapestryd's main loop and server. `tapestryd::pointer` (the tablet's and mouse's event decode) and `tapestryd::display_stall` (the display stall aim) are now modules with host tests, 11 of them; 14 mutants each turn one red (aux-gate resid/r5-mut.py). The tablet's axes across an episode (P3) were closed by reading QEMU 11.1.3's source: the tablet sends both axes in every frame, and frames arrive whole.
 - **The interop station's four questions**, asked at once (AskUserQuestion, about 18:25Z) and voted as recommended. M10: a channel per session; the new virtio-serial driver frames the one port and posts `/srv/mac`, and login mounts it in each session. M11: version 1 of the tree is `snarf` and `folders/<name>/`. M12: Quit presses the `virt` machine's power button. R4-F3: Lictor reports a blank restore. MAC-RUNNER 4.4 is rewritten as the contract (24890b0ab), from two read-only research agents (aux-gate resid/research-interop.md). E1 and TOOLING.md section 4 described the dev loop's host0 9P share as in use; nothing in the guest drives or mounts it, so both now say so.
 - **R4-F3.** A frame main's restore gives up left the compositor believing its bind, and a composed display stayed blank until a mode change. `Stats.restores_blank` counts every restore that ends `Blank` (corona's ask on yip call 0313: every one, not only a refused frame). The proxy marks the scanout unknown when the count moves, and tapestryd binds again and says why (a1ca01f53). This commit adds the witness `ls-graphical-sak-blank`. In episode 1 the lever refuses the restore's rebind; Lictor gives the frame up, and tapestryd binds the same resource again with nothing typed. Typing must then change the dumped scanout. Episode 2, the shot spent, rebinds its frame and nothing is bound.
+- **corona's aims, and the stall-next lever taken out.** tapestryd's bring-up and health-step stall aims now ride their own step's request (`TestStallShot`, d585b24f1); each step's next request was read first (CtxCreate, the conversion's CtxCreate, TransferTo3d*Sync), and all are corona's own. They need a GL device, so they have not run. With nothing left sending `TestStallNext` (opcode 68), a census of main and aux-3-mac found nothing that still arms it, and corona asked for it to go on yip call 0315: it is gone with `TestArmLatch`'s three stall shots (bcad0f8d0, handoff 058).
+- **Guest run 5** (23:03Z, at bcad0f8d0, aux-gate resid/resid-live5.sh): every leg as wanted. `ls-graphical-sak-blank` is green in a guest, and red both ways: without the proxy's marking the output stays blank, and without the cause the rebind says `bound, late`. The seat's other scenarios and the latch lever's (`ls-graphical-sak-dead`, `ls-gpu-dead`, now without stall-next shots) are green, and so are the display stall and follow scenarios.
 
 ### Wrong turns, and what caught each
 
@@ -52,12 +54,13 @@ M10, M11, M12 and R4-F3, as above. Nothing was decided under the 2026-09-01 auth
 
 ### What "shown" covers
 
-R4-F3 on the host: the rule and the wire. The count in `Device::restore`, the proxy's adopt and tapestryd's line are guest code, and only the scenario, against a scripted guest, has been run over them. Not run in a guest, and not audited (round R5).
+R4-F3 on the host: the rule and the wire. In a guest (run 5): the count in `Device::restore`, the proxy's adopt and tapestryd's line, each control red at its own check. Not audited (round R5). d585b24f1's aims: read, not run (no GL device here, and the Pi is off limits).
 
 ### Open
 
-- R4-F3 in a guest: `ls-graphical-sak-blank` green, red with the proxy's marking taken out (the display must stay blank), and red with `restore_blanked` taken out (`bound, late`). Then round R5.
-- corona's bring-up and health-step aims onto `TestStallShot` (yip call 0313; next).
+- Round R5 over R4's fixes, 39d8ca95b, R4-F3, d585b24f1, bcad0f8d0 and the interop drivers.
+- d585b24f1's GL witness (warp-host.sh composed-stall) wants a GL host.
+- **A gap in the voted interop design, for the operator** (found 22:50Z): MAC-RUNNER 4.4 says login mounts `/srv/mac` and the attach carries the session user. The kernel stamps a `/srv` attach with the OPENING Proc's principal (kernel/9p_attach.c:406), and login runs as SYSTEM, so a mount login makes would show every file owned by SYSTEM. Asked as a question; login's mount waits on it.
 - The interop build: the virtio-serial driver, login's mount, the app's 9P server, the power-key driver, each with its audit row.
 - HALCYON_SCALE and HALCYON_MOTION have no guest scenario; #880; Control-Command-G never pressed; one `--stats` run is asked of the operator; QEMU's `max_hostmem` default of 256 MiB against M9. The full CI gate is held. Codeberg is behind.
 
