@@ -299,7 +299,10 @@ walk ends when the output buffer fills rather than visiting every process under
 the global lock with interrupts off. Once `/ctl` became reachable from userspace
 this stopped being a formatting nicety: it is what bounds an unprivileged
 tight-loop reader's lock hold to the size of the buffer instead of the size of
-the process table.
+the process table. The bound is for a reader that is shown rows. One behind
+the none wall is shown its own row only, never fills the buffer, and its walk
+visits every Proc: the cost of any `/proc/<pid>/status` read, and part of the
+Proc table's locking debt (#62).
 
 A row is committed whole or not at all, in `/ctl/procs` and `/ctl/kstack`
 alike: the callback formats at the buffer's tail and, if any field does not
@@ -344,10 +347,13 @@ compares shape, not bytes, because `CPU_NS` moves between two renders.
 `tools/interactive/ps-many.exp` reads the file on a freshly booted guest and
 requires no cut line, then with seventy more Procs and requires it after a
 whole nine-column row. It reads with `cat`, which reads to end of file, and
-every read renders the file afresh: when the second rendering is longer,
-`cat` prints its last bytes after the first. So the scenario lets only the
-end of a cut line follow the cut line. Its first boot showed exactly that, a
-lone `)` line, and the leg as first written (the cut line directly before
+every read renders the file afresh: when a later rendering is longer, `cat`
+prints its last bytes after the first. Each of those ends with a cut line
+too, so after the first cut line the scenario fails on a row that no cut
+line follows and on a row followed by part of a cut line, and on nothing
+else: a line that is neither a row nor a cut line's end is another
+program's console output, reported as a step. Its first boot showed a lone
+`)` line there, and the leg as first written (the cut line directly before
 the marker) read it as a table without the line.
 
 ### A cut kernel-stack table says so, and keeps its peak (2026-11-13)

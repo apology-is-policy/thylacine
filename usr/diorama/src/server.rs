@@ -800,15 +800,16 @@ fn native_pid_exists(pid: u32) -> bool {
 
 // V-7 membership: the container's process tree is the runner's children other
 // than this server, and their descendants (docs/VIVARIUM.md section 7.2). It is
-// decided per pid, by walking the parent links through native
-// /proc/<pid>/status -- not from a table of every Proc: one read of /ctl/procs
-// holds only the rows that fit it, and a member past the cut would be absent
-// from its own container.
+// decided from the parent links in native /proc/<pid>/status -- not from a
+// table of every Proc: one read of /ctl/procs holds only the rows that fit it,
+// and a member past the cut would be absent from its own container.
 //
-// The walk needs no depth bound. A parent is older than its child (pids are
-// handed out ascending and never reused, and an orphan goes to init or kproc),
-// so every step lowers the pid. A link that does not is not one the kernel
-// makes, and admits nothing.
+// A parent is older than its child (pids are handed out ascending and never
+// reused, and an orphan goes to init or kproc), so every link lowers the pid.
+// Resolving one pid walks its links up, and needs no depth bound; a link that
+// does not lower the pid is not one the kernel makes, and admits nothing.
+// Listing decides every pid in ascending order from its parent's answer: one
+// status read a pid, however deep the container has made its tree.
 
 /// Is `pid` in the tree whose roots are `runner`'s children other than `me`?
 /// `ppid_of` answers a pid's parent, or None when that Proc is gone or cannot
@@ -820,7 +821,9 @@ pub fn viv_tree_member(
     me: u32,
     mut ppid_of: impl FnMut(u32) -> Option<u32>,
 ) -> bool {
-    if runner == 0 || pid == runner {
+    // A member descends from the runner, so it is younger. An older pid is
+    // refused on its number: no read, whose cost would say whether it exists.
+    if runner == 0 || pid <= runner {
         return false;
     }
     let mut cur = pid;
@@ -836,6 +839,42 @@ pub fn viv_tree_member(
         }
         cur = parent;
     }
+}
+
+/// The members among `pids`: the set `viv_tree_member` decides pid by pid,
+/// from one `ppid_of` per pid above the runner. In ascending order a pid's
+/// parent is already decided when the pid is reached. A pid not above the one
+/// before it is skipped, so the result is strictly ascending whatever order
+/// the listing came in.
+pub fn viv_tree_members(
+    pids: &[u32],
+    runner: u32,
+    me: u32,
+    mut ppid_of: impl FnMut(u32) -> Option<u32>,
+) -> Vec<u32> {
+    let mut members: Vec<u32> = Vec::new();
+    if runner == 0 {
+        return members;
+    }
+    let mut last = runner;
+    for &pid in pids {
+        if pid <= last {
+            continue;
+        }
+        last = pid;
+        let Some(parent) = ppid_of(pid) else {
+            continue;
+        };
+        let admit = if parent == runner {
+            pid != me
+        } else {
+            members.binary_search(&parent).is_ok()
+        };
+        if admit {
+            members.push(pid);
+        }
+    }
+    members
 }
 
 /// A native Proc's parent pid, from one read of its status.
@@ -876,9 +915,14 @@ fn viv_is_member(pid: u32) -> bool {
 /// it -- native /proc's own contract (DEBUG-FS-DESIGN 5h), which this passes on.
 fn native_pid_list(from: u64) -> Vec<u32> {
     let mut pids = procs::pids().unwrap_or_default();
-    let viv = viv_runner() != 0;
+    let runner = viv_runner();
+    if runner != 0 {
+        // Every pid is decided, also those below `from`: a member's parent may
+        // be one of them.
+        pids = viv_tree_members(&pids, runner, VIV_SELF.load(Ordering::Relaxed), native_ppid);
+    }
     // pid 0 (kproc) is no /proc name here (parse_pid): 0 is the static-node range.
-    pids.retain(|&p| p != 0 && u64::from(p) >= from && (!viv || viv_is_member(p)));
+    pids.retain(|&p| p != 0 && u64::from(p) >= from);
     pids
 }
 
@@ -2906,6 +2950,50 @@ pub fn selftest() -> Result<(), &'static str> {
             || viv_tree_member(41, 10, 11, |p| ppid(&cyclic, p))
         {
             return Err("vivarium cycle handled wrong");
+        }
+        // A pid older than the runner is refused without a read.
+        let mut reads = 0u32;
+        let old = viv_tree_member(1, 10, 11, |q| {
+            reads += 1;
+            ppid(&table, q)
+        });
+        if old || reads != 0 {
+            return Err("the walk read a status for a pid older than the runner");
+        }
+        // The listing form: the container tree, from one read per pid above
+        // the runner.
+        let pids = [1u32, 10, 11, 20, 21, 22, 30];
+        let mut reads = 0u32;
+        let listed = viv_tree_members(&pids, 10, 11, |q| {
+            reads += 1;
+            ppid(&table, q)
+        });
+        if listed != [20u32, 21, 22] {
+            return Err("the member list is not the container tree");
+        }
+        if reads != 5 {
+            return Err("the member list did not read one status per pid above the runner");
+        }
+        if !viv_tree_members(&pids, 0, 11, |q| ppid(&table, q)).is_empty() {
+            return Err("a member list without a runner");
+        }
+        // It is the walk's set on every table above.
+        for t in [&table[..], &mine[..], &orphaned[..], &gap[..], &cyclic[..]] {
+            let mut pids: Vec<u32> = t.iter().map(|r| r.0).collect();
+            pids.sort_unstable();
+            let walked: Vec<u32> = pids
+                .iter()
+                .copied()
+                .filter(|&p| viv_tree_member(p, 10, 11, |q| ppid(t, q)))
+                .collect();
+            if viv_tree_members(&pids, 10, 11, |q| ppid(t, q)) != walked {
+                return Err("the member list differs from the walk");
+            }
+        }
+        // A listing out of order may lose members, and admits none early: 20
+        // comes after its child here, and is skipped with it.
+        if !viv_tree_members(&[21, 20, 22], 10, 11, |q| ppid(&table, q)).is_empty() {
+            return Err("the member list followed a listing out of order");
         }
         // A status that ends mid-line: host pid 57's "ppid:    41" cut to
         // "ppid:    4" is no parent, or 57 would read as the runner's child.

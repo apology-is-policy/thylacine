@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/PROWL-DESIGN.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Purpose
 
@@ -73,8 +73,15 @@ process at the moment its status was read, a process alive through the sample
 appears once, and one that ends before its status is read is skipped. The tree
 view already treats a row whose parent is absent as a root. A set that cannot
 be read is shown as an empty table with the error on the status line, because
-a partial list would read as every process. The cost is one open and one read
-per process per sample where there was one read for all of them.
+a partial list would read as every process. That error has its own field
+(`set_error`): the status line shows it ahead of an action's result, and the
+next sample that reads the set clears it, where a key press clears only the
+action's. The cost is one open and one read per process per sample where there
+was one read for all of them, and the kernel walks its Proc table under the
+table lock for each, so a sample costs the square of the process count in lock
+steps (the Proc table's locking, #62). prowl's own lookups do not: the previous
+sample is kept sorted by pid and searched, and the tree view finds a parent in
+a sorted index of the rows.
 
 ## Mechanism
 

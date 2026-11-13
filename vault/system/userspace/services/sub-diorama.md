@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/VIVARIUM.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-11-11
+updated: 2026-11-13
 ---
 ## Purpose
 
@@ -418,11 +418,22 @@ Linux virtualizes this with a pid namespace.
   a busy box the container's subtree could fall past the cut and the
   member set came out empty (Task #182, behind a 64-entry table). The
   root's enumeration now lists native `/proc` (`procs::pids`, whole at any
-  size, resumed by pid), and membership is decided per pid by walking
-  parent links through each `/proc/<pid>/status` (`viv_tree_member`).
-  Every step must lower the pid, so the walk needs no depth bound, and a
-  link the kernel would not make admits nothing; an ancestor whose status
-  cannot be read admits nothing below it.
+  size, resumed by pid), and membership is decided from the parent links
+  in each `/proc/<pid>/status`. Resolving one pid walks its links up
+  (`viv_tree_member`): every step must lower the pid, so the walk needs no
+  depth bound, and a link the kernel would not make admits nothing; an
+  ancestor whose status cannot be read admits nothing below it. A pid at
+  or below the runner's is refused on its number, with no read. Listing
+  decides every pid in one ascending pass (`viv_tree_members`): a parent
+  is older than its child, so each pid is decided from its parent's
+  answer, at one status read a pid above the runner however deep the
+  container has made its tree. A walk per listed pid cost pids times
+  depth on every Treaddir. The selftest holds the two forms to one set
+  and counts the reads of each. What is left: resolving a pid above the
+  runner's costs one failed open when no Proc has it and a short walk
+  when a host Proc does, so a container can time which of those pids are
+  alive -- liveness seen, no authority taken. Closing it takes the whole
+  pass for every lookup, or a kernel answer to "is P under R".
 
   **A cut text is no value.** A status is taken with one read into a
   buffer sized to the kernel's `DEVPROC_READ_BUF` (2048), and nothing ties

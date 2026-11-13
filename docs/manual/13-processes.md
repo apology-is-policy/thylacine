@@ -33,11 +33,12 @@ milliseconds under ten seconds and in seconds above. Another user's process
 shows `-` under `CPU`, unless the operator holds `CAP_HOSTOWNER`. `STATE` is `ALIVE`,
 `STOPPED`, `ZOMBIE` or `INVALID`; a process stopped by job control, as after
 Ctrl-Z, is `STOPPED`. `NAME` is the last component of the path the program was
-started from, and shows `?` in place of a space or of any character outside
-printable ASCII.
+started from, and shows `?` in place of a space or of any byte outside
+printable ASCII; a character stored as several bytes shows as several `?`.
 
-`ps` lists every process on the system, however many there are, in increasing
-order of process ID. For a script, `ps --color=never --beacon=never` prints the
+`ps` lists every process its user may see, however many there are, in
+increasing order of process ID; a user running as `none` sees only its own
+process. For a script, `ps --color=never --beacon=never` prints the
 plain table: the header and the columns of `/ctl/procs`, with `CPU_NS` in
 nanoseconds. When a process's status cannot be read, `ps` prints the error and
 exits with status 1 without printing a table.
@@ -207,9 +208,10 @@ stops after the last whole row and ends with this line:
 (cut: more processes than one read holds; /proc lists them all)
 ```
 
-A table without that line holds every process the reader may see. The table
-is produced again for each read, so read it with one read. A program that
-reads on to the end of the file, as `cat` does, asks a second time, and when
+The table is produced again for each read, so read it with one read: one read
+that does not end with that line holds every process the reader may see. A
+program that reads on to the end of the file, as `cat` does, asks a second
+time, and when
 the second table is longer than the first it prints that table's last few
 characters after the first one. `ps` and
 `prowl` take their rows from `/proc`: they list the directory, which has no
@@ -221,7 +223,7 @@ may be absent. When the set cannot be read, `prowl` shows an empty table and
 the error on its status line.
 
 A process's name is recorded when the program starts, from the last component
-of its path, and holds at most 31 characters. A space and every character
+of its path, and holds at most 31 characters. A space and every byte
 outside printable ASCII are recorded as `?`, so a file name cannot add a line
 to a status file, a column to the process table, or a control sequence to the
 terminal that prints it.

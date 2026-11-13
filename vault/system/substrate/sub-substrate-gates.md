@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Purpose
 
@@ -488,8 +488,12 @@ libthyla-rs has a `host-test` entry of its own since 2026-11-12, for the tests
 of its `procs` module ([[sub-libthyla-rs]]). The crate has no pass without the
 stubs, because its `_start` is guest assembly, so the gate runs the `host-test`
 pass in place of the default one when the default pass's log carries a
-host-impossible signature. A failure of that pass is a FAIL whatever its log
-says: "could not compile `libthyla-rs`" is one of the NO-HOST signatures, and
+host-impossible signature. The crates this holds for are named one by one in
+`ONLY_PASS` (libthyla-rs alone): any other crate whose default pass stops
+building against libthyla-rs is NO-HOST with its tests stranded, also when it
+has a `host-test` pass that still builds. A failure of that pass is a FAIL
+whatever its log says: "could not compile `libthyla-rs`" is one of the NO-HOST
+signatures, and
 it is also what a broken test of libthyla-rs prints, so classifying the only
 pass by its log would file a red test under NO-HOST.
 

@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-11-10
+updated: 2026-11-13
 ---
 ## Session factory handoff
 
@@ -149,10 +149,10 @@ with no later connect (`REARM`: the server did not serve it once a slot
 freed), and a holder that ends any other way. The probe cannot see the pool's
 size; "one waiting at a full pool" is a connect that outlasts the quiet and
 the window after every earlier one returned inside the quiet, and that the
-probe's own free then serves at once. The server's pid comes from one read of
-`/ctl/procs`, which the kernel cuts to the rows that fit 4096 bytes without
-saying so: a table that ends within 512 bytes of that bound is refused as
-unreadable rather than searched. The waiting connect waits about 650 ms
+probe's own free then serves at once. The server's pid comes from the process
+set read from `/proc` (libthyla-rs's `procs::list`, whole at any number of
+Procs): no Proc of that name, or two, fails the probe. The waiting connect
+waits about 650 ms
 however long the holder took to start. The bar is a quarter of the window: a server
 that keeps asking about a listener it cannot accept from never sleeps and
 takes all of it ([[sub-corvus]], [[sub-netd-nic]]). It runs in joey's ladder

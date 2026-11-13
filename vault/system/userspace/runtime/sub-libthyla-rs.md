@@ -51,7 +51,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-11
+updated: 2026-11-13
 ---
 ## Dedicated service owner (October 2)
 
@@ -339,12 +339,18 @@ status itself for a parent pid.
 
 A row is one instant of its Proc. The set is not: a Proc that ends between the
 listing and its status read is skipped (`read_status` answers `None` when the
-open finds no such pid, and also when a read fails and a second open finds
-none), and one born after the listing passed its pid is seen by the next call.
+open finds no such pid, and also when a read fails with an I/O error and a
+second open finds none; a read that is denied is an error), and one born after
+the listing passed its pid is seen by the next call.
 Pids are never reused, so no row is another Proc's. A status that is read but
 does not parse is an error (`Io`), never an absence. `field` matches a key at
 the start of a line only, so `pid` does not find `ppid`, and reads only lines
 that end in a newline.
+
+`list` costs the square of the set on today's kernel: one open and one read
+per Proc, and the kernel walks its Proc table under the table lock for each
+(the open's pid lookup, the read's walk), where one read of `/ctl/procs` was
+one walk. That belongs to the Proc table's locking (#62), not to this module.
 
 ### The 9P serving codec (`ninep`)
 

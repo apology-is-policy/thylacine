@@ -66,12 +66,17 @@ pub fn tree_order(rows: &[ProcRow]) -> Vec<(usize, usize)> {
     // children[i] = the row indices whose ppid == rows[i].pid, in list order.
     let mut children: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
     let mut is_root = alloc::vec![true; n];
+    // (pid, row), sorted: a parent is found by search, in any sort order of
+    // the rows and on a system of any size.
+    let mut by_pid: Vec<(i64, usize)> = rows.iter().enumerate().map(|(i, r)| (r.pid, i)).collect();
+    by_pid.sort_unstable();
     for (ci, r) in rows.iter().enumerate() {
         // The FIRST row whose pid == this row's ppid is the parent (pids are
         // unique among ALIVE procs; a stale ZOMBIE dup is vanishingly unlikely
         // and self-corrects next poll).
-        if let Some(pi) = rows.iter().position(|p| p.pid == r.ppid) {
-            if pi != ci {
+        let k = by_pid.partition_point(|&(pid, _)| pid < r.ppid);
+        if let Some(&(pid, pi)) = by_pid.get(k) {
+            if pid == r.ppid && pi != ci {
                 children[pi].push(ci);
                 is_root[ci] = false;
             }
@@ -196,7 +201,7 @@ pub fn parse_status_mem(text: &str) -> Option<MemDetail> {
 /// next poll can diff. The monotonic wall delta is supplied by the caller
 /// (time::Instant), keeping this layer terminal- AND clock-free.
 pub struct Sampler {
-    prev: Vec<(i64, u64)>, // (pid, cpu_ns) from the last poll
+    prev: Vec<(i64, u64)>, // (pid, cpu_ns) from the last poll, sorted by pid
 }
 
 impl Sampler {
@@ -212,12 +217,12 @@ impl Sampler {
     pub fn update(&mut self, rows: &mut [ProcRow], elapsed_ns: u64) {
         for r in rows.iter_mut() {
             r.cpu_pct_x10 = r.cpu_ns.map(|now| {
-                match self.prev.iter().find(|&&(pid, _)| pid == r.pid) {
+                match self.prev.binary_search_by_key(&r.pid, |&(pid, _)| pid) {
                     // (delta / elapsed) is the fraction of one core; * 1000 ->
                     // tenths of a percent. delta <= elapsed * ncpus, so
                     // delta * 1000 stays far within u64.
-                    Some(&(_, old)) if elapsed_ns > 0 => {
-                        now.saturating_sub(old).saturating_mul(1000) / elapsed_ns
+                    Ok(i) if elapsed_ns > 0 => {
+                        now.saturating_sub(self.prev[i].1).saturating_mul(1000) / elapsed_ns
                     }
                     _ => 0,
                 }
@@ -225,6 +230,7 @@ impl Sampler {
         }
         self.prev.clear();
         self.prev.extend(rows.iter().filter_map(|r| r.cpu_ns.map(|ns| (r.pid, ns))));
+        self.prev.sort_unstable_by_key(|&(pid, _)| pid);
     }
 
     /// Total %CPU across the rows whose CPU time is visible, in tenths of a

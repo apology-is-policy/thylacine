@@ -76,12 +76,19 @@ HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 # `host-test` stubs, where every syscall answers ENOSYS. The stubs are aarch64
 # instructions, so another host skips that pass and reports its tests stranded.
 #
-# libthyla-rs itself has no pass WITHOUT the stubs (its `_start` is guest
-# assembly), so its `host-test` pass is its only one: the loop below takes it in
-# place of the default pass, and a failure of it is a FAIL, never NO-HOST.
 FEATURE_PASSES=(
     "cornucopia:scale"
     "libutopia:host-test"
+    "libthyla-rs:host-test"
+)
+
+# libthyla-rs itself has no pass WITHOUT the stubs (its `_start` is guest
+# assembly), so its `host-test` pass is its only one: the loop below takes it in
+# place of the default pass, and a failure of it is a FAIL, never NO-HOST. Named
+# crate by crate: any other crate whose default pass stops building against
+# libthyla-rs is NO-HOST with its tests stranded, and a feature pass that still
+# builds must not make it read PASS.
+ONLY_PASS=(
     "libthyla-rs:host-test"
 )
 
@@ -219,11 +226,11 @@ for crate in "${crates[@]}"; do
     rc=0
     cargo_test "$crate" "$log" || rc=$?
 
-    # A crate with a `host-test` entry that the host cannot build without it:
-    # that pass is its only one, and is classified below like a default pass.
+    # A crate in ONLY_PASS that the host cannot build without its feature: that
+    # pass is its only one, and is classified below like a default pass.
     only=""
     if (( rc != 0 )) && [[ "$HOST_TRIPLE" == aarch64-* ]] && grep -qE "$NOHOST_RE" "$log"; then
-        for entry in "${FEATURE_PASSES[@]}"; do
+        for entry in "${ONLY_PASS[@]}"; do
             [[ "$entry" == "$crate:host-test" ]] || continue
             only="$entry"
             rc=0

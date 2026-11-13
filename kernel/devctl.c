@@ -309,14 +309,12 @@ static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
     // a table is never short without saying so.
     if (!off || cap - off < PROCS_CUT_LEN) return 0;
 
-    // #57a F3: format_procs_cb now early-returns (non-zero = STOP) on the first
-    // overflow, so proc_for_each stops walking once the DEVCTL_READ_BUF fills
-    // instead of visiting every Proc under g_proc_table_lock with IRQs off.
-    // Now that /ctl/procs is EL0-reachable (the mount), this bounds an
-    // unprivileged tight-loop read's lock-hold to O(buffer) rather than
-    // O(total-procs). The remaining O(N)-worst-case proc-table walk under the
-    // global IRQ-off lock (find/kill) is the pre-existing scalability pattern
-    // tracked to the #62 perf backlog (per-Proc locks / RCU).
+    // The callback stops the walk at the first row that does not fit, so a
+    // reader that is shown every row holds g_proc_table_lock, IRQs off, for
+    // O(buffer) rather than O(procs). A reader behind the none wall is shown
+    // one row and never fills the buffer: its walk visits every Proc, which is
+    // the cost of any /proc/<pid>/status read. Every O(procs) walk under this
+    // lock belongs to the #62 backlog (per-Proc locks / RCU).
     struct procs_fmt_state s = {
         .buf = buf, .cap = cap, .off = off, .last = off,
         .in_reserve = false, .overflow = false, .reader = reader,

@@ -3552,7 +3552,9 @@ because `devproc.perm_enforced == false` means principal alignment alone scopes
   territory, *unreachable by the container* (the container speaks only 9P to
   it); both enumeration and per-pid existence answer only for pids in the
   container's process tree — membership by ppid-descent from the entrypoint
-  (the `/ctl/procs` PPID column). A pid outside the tree does not resolve, so
+  (the `ppid:` line of each native `/proc/<pid>/status`; one read of
+  `/ctl/procs` holds only the rows that fit it). A pid outside the tree does
+  not resolve, so
   the diorama cannot be a read oracle for the surface the native mounts
   withheld (the F6 close). Pids are **host-numbered** — consistent with what
   `getpid()` returns inside the container, which is what `busybox ps`

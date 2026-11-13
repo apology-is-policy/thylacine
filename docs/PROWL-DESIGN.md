@@ -23,7 +23,8 @@ detail: `docs/reference/15-scheduler.md` (§ on-CPU accounting) +
 `32-devproc.md` + `33-devctl.md`.
 
 **As-built (prowl-2):** the native `prowl` Kaua TUI (`usr/prowl/`, like nora) --
-polls `/ctl/procs` (the all-pids table + cumulative `cpu_ns`) + `/ctl/sched`
+polls `/ctl/procs` (the all-pids table + cumulative `cpu_ns`; since 2026-11-12
+the set is read from `/proc` instead, see the vault's sub-prowl) + `/ctl/sched`
 (`cpus: N`), diffs `cpu_ns` across ~1.5 s ticks for %CPU (the htop method, on
 `time::Instant` -- the vDSO monotonic clock), and renders an **aggregate** CPU
 meter (per-core count-normalized) + a sortable process list (pid/name/%cpu/mem/

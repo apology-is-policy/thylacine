@@ -75,6 +75,9 @@ pub struct App {
     pub ncpus: usize,
     pub confirm_kill: Option<(i64, String)>,
     pub status: Option<String>,
+    /// Why the last sample could not read the process set; None once a sample
+    /// reads it. Kept apart from `status`, which a key press clears.
+    pub set_error: Option<String>,
     // prowl-3c: the per-CPU meter (from /ctl/cpu) + the toggleable per-thread
     // scheduler detail (from /proc/<pid>/sched, the OQ-4-gated deep view).
     cpu_sampler: CpuSampler,
@@ -106,6 +109,7 @@ impl App {
             ncpus: 1,
             confirm_kill: None,
             status: None,
+            set_error: None,
             cpu_sampler: CpuSampler::new(),
             cpus: Vec::new(),
             show_detail: false,
@@ -432,9 +436,12 @@ fn resample(app: &mut App) {
     // A set that cannot be read whole is shown as none, with the reason: a
     // partial list would read as "these are all the Procs".
     let mut rows = match procs::list() {
-        Ok(set) => sample::rows_from(set),
+        Ok(set) => {
+            app.set_error = None;
+            sample::rows_from(set)
+        }
         Err(e) => {
-            app.status = Some(format!("/proc: {}", e));
+            app.set_error = Some(format!("/proc: {}", e));
             Vec::new()
         }
     };
