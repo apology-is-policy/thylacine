@@ -3426,13 +3426,13 @@ impl Gpu {
         self.condemned_n += 1;
     }
 
-    /// Test lever, self-test only: make the next display DISABLE
-    /// (`set_scanout(0, ..)`) report a device refusal without issuing it, so
-    /// the condemn/defer/drain chain has a real driver. Deliberately NOT a
-    /// client verb -- `warp_img_selftest` runs pre-READY, before any
-    /// connection exists, so this needs no external surface at all, and giving it one
-    /// "for symmetry" would be the #178 box-wide-kill-switch anti-pattern its
-    /// `ring-inject` sibling is already bounded against.
+    /// Test lever for the compositor's self-test: make the next display DISABLE
+    /// a client asks for (`set_scanout_client(0, ..)`) report a device refusal
+    /// without issuing it, so the condemn/defer/drain chain has a real driver.
+    /// The compositor reaches it through the broker in every build, so it is
+    /// scoped, not trusted: only a client's own disable spends it, never a bind
+    /// the broker issues for itself. The seat's restore is such a bind, and a
+    /// refusal there fails the episode and cancels its grant.
     pub fn arm_scanout_disable_refusal(&mut self) {
         self.fail_next_scanout_disable = true;
     }
@@ -4265,8 +4265,17 @@ impl Gpu {
         )
     }
 
-    /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout).
+    /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout). The
+    /// broker's own bind -- the seat's restore, the trusted image -- which no
+    /// lever reaches.
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.set_scanout_as(resource_id, w, h, false)
+    }
+    /// A client's bind: the one the self-test lever reaches.
+    pub fn set_scanout_client(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.set_scanout_as(resource_id, w, h, true)
+    }
+    fn set_scanout_as(&mut self, resource_id: u32, w: u32, h: u32, client: bool) -> Result<(), Error> {
         self.cmd_seq = self.cmd_seq.wrapping_add(1);
         self.last_scanout_seq = self.cmd_seq;
         let req_va = self.req(REQ_OFF)?;
@@ -4276,12 +4285,12 @@ impl Gpu {
             w32(req_va + 40, 0); // scanout_id
             w32(req_va + 44, resource_id);
         };
-        // The self-test lever, checked for the DISABLE only. It returns the
+        // The self-test lever, checked for a client's DISABLE only. It returns the
         // same Err the wire path returns, WITHOUT issuing the command, so
         // everything downstream is driven by a refusal indistinguishable from
         // a real one -- a lever that took a different path would prove
         // nothing about the path that matters.
-        if resource_id == 0 && self.fail_next_scanout_disable {
+        if client && resource_id == 0 && self.fail_next_scanout_disable {
             self.fail_next_scanout_disable = false;
             self.injected_refusal = true;
             return Err(Error::Hardware);

@@ -20,26 +20,45 @@ they reached it.
   `bootarg_declared(bootargs, word)` -- a whole word, split on white space or NUL;
   two host tests.
 - `usr/lictor/src/backend/mod.rs`: `bootargs(buf)` reads `/hw/chosen/bootargs`
-  once. A line that cannot be read, or that fills the 1024-byte buffer, reads as
-  none, so the gate fails closed.
+  to its end, once, in the probe. A line that cannot be read, or that fills the
+  1024-byte buffer, reads as none, so the gate fails closed.
 - `usr/lictor/src/backend/device.rs`: `test_declared` and `test_chained_declared`
   on `Device`, set by `test_declare` and `test_declare_chained`; each arming
-  request is `BadField` without its flag.
+  request is `BadField` without its flag, and Lictor says so once per lever
+  (`test lever arming refused: ...`).
 - `usr/lictor/src/main.rs`: the probe sets both flags after `Device::new`.
 
 aux's branch carries the same gate for `TestArmLatch` under the same names
 (its handoff 053); the chained word is this branch's addition, because aux's base
 predates that lever.
 
+## The self-test's refusal lever is scoped (audit round 24, F1)
+
+`Request::ArmScanoutDisableRefusal` is in every build and takes no declaration:
+tapestryd's warp image self-test sends it. `Gpu::set_scanout` used to spend the
+arm on the next bind of resource 0 whoever asked, and the seat's restore asks
+exactly that when the compositor has left no presentation. So a compositor could
+disable its scanout, arm, and have the next trusted episode fail at its restore,
+after the operator had authenticated, with the grant cancelled. Now a client's
+bind goes through `Gpu::set_scanout_client`, the only entry that reads the arm;
+`Gpu::set_scanout` is the broker's own (the restore, the trusted image) and reads
+no lever. The comment that called the lever "deliberately NOT a client verb" was
+true before the broker split and is rewritten.
+
 ## What did not change
 
 `TestStallShot`, `TestOwedDefer`, `TestOwedStall` and the context hold and abandon
-verbs need no declaration. They are bounded instead (#178), and a held or poisoned
-chain no longer holds a takeover up (`takeover_clear`, vote 50). The levers' code
-is still in every image: `test-mode` is a default feature, the #880 class, open.
+verbs need no declaration, and none can reach a takeover: a stall shot rides one
+request of its own connection in phase 0 and that request's reap revives it; the
+owed-free levers act only in the phase-0 pass and are counted per boot; the hold
+and abandon verbs touch only fenced chains, which a takeover does not wait for
+(`takeover_clear`, vote 50). Lictor takes any context id for the hold verbs; the
+own-context rule (#178) is tapestryd's. The levers' code is still in every image:
+`test-mode` is a default feature, the #880 class, open.
 
 ## If you add a lever
 
 A request that sets a seat, latch or stall-next count must ask `test_declared`
-(or a word of its own, read the same way). The audit row for the trusted seat has
-that as a prosecution line.
+(or a word of its own, read the same way), and no state a client request sets may
+be read by a command the broker issues for itself. The audit row for the trusted
+seat has both as prosecution lines.

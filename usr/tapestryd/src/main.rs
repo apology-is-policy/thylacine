@@ -324,11 +324,9 @@ fn bootarg_declared(word: &[u8]) -> bool {
     let mut buf = [0u8; 1024];
     let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     unsafe { t_close(fd) };
-    n > 0
-        && (n as usize) < buf.len()
-        && buf[..n as usize]
-            .split(|b| b.is_ascii_whitespace() || *b == 0)
-            .any(|w| w == word)
+    // The broker's own rule for a word: it refuses an arming this one would ask for
+    // on a line it reads otherwise.
+    n > 0 && (n as usize) < buf.len() && lictor::gpu_api::bootarg_declared(&buf[..n as usize], word)
 }
 
 struct Tapestryd {

@@ -234,12 +234,16 @@ A test-mode lever reproduces both ends of a stall on demand.
 broker with `TestArmLatch` once it serves, and its global ctl says
 `test-latch-dead armed` once the broker has taken it. Lictor does not take the
 compositor's word for the boot: it reads `/hw/chosen/bootargs` itself, once, at its
-start (`backend::bootargs`; a line that cannot be read or that fills the 1024-byte
-buffer reads as none), and `TestArmLatch` is `BadField` unless the whole word is on
-that line (`gpu_api::bootarg_declared`, `TEST_LEVERS_WORD`), so tapestryd prints
-`arm REFUSED by the broker` on a boot that did not declare it. `TestArmChained`
-is refused the same way without `thylacine.test-latch-chained`
-(`TEST_CHAINED_WORD`). `Device` then marks each
+start (`backend::bootargs`, read to the file's end; a line that cannot be read or
+that fills the 1024-byte buffer reads as none), and `TestArmLatch` is `BadField`
+unless the whole word is on that line (`gpu_api::bootarg_declared`,
+`TEST_LEVERS_WORD`). `TestArmChained` is refused the same way without
+`thylacine.test-latch-chained` (`TEST_CHAINED_WORD`). tapestryd asks only on a boot
+it reads as declared, through the same matcher, so a stock image asks nothing and
+prints nothing. A refusal therefore marks a compositor that asked undeclared, or
+two readings that disagree: tapestryd says `arm REFUSED by the broker`, and Lictor
+says `test lever arming refused: this boot's command line does not declare` and
+the word, once per lever for the boot. `Device` then marks each
 resource created at 97 by 89. At a retirement of one, it stalls the engine
 through a harmless display query whose wait reports its deadline passed,
 exactly the state a slow command leaves. The lever has two shots, and each one
@@ -854,11 +858,20 @@ DEADLINE arm judges both.
 Open after that review:
 
 - `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
-  every image carries the levers (the #880 strip-for-production class). The two
-  armings that break a trusted takeover (`TestArmLatch`, `TestArmChained`) need
-  their word on the kernel's command line, read by Lictor; `TestStallShot`,
-  `TestOwedDefer`, `TestOwedStall` and the context hold and abandon verbs need
-  none and are bounded instead (#178). The
+  every image carries the levers (the #880 strip-for-production class). Of the
+  armings a compositor can send, `TestArmLatch` and `TestArmChained` need their
+  word on the kernel's command line, read by Lictor. `ArmScanoutDisableRefusal`,
+  the compositor's self-test lever, is in every build and needs none; it is
+  scoped instead: only a client's own disable spends it
+  (`Gpu::set_scanout_client`), never a bind the broker issues for itself, so it
+  cannot refuse the seat's restore. The others need no word and cannot reach a
+  takeover, each for its own reason. A `TestStallShot` rides one request of its
+  own connection, in phase 0, and that request's reap revives its stall; nothing
+  bounds how often it is sent. `TestOwedDefer` and `TestOwedStall` act only in the
+  phase-0 owed-free pass and are counted per boot. The context hold and abandon
+  verbs touch only fenced chains, which a takeover does not wait for
+  (`takeover_clear`, vote 50); Lictor takes any context id for them, and it is
+  tapestryd's ctl that keeps a session client to its own (#178). The
   production compile is now VERIFIED (2026-09-21): `cargo check --release -p
   lictor --no-default-features --features backend`, and `-p tapestryd` /
   `-p halcyond` with `--features guest`. It did not build before that: the

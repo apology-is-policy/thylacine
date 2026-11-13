@@ -708,9 +708,10 @@ pub const TEST_LEVERS_WORD: &[u8] = b"thylacine.test-latch-dead";
 /// The same for the chained seat shots, which are armed by a request of their own.
 pub const TEST_CHAINED_WORD: &[u8] = b"thylacine.test-latch-chained";
 /// Whether a kernel command line holds `word`, whole: ended by white space,
-/// a NUL (the FDT property carries one) or the line's end.
+/// a NUL (the FDT property carries one) or the line's end. The empty word is
+/// on no line: a split leaves empty pieces, and they declare nothing.
 pub fn bootarg_declared(bootargs: &[u8], word: &[u8]) -> bool {
-    bootargs.split(|b| b.is_ascii_whitespace() || *b == 0).any(|w| w == word)
+    !word.is_empty() && bootargs.split(|b| b.is_ascii_whitespace() || *b == 0).any(|w| w == word)
 }
 /// Whether the broker runs `request` now or leaves it parked. A park must end:
 /// a seat episode ends, and in-flight chains retire. A retirement nothing can
@@ -1138,6 +1139,9 @@ mod admission_tests {
         assert!(bootarg_declared(both, TEST_LEVERS_WORD) && bootarg_declared(both, TEST_CHAINED_WORD));
         assert!(!bootarg_declared(b"thylacine.test-latch-dead\0", TEST_CHAINED_WORD));
         assert!(!bootarg_declared(b"thylacine.test-latch-chained\0", TEST_LEVERS_WORD));
+        for line in [&b""[..], b"\0", b"a  b\0", b"thylacine.test-latch-dead\0"] {
+            assert!(!bootarg_declared(line, b""), "the empty word, on {line:?}");
+        }
     }
     #[test]
     fn a_retirement_nothing_can_clear_runs_to_its_refusal() {

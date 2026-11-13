@@ -41,6 +41,10 @@ pub struct Device {
     /// The same for the chained shots (`TEST_CHAINED_WORD`).
     #[cfg(feature = "test-mode")]
     test_chained_declared: bool,
+    /// A refused arming has been said, per lever: a client that repeats the
+    /// request gets the refusal and no second line.
+    #[cfg(feature = "test-mode")]
+    test_refusal_said: [bool; 2],
     /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
     test_latch_shots: u8,
@@ -139,6 +143,7 @@ impl Device {
             taken_frees: 0,
             #[cfg(feature = "test-mode")] test_declared: false,
             #[cfg(feature = "test-mode")] test_chained_declared: false,
+            #[cfg(feature = "test-mode")] test_refusal_said: [false; 2],
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_chained_shots: 0,
@@ -156,6 +161,15 @@ impl Device {
     pub fn test_declare(&mut self, declared: bool) { self.test_declared = declared; }
     #[cfg(feature = "test-mode")]
     pub fn test_declare_chained(&mut self, declared: bool) { self.test_chained_declared = declared; }
+    #[cfg(feature = "test-mode")]
+    fn test_undeclared(&mut self, lever: usize, word: &[u8]) -> Error {
+        if !core::mem::replace(&mut self.test_refusal_said[lever], true) {
+            super::diagnostic(&alloc::format!(
+                "lictor: test lever arming refused: this boot's command line does not declare {}\n",
+                core::str::from_utf8(word).unwrap_or("its word")));
+        }
+        Error::BadField
+    }
     pub fn bind_owner(&mut self, owner: u64) -> bool {
         if owner == 0 || (self.owner != 0 && self.owner != owner) { return false; }
         self.owner = owner; true
@@ -695,7 +709,7 @@ impl Device {
             }
             Request::SetScanout { resource_id, w, h } => {
                 if resource_id != 0 { self.ordinary_resource(resource_id)?; }
-                let result = self.gpu.set_scanout(resource_id, w, h);
+                let result = self.gpu.set_scanout_client(resource_id, w, h);
                 if result.is_ok() { self.presentation = if resource_id == 0 { Presentation::None } else { Presentation::Image { resource: resource_id, width: w, height: h } }; }
                 result.put(&mut out);
             }
@@ -847,7 +861,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    if !self.test_declared { return Err(Error::BadField); }
+                    if !self.test_declared { return Err(self.test_undeclared(0, crate::gpu_api::TEST_LEVERS_WORD)); }
                     self.test_latch_shots = 2; self.test_seat_shots = 12; self.test_stall_shots = 3;
                     self.test_blind_armed = true;
                     super::intake::test::arm();
@@ -857,7 +871,7 @@ impl Device {
             }
             Request::TestArmChained => {
                 #[cfg(feature = "test-mode")] {
-                    if !self.test_chained_declared { return Err(Error::BadField); }
+                    if !self.test_chained_declared { return Err(self.test_undeclared(1, crate::gpu_api::TEST_CHAINED_WORD)); }
                     self.test_chained_shots = 2; ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
