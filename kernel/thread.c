@@ -410,8 +410,9 @@ u32 thread_kstack_refuse_pending(void) {
 // scan is a masked window an unprivileged program can inflate by spawning
 // threads. `budget_words` (NULL = unlimited, for tests and one-off callers)
 // is decremented per word examined; a caller that finds it 0 on return MUST
-// treat the answer as a LOWER BOUND and say so, because a truncated scan
-// returns a SHALLOWER number than the truth -- the gauge-reads-zero trap.
+// DROP the answer: a scan cut short stopped below the true frontier, so it
+// reads DEEPER than the truth. What such a caller may still report is its
+// figure over the threads it scanned whole, and that one is a lower bound.
 u32 thread_kstack_used(const struct Thread *t, u32 *budget_words) {
     if (!t || !t->kstack_base)
         return 0;
@@ -421,7 +422,7 @@ u32 thread_kstack_used(const struct Thread *t, u32 *budget_words) {
                                    + THREAD_KSTACK_TOTAL_SIZE);
     while (p < end && *p == THREAD_KSTACK_POISON) {
         if (budget_words) {
-            if (*budget_words == 0u) break;     // exhausted: answer is a floor
+            if (*budget_words == 0u) break;     // exhausted: the answer overstates
             (*budget_words)--;
         }
         p++;

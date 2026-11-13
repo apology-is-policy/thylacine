@@ -208,10 +208,10 @@ stops after the last whole row and ends with this line:
 (cut: more processes than one read holds; /proc lists them all)
 ```
 
-The table is produced again for each read, so read it with one read: one read
-that does not end with that line holds every process the reader may see. A
-program that reads on to the end of the file, as `cat` does, asks a second
-time, and when
+The table is produced again for each read, so read it with one read of 4 KiB
+or more: such a read that does not end with that line holds every process the
+reader may see. A program that reads on to the end of the file, as `cat` does,
+asks a second time, and when
 the second table is longer than the first it prints that table's last few
 characters after the first one. `ps` and
 `prowl` take their rows from `/proc`: they list the directory, which has no
@@ -231,6 +231,15 @@ terminal that prints it.
 `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
 every process. `/proc/<pid>/sched` and `/proc/<pid>/account` are readable by the process's
 owner and by holders of `CAP_HOSTOWNER`.
+
+`/ctl/kstack` is readable by holders of `CAP_HOSTOWNER`. For each process it
+shows the deepest any of its kernel stacks has ever run, in bytes, and the
+thread that ran it, and it ends with `peak:`, the deepest on the system. When
+a process does not fit one read, the rows end with
+`(cut: more processes than one read holds)` and the peak still covers the
+processes left out. The file examines a bounded amount of the system in one
+read. Past that it stops and says
+`(scan budget exhausted -- rows above are partial and peak is a LOWER BOUND)`.
 
 `/proc/<pid>/account` shows the memory account the process is charged to, in bytes: each
 class's use and limit, the room left and the class that is tightest. A login session has an

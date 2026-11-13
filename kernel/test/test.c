@@ -1956,6 +1956,7 @@ struct test_case g_tests[] = {
     { "devctl.kernel_base_gated",      test_devctl_kernel_base_gated,      false, NULL },
     { "devctl.kstack_gated",           test_devctl_kstack_gated,           false, NULL },
     { "devctl.kstack_ends_whole",      test_devctl_kstack_ends_whole,      false, NULL },
+    { "devctl.kstack_says_truncated",  test_devctl_kstack_says_truncated,  false, NULL },
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
     { "devctl.read_cons_format",       test_devctl_read_cons_format,       false, NULL },
     { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },

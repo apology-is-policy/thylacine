@@ -11,7 +11,10 @@
 #     large one. The pair is one variable apart: a line that is always there,
 #     or never, fails one leg. cat reads to end of file and every read renders
 #     the file afresh, so when a later rendering is longer cat also prints its
-#     last bytes: what follows the cut line must not end on a row. The small
+#     last bytes: what follows the cut line must not end on a row. cat cannot
+#     tell a first rendering without its cut line from one with it when the
+#     second rendering supplies exactly that line (the bytes are the same);
+#     the kernel test devctl.procs_rows_whole holds every size to it. The small
 #     leg holds while the booted system fits one read (about sixty Procs).
 #   - every pid /proc lists both before and after a ps is in that ps. Such a
 #     Proc was alive throughout the listing (pids are never reused), and the
@@ -83,23 +86,43 @@ for {set i 1} {$i <= 70} {incr i} {
 }
 lc_send "cat /ctl/procs; echo many-large-end"
 set timeout 30
+set table ""
 set after_cut ""
 expect {
-    -re "\n$row9\r*\n$cutline\r*\n((?:\[^\n\]*\n)*)many-large-end" { set after_cut $expect_out(1,string) }
-    -re "\[\r\n\]many-large-end" { lc_fail "/ctl/procs with seventy more Procs ends without the cut line (2)" }
+    -re "\nPID +PPID +NAME\[^\n\]*\n((?:$row9\r*\n)+)$cutline\r*\n((?:\[^\n\]*\n)*)many-large-end" {
+        set table $expect_out(1,string)
+        set after_cut $expect_out(2,string)
+    }
+    -re "\[\r\n\]many-large-end" {
+        if {[regexp -- $cutline $expect_out(buffer)]} {
+            lc_fail "/ctl/procs with seventy more Procs: its first table is not a header, whole rows and then the cut line (2)"
+        }
+        lc_fail "/ctl/procs with seventy more Procs ends without the cut line (2)"
+    }
     -re {EXTINCTION:} { lc_extinction_fail "extinction reading /ctl/procs (2)" }
     timeout           { lc_fail "no end of /ctl/procs (2)" }
     eof               { lc_fail "qemu exited reading /ctl/procs (2)" }
 }
+# One rendering lists a Proc once. A pid twice says the rows came from two:
+# a first table with no cut line, and the end of a later one after it.
+set seen {}
+foreach {- pid} [regexp -all -inline -line {^([0-9]+) } [string map [list "\r" ""] $table]] {
+    if {[lsearch -exact $seen $pid] >= 0} {
+        lc_fail "/ctl/procs with seventy more Procs lists pid $pid twice before its cut line: two renderings, the first without the line (2)"
+    }
+    lappend seen $pid
+}
 # What cat printed after that table. Its later reads return the last bytes of
 # later renderings, and each of those ends with a cut line: a row there is
 # followed by rows and then a whole cut line, and the last such line is a cut
-# line's end. A line that is neither is another program's, written to the same
-# console, and says nothing about the table.
+# line's end (an empty line is one: the line's newline alone). A line that is
+# neither is a row's tail from a later rendering, or another program's, written
+# to the same console; it says nothing about how the table ends.
 set plain [string map [list "\\" ""] $cutline]
 set after_cut [string map [list "\r" ""] $after_cut]
-set reread 0
 set last ""
+set ends 0
+set rows 0
 set others 0
 foreach line [lrange [split $after_cut "\n"] 0 end-1] {
     set at [expr {[string length $plain] - [string length $line]}]
@@ -107,19 +130,20 @@ foreach line [lrange [split $after_cut "\n"] 0 end-1] {
         if {$last eq "row" && $at != 0} {
             lc_fail "/ctl/procs with seventy more Procs: a row after the cut line is followed by part of a cut line, `$line` (2)"
         }
-        incr reread [expr {[string length $line] + 1}]
+        incr ends
         set last cut
     } elseif {[regexp "^$row9\$" $line]} {
+        incr rows
         set last row
     } else {
         incr others
-        lc_step "ps-many(2): a console line between the table and the marker, not the table's: `[string range $line 0 79]`"
+        lc_step "ps-many(2): after the cut line, a line that is neither a whole row nor a cut line's end: `[string range $line 0 79]`"
     }
 }
 if {$last eq "row"} {
     lc_fail "/ctl/procs with seventy more Procs: a row follows the cut line and no cut line follows it (2)"
 }
-lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table, after a whole row, with the cut line (cat's read to end of file added $reread byte(s) of a later rendering; $others other console line(s))"
+lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table of [llength $seen] whole rows with the cut line (cat's read to end of file printed [string length $after_cut] more byte(s): $ends cut line end(s), $rows whole row(s), $others other line(s))"
 
 # ---- (3) ps lists every Proc alive throughout it ----------------------------
 set before [pids_of "ls /proc | cat" $ls_row "ls1"]

@@ -498,6 +498,7 @@ struct ksw_shape {
     int  rows;
     int  pids[KSW_PIDS];
     bool cut;
+    bool trunc;       // carries the scan-budget line
     bool bad;         // not the layout: a torn line, a row without five columns, no peak line last
     u32  peak;
     int  peak_pid;
@@ -535,6 +536,7 @@ static int ksw_tokens(const char *buf, size_t ls, size_t le, int want, u32 *out)
 static void ksw_shape_of(const char *buf, size_t got, struct ksw_shape *o) {
     o->rows = 0;
     o->cut = false;
+    o->trunc = false;
     o->bad = false;
     o->peak = 0;
     o->peak_pid = -1;
@@ -549,18 +551,22 @@ static void ksw_shape_of(const char *buf, size_t got, struct ksw_shape *o) {
         } else if (!table) {
             if (ksw_line_is(buf, ls, i, "PID    NAME    PEAK    TID")) table = true;
         } else if (ls < i && buf[ls] >= '0' && buf[ls] <= '9') {
-            if (o->cut || ksw_tokens(buf, ls, i, 0, &v) != 5) o->bad = true;
+            if (o->cut || o->trunc || ksw_tokens(buf, ls, i, 0, &v) != 5) o->bad = true;
             if (o->rows < KSW_PIDS) o->pids[o->rows] = (int)v;
             o->rows++;
         } else if (ksw_line_is(buf, ls, i, "(cut: more processes than one read holds)")) {
-            if (o->cut) o->bad = true;
+            if (o->cut || o->trunc) o->bad = true;
             o->cut = true;
         } else if (ksw_line_starts(buf, ls, i, "peak:")) {
             if (ksw_tokens(buf, ls, i, 1, &o->peak) != 6) o->bad = true;
             (void)ksw_tokens(buf, ls, i, 3, &v);
             o->peak_pid = (int)v;
             peak_seen = true;
-        } else if (ls != i && !ksw_line_starts(buf, ls, i, "(scan budget exhausted")) {
+        } else if (ksw_line_is(buf, ls, i, "(scan budget exhausted -- rows above are partial and "
+                                           "peak is a LOWER BOUND)")) {
+            if (o->trunc) o->bad = true;
+            o->trunc = true;
+        } else if (ls != i) {
             o->bad = true;
         }
         ls = i + 1;
@@ -582,21 +588,39 @@ void test_devctl_kstack_ends_whole(void) {
     static char buf[2048];
     static char whole[2048];
 
-    // The deepest stack there can be, on a Proc of the test's own: a child of
-    // kproc, so the walk reaches it after kproc's row.
+    // The deepest stack there can be, on a Proc of the test's own, and a
+    // shallow one linked after it: kproc's children are walked newest first,
+    // so a row always comes before the deepest Proc's, whatever kproc shows.
     struct Proc *deep = proc_alloc();
     TEST_ASSERT(deep != NULL, "proc_alloc for the deepest Proc");
+    struct Proc *ahead = proc_alloc();
+    if (!ahead) {
+        deep->state = PROC_STATE_ZOMBIE;
+        proc_free(deep);
+    }
+    TEST_ASSERT(ahead != NULL, "proc_alloc for the Proc ahead of the deepest");
     deep->state = PROC_STATE_ALIVE;
     deep->reaped_kstack_peak = THREAD_KSTACK_SIZE;
     deep->reaped_kstack_tid = 1;
     proc_test_link(deep);
+    ahead->state = PROC_STATE_ALIVE;
+    ahead->reaped_kstack_peak = 64;
+    ahead->reaped_kstack_tid = 1;
+    proc_test_link(ahead);
     int deep_pid = deep->pid;
+    int ahead_pid = ahead->pid;
 
     struct ksw_shape ref, sh;
     size_t full = devctl_format_kstack_for_test(NULL, whole, sizeof whole);
     ksw_shape_of(whole, full, &ref);
-    bool ref_ok = full > 0 && !ref.bad && !ref.cut && ref.rows >= 2 && ksw_has(&ref, deep_pid) &&
+    bool ref_ok = full > 0 && !ref.bad && !ref.cut && !ref.trunc && ref.rows >= 2 &&
+                  ksw_has(&ref, deep_pid) &&
                   ref.peak == THREAD_KSTACK_SIZE && ref.peak_pid == deep_pid;
+    // The row ahead of the deepest Proc's is what makes a walk that stops at
+    // its first cut row lose the peak.
+    bool ahead_ok = false;
+    for (int i = 0; i + 1 < ref.rows && i + 1 < KSW_PIDS; i++)
+        if (ref.pids[i] == ahead_pid && ref.pids[i + 1] == deep_pid) ahead_ok = true;
 
     // Past `full` by the room the end reserves beyond what it used: there the
     // whole table fits again.
@@ -618,11 +642,15 @@ void test_devctl_kstack_ends_whole(void) {
         if (!sh.cut) uncut++;
     }
 
+    proc_test_unlink(ahead);
+    ahead->state = PROC_STATE_ZOMBIE;
+    proc_free(ahead);
     proc_test_unlink(deep);
     deep->state = PROC_STATE_ZOMBIE;
     proc_free(deep);
 
     TEST_ASSERT(ref_ok, "the whole kstack table, the deepest Proc's row and peak in it, fits 2 KiB uncut (enlarge the buffers if not)");
+    TEST_ASSERT(ahead_ok, "a row of the test's own comes directly before the deepest Proc's");
     TEST_ASSERT(sized > 1, "some sizes fit the kstack header and the table's end");
     TEST_EXPECT_EQ(bad, 0, "every size of /ctl/kstack ends on its peak line, each row whole");
     TEST_EXPECT_EQ(not_prefix, 0, "the rows of a cut kstack table are the whole table's first rows");
@@ -631,6 +659,78 @@ void test_devctl_kstack_ends_whole(void) {
     TEST_EXPECT_EQ(low_peak, 0, "the kstack peak is the deepest Proc's at every size, its row shown or not");
     TEST_ASSERT(cut_before_deep > 0, "some size cuts the deepest Proc's row and still names it in the peak");
     TEST_ASSERT(uncut > 0, "some size past the header holds the whole kstack table uncut");
+}
+
+// /ctl/kstack's walk is paid for by the Proc as well as by the word scanned.
+// A Proc that has reaped every thread costs no scan and the walk goes on past
+// the cut, so without a price on the visit a farm of such Procs is walked
+// whole, IRQs masked, however long it is. Past what the budget pays for, the
+// walk stops and the table says its peak is a lower bound -- at every size,
+// the cut line and the budget line both fitting the smallest.
+#define KSF_MAX 1100
+void test_devctl_kstack_says_truncated(void) {
+    static char buf[2048];
+    static struct Proc *farm[KSF_MAX];
+    struct ksw_shape sh;
+    u32 visit = devctl_kstack_visit_words_for_test();
+    u32 whole_budget = devctl_kstack_budget_words_for_test();
+
+    size_t got = devctl_format_kstack_budget_for_test(buf, sizeof buf, 0);
+    ksw_shape_of(buf, got, &sh);
+    bool zero_says = got > 0 && !sh.bad && sh.trunc && sh.rows == 0;
+
+    // The smallest power-of-two budget that scans the system as it stands
+    // whole. A stack only deepens and a deeper stack costs fewer words, so
+    // that budget stays enough for the system; the farm is what it cannot pay.
+    u32 enough = 0;
+    for (u32 b = 2u * visit; b != 0 && b <= whole_budget && enough == 0; b *= 2u) {
+        got = devctl_format_kstack_budget_for_test(buf, sizeof buf, b);
+        ksw_shape_of(buf, got, &sh);
+        if (got > 0 && !sh.bad && !sh.trunc) enough = b;
+    }
+
+    // One visit more than `enough` pays for, each Proc with a reaped peak and
+    // no thread: a zombie's shape, free to scan.
+    int want = enough ? (int)(enough / visit) + 1 : 0;
+    int have = 0;
+    for (; have < want && have < KSF_MAX; have++) {
+        farm[have] = proc_alloc();
+        if (!farm[have]) break;
+        farm[have]->state = PROC_STATE_ALIVE;
+        farm[have]->reaped_kstack_peak = 64;
+        farm[have]->reaped_kstack_tid = 1;
+        proc_test_link(farm[have]);
+    }
+
+    int sized = 0, bad = 0, unsaid = 0, both = 0;
+    for (size_t cap = 1; have == want && want > 0 && cap <= sizeof buf; cap += (cap < 400 ? 1 : 97)) {
+        got = devctl_format_kstack_budget_for_test(buf, cap, enough);
+        if (got == 0) continue;                  // no room for the header and the table's end
+        sized++;
+        ksw_shape_of(buf, got, &sh);
+        if (sh.bad) { bad++; continue; }
+        if (!sh.trunc) unsaid++;
+        if (sh.cut && sh.trunc) both++;
+    }
+
+    for (int i = 0; i < have; i++) {
+        proc_test_unlink(farm[i]);
+        farm[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(farm[i]);
+    }
+
+    got = enough ? devctl_format_kstack_budget_for_test(buf, sizeof buf, enough) : 0;
+    ksw_shape_of(buf, got, &sh);
+    bool control_ok = got > 0 && !sh.bad && !sh.trunc;
+
+    TEST_ASSERT(zero_says, "a kstack walk with no budget shows no row and says its peak is a lower bound");
+    TEST_ASSERT(enough != 0, "the kstack scan budget covers the suite's own system (raise KSTACK_SCAN_BUDGET_WORDS if not)");
+    TEST_ASSERT(want <= KSF_MAX && have == want, "proc_alloc for a farm one visit longer than the budget pays for");
+    TEST_ASSERT(sized > 1, "some sizes fit the kstack header and the table's end");
+    TEST_EXPECT_EQ(bad, 0, "every size of a kstack table out of budget ends on its peak line, the budget line before it");
+    TEST_EXPECT_EQ(unsaid, 0, "a kstack walk over more Procs than its budget pays for says its peak is a lower bound, at every size");
+    TEST_ASSERT(both > 0, "some size is both cut and out of budget, and both lines fit");
+    TEST_ASSERT(control_ok, "without the farm the same budget scans the system whole");
 }
 
 void test_devctl_read_sched_format(void) {

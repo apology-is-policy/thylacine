@@ -311,10 +311,12 @@ static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
 
     // The callback stops the walk at the first row that does not fit, so a
     // reader that is shown every row holds g_proc_table_lock, IRQs off, for
-    // O(buffer) rather than O(procs). A reader behind the none wall is shown
-    // one row and never fills the buffer: its walk visits every Proc, which is
-    // the cost of any /proc/<pid>/status read. Every O(procs) walk under this
-    // lock belongs to the #62 backlog (per-Proc locks / RCU).
+    // the rows that fit rather than for every Proc; a row whose CPU_NS the
+    // reader may see also walks that Proc's threads (proc_cpu_ns). A reader
+    // behind the none wall is shown one row and never fills the buffer: its
+    // walk visits every Proc, which is the cost of any /proc/<pid>/status
+    // read. Each of these walks under this lock belongs to the #62 backlog
+    // (per-Proc locks / RCU).
     struct procs_fmt_state s = {
         .buf = buf, .cap = cap, .off = off, .last = off,
         .in_reserve = false, .overflow = false, .reader = reader,
@@ -355,6 +357,13 @@ size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t
 // rather than silently reporting a shallower peak than the truth.
 enum { KSTACK_SCAN_BUDGET_WORDS = 131072u };
 
+// What one Proc's visit costs that budget, in words: its threads lock taken
+// and dropped and its reaped peak read, priced at about the scan of 1 KiB of
+// stack. A Proc that has reaped every thread costs no scan, so without a
+// price on the visit a farm of zombies -- which any program may leave behind
+// -- rides the walk for free, and the walk is as long as the farm.
+enum { KSTACK_VISIT_WORDS = 128u };
+
 // The table's end, whose room no row may take: the cut line when a row did not
 // fit, the budget line when the scan ran out, then the whole-system peak with
 // each of its numbers at its widest. A table short of a row with no sign
@@ -386,12 +395,23 @@ static int format_kstack_cb(struct Proc *p, void *arg) {
     struct kstack_fmt_state *s = (struct kstack_fmt_state *)arg;
     size_t n;
     int    tid  = 0;
-    u32    used = proc_kstack_peak(p, &tid, &s->budget);
+
+    // Every Proc pays for its visit before it is looked at, so the budget
+    // bounds the walk's length as well as its scans.
+    if (s->budget <= KSTACK_VISIT_WORDS) {
+        s->budget = 0u;
+        s->truncated = true;
+        return 1;
+    }
+    s->budget -= KSTACK_VISIT_WORDS;
+    u32 used = proc_kstack_peak(p, &tid, &s->budget);
 
     if (s->budget == 0u) {
-        // The scan ran out mid-walk. Every number from here on would be a
-        // floor, so stop and let the caller SAY the peak is a lower bound --
-        // a silently-truncated watermark is worse than no watermark.
+        // The scan ran out inside this Proc. A scan cut short stopped below
+        // the true frontier, so its number reads DEEPER than the truth: drop
+        // it, stop, and let the caller SAY the peak is a lower bound over the
+        // Procs scanned whole -- a silently-truncated watermark is worse than
+        // no watermark.
         s->truncated = true;
         return 1;
     }
@@ -405,7 +425,7 @@ static int format_kstack_cb(struct Proc *p, void *arg) {
         return 0;                       // no kstack of its own; nothing to say
     // Past the first row that did not fit the walk goes on for the peak alone,
     // so the peak covers every Proc and the rows shown stay the walk's first.
-    // The scan budget bounds the hold, not the buffer.
+    // The budget bounds that walk: every Proc pays for its visit.
     if (s->overflow)
         return 0;
 
@@ -449,8 +469,7 @@ full:
     return 0;
 }
 
-static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
-    (void)reader;
+static size_t format_kstack_budget(char *buf, size_t cap, u32 budget_words) {
     size_t off = 0, n;
 
     n = fmt_str(buf, cap, off, "usable:    ");   if (!n) return 0; off += n;
@@ -465,7 +484,7 @@ static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
 
     // Rows end where the table's end begins, so the end always fits.
     struct kstack_fmt_state s = { buf, cap - KSTACK_TAIL_MAX, off, false, 0, 0, 0,
-                                  KSTACK_SCAN_BUDGET_WORDS, false };
+                                  budget_words, false };
     proc_for_each(format_kstack_cb, &s);
     off = s.off;
 
@@ -486,12 +505,23 @@ static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
     return off;
 }
 
+static size_t format_kstack(const struct Proc *reader, char *buf, size_t cap) {
+    (void)reader;
+    return format_kstack_budget(buf, cap, KSTACK_SCAN_BUDGET_WORDS);
+}
+
 #ifdef KERNEL_TESTS
-// Test hook: /ctl/kstack formatted into a buffer of the caller's size, so a
-// test can make any row the one that does not fit.
+// Test hooks: /ctl/kstack formatted into a buffer of the caller's size, so a
+// test can make any row the one that does not fit, and with a scan budget of
+// the caller's, so it can make any Proc the one the budget ends at.
 size_t devctl_format_kstack_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_kstack(reader, buf, cap);
 }
+size_t devctl_format_kstack_budget_for_test(char *buf, size_t cap, u32 budget_words) {
+    return format_kstack_budget(buf, cap, budget_words);
+}
+u32 devctl_kstack_budget_words_for_test(void) { return KSTACK_SCAN_BUDGET_WORDS; }
+u32 devctl_kstack_visit_words_for_test(void)  { return KSTACK_VISIT_WORDS; }
 #endif
 
 static size_t format_memory(const struct Proc *reader, char *buf, size_t cap) {

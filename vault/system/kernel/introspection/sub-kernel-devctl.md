@@ -299,10 +299,12 @@ walk ends when the output buffer fills rather than visiting every process under
 the global lock with interrupts off. Once `/ctl` became reachable from userspace
 this stopped being a formatting nicety: it is what bounds an unprivileged
 tight-loop reader's lock hold to the size of the buffer instead of the size of
-the process table. The bound is for a reader that is shown rows. One behind
-the none wall is shown its own row only, never fills the buffer, and its walk
-visits every Proc: the cost of any `/proc/<pid>/status` read, and part of the
-Proc table's locking debt (#62).
+the process table. The bound is in rows, not in time: a row whose `CPU_NS`
+the reader may see walks that Proc's threads (`proc_cpu_ns`). And it is for a
+reader that is shown rows. One behind the none wall is shown its own row
+only, never fills the buffer, and its walk visits every Proc: the cost of any
+`/proc/<pid>/status` read. Both are part of the Proc table's locking debt
+(#62).
 
 A row is committed whole or not at all, in `/ctl/procs` and `/ctl/kstack`
 alike: the callback formats at the buffer's tail and, if any field does not
@@ -351,10 +353,16 @@ every read renders the file afresh: when a later rendering is longer, `cat`
 prints its last bytes after the first. Each of those ends with a cut line
 too, so after the first cut line the scenario fails on a row that no cut
 line follows and on a row followed by part of a cut line, and on nothing
-else: a line that is neither a row nor a cut line's end is another
-program's console output, reported as a step. Its first boot showed a lone
-`)` line there, and the leg as first written (the cut line directly before
-the marker) read it as a table without the line.
+else: a line that is neither a whole row nor a cut line's end is a row's
+tail from a later rendering or another program's console output, and is
+reported as a step. The first table itself must be one rendering: the
+header, whole rows and the cut line with nothing between, and no pid twice
+(a pid twice is a first table without its line and a later one's end after
+it). What `cat` cannot show is a first rendering without its cut line when
+the second supplies exactly that line: the bytes are the same, and the
+kernel test above is what holds every size to it. Its first boot showed a
+lone `)` line after the table, and the leg as first written (the cut line
+directly before the marker) read it as a table without the line.
 
 ### A cut kernel-stack table says so, and keeps its peak (2026-11-13)
 
@@ -372,19 +380,36 @@ its rows:
 
 Unlike `/ctl/procs`, the walk does not stop there. `format_kstack_cb` goes on
 without rendering, so the peak is taken over every Proc the walk reached, its
-row shown or not, and the rows shown stay the walk's first. The buffer never
-was this walk's bound: the reader holds `CAP_HOSTOWNER`, and the masked window
-is bounded by the scan budget plus one step for each Proc. A scan that runs
-out of budget still stops the walk and says the peak is a lower bound. A
-`_Static_assert` keeps the read buffer at least the widest header plus the
-end.
+row shown or not, and the rows shown stay the walk's first. The buffer was
+one of this walk's two bounds (a table of about 120 rows ended it), and a
+walk that goes on past the cut has lost it. The scan budget alone does not
+replace it: a scan is charged by the word, and a Proc that has reaped every
+thread -- a zombie -- has a recorded peak and nothing to scan, so a farm of
+them, which any program may leave behind, would be walked whole under the
+table lock with IRQs masked. So every Proc pays `KSTACK_VISIT_WORDS` (128, the
+scan of 1 KiB of stack) out of the same budget before it is looked at, and a
+Proc that cannot pay ends the walk like a scan that runs out: the table says
+its peak is a lower bound. One read visits at most 1024 Procs. A scan cut
+short by the budget stopped below the true frontier, so that Proc's number
+reads deeper than the truth and is dropped; the peak is over the Procs scanned
+whole. A `_Static_assert` keeps the read buffer at least the widest header
+plus the end.
 
 `devctl.kstack_ends_whole` links a Proc of its own whose recorded peak is the
 whole stack (`reaped_kstack_peak`), formats the table into every buffer size
 up to the whole table's and a little past, and requires of each: the peak line
 last, every row five columns, the rows the whole table's first, the cut line
 exactly when a row is missing, and the peak naming that Proc whether or not
-its row was cut, with at least one size where it was.
+its row was cut, with at least one size where it was. A shallow Proc of the
+test's own is linked after it, so a row always comes before the deepest
+Proc's and a walk that stopped at its first cut row would lose the peak
+whatever kproc shows. `devctl.kstack_says_truncated` formats with a budget of
+its choosing (a test hook): no budget shows no row and the budget line; then
+it finds a budget that scans the system as it stands whole, links a farm of
+thread-less Procs one visit longer than that budget pays for, and requires
+the budget line at every buffer size, the peak line still last, with at least
+one size both cut and out of budget; without the farm the same budget scans
+the system whole.
 
 ### The STATE column shows job-stop, never debug-stop
 

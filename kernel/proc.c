@@ -1567,6 +1567,9 @@ u32 proc_kstack_peak(struct Proc *p, int *tid_out, u32 *budget_words) {
     u32 peak = p->reaped_kstack_peak;
     if (peak && tid_out) *tid_out = p->reaped_kstack_tid;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc) {
+        // A spent budget ends the walk here: the caller drops this Proc's
+        // number, and each thread left would cost a load for nothing.
+        if (budget_words && *budget_words == 0u) break;
         u32 used = thread_kstack_used(t, budget_words);
         if (used > peak) {
             peak = used;
