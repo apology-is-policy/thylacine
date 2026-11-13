@@ -1920,7 +1920,8 @@ W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`
 without FIXED (`-EINVAL`), fd -1 without FIXED (`-EBADF`), W without FIXED
 (`-EACCES`), X or a nonzero offset on the anonymous window, a file map without
 R -- and only then the cores, which own the lookups (`sys_lookup_mapping_spoor`,
-Linux's descriptor order: one naming nothing or opened `O_PATH` is `-EBADF`, one
+Linux's relative descriptor order, after the cores' own length and window
+checks: one naming nothing or opened `O_PATH` is `-EBADF`, one
 not open for reading `-EACCES` -- until audit round 32 they answered `-EBADF`
 and `-EINVAL` for the last two; `vivarium.mmap_descriptor_errnos` drives both
 cores, with a readable descriptor reaching the `may_back_mapping` floor as the

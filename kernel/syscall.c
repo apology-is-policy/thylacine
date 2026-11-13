@@ -7266,12 +7266,13 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
         return -(s64)T_E_NOMEM;
     }
     spin_unlock(&p->as->lock);
-    // Drop the construction handle OUTSIDE as->lock (#193): mapping_count + the
-    // cache's own ref keep the image alive (I-7 dual count), so this is never
-    // the last ref today -- but if it ever were, burrow_free_internal ->
-    // spoor_clunk may sleep, the same leaf-lock rule file_demand_page_slow
-    // states. Dropping after the unlock removes the need for that non-local
-    // argument entirely; the failure paths above already did.
+    // Drop the construction handle OUTSIDE as->lock (#193): the new mapping
+    // keeps the image alive (I-7 dual count), with the cache's own ref for a
+    // cached image. For a private or bypass image this unref leaves the
+    // mapping as the only holder, and on any path where it is the last ref
+    // burrow_free_internal -> spoor_clunk may sleep, the same leaf-lock rule
+    // file_demand_page_slow states; dropping after the unlock keeps that safe
+    // without a non-local argument, as the failure paths above do.
     burrow_unref(b);
 
     // A user VA is below 2^47, so this can never be mistaken for the [-4095,-1]
@@ -15710,7 +15711,8 @@ static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va
 // reading, not O_PATH) is rewritten into the anonymous call before any arm
 // judges it: it is then served exactly where MAP_ANONYMOUS is, and declined
 // exactly where that is (MAP_SHARED, PROT_EXEC). Any other descriptor is left
-// to the file arms, whose lookup answers EBADF or EACCES as Linux does. The
+// to the arms: in a shape a file arm admits, its lookup answers EBADF or EACCES
+// as Linux does; the read-write private shape no arm admits answers ENOSYS. The
 // descriptor is looked up once and not kept: an anonymous mapping holds no file.
 VISIBLE_IF_KERNEL_TESTS
 void viv_mmap_zero_as_anon(struct Proc *p, u64 a[6]) {

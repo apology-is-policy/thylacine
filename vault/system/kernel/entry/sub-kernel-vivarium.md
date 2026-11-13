@@ -372,8 +372,9 @@ it is served exactly where `MAP_ANONYMOUS` is and declined where that is, as
 Linux's `mmap_zero` does. `vivarium.mmap_dev_zero_is_anonymous` drives it
 through the dispatcher, read-write and read-only (a lazy anonymous Burrow at
 the asked prot), with `/dev/null` as the control (`ENOSYS` and `ENODEV`), and
-a write-only and an `O_PATH` `/dev/zero` left to the file arm (`EACCES`,
-`EBADF`, as Linux). A request no arm admits answers `ENOSYS` before any device
+a write-only and an `O_PATH` `/dev/zero` left to the file arm in the
+read-only shape (`EACCES`, `EBADF`, as Linux; the read-write private shape no
+arm admits answers `ENOSYS` for them, where Linux answers the same two). A request no arm admits answers `ENOSYS` before any device
 is asked (round 32 F4: the scripture had said every such device answers
 `ENODEV`).
 

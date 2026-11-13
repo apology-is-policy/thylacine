@@ -285,9 +285,11 @@ refusal; the take that empties a node uncharges it; `page_count` = data
 pages + nodes. This is the invariant's new axis at B-1a': the flat array was
 kernel memory proportional to the RESERVATION and charged to nobody, so the
 only bound on it was the byte cap the pagemap retired. FILE Burrows pass
-`as = NULL` on purpose -- their pages are the Image cache's, shared and
-uncharged, bounded by `EXEC_FILE_MAX` (256 MiB of map span) and the cache's
-image count -- so their nodes keep the same posture as their pages. The
+`as = NULL` on purpose -- their pages are the system cache's and uncharged
+(a cached image's shared, a private image's held only by its mapping, vote
+114; whether to charge the private ones per page is an open question),
+bounded by `EXEC_FILE_MAX` (256 MiB of map span) and, for cached images, the
+cache's image count -- so their nodes keep the same posture as their pages. The
 pool's half of the same invariant is [[sub-kernel-addrspace]]'s.
 
 [[inv-i32]] -- **the conservation law** ([[spec-capacity]]): `pagemap_destroy`

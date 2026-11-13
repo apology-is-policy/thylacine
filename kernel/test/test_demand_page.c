@@ -976,6 +976,44 @@ void test_demand_page_file_exec_class_syncs_every_fill(void) {
                    "no sync outside the class");
     drop_proc(p);
     burrow_unref(v);
+
+    // The single fill carries its own copy of the sync (round 33 F1): a one-page
+    // Burrow degrades the cluster to it. An RX page protected whole to R, read.
+    p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed (single)");
+    s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc (single)");
+    v = burrow_create_file(s, 0, ONE_PAGE, true);
+    TEST_ASSERT(v != NULL, "burrow_create_file (single, exec class)");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX (single)");
+    TEST_EXPECT_EQ(sys_burrow_protect_for_proc(p, USER_VA, ONE_PAGE, 1 /*R*/, 0), 0,
+                   "protect the page to R");
+    g_rev_read_calls = 0;
+    syncs0 = __atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED);
+    make_fi(&fi, USER_VA + 0x20, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "the single-path read resolves");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "one read (the single fill)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED) - syncs0, 1ull,
+                   "the single fill synced through the R mapping");
+    drop_proc(p);
+    burrow_unref(v);
+
+    // Its control: outside the class, the single fill syncs nothing.
+    p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed (single control)");
+    s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc (single control)");
+    v = burrow_create_file(s, 0, ONE_PAGE, false);
+    TEST_ASSERT(v != NULL, "burrow_create_file (single, no exec class)");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ), 0, "burrow_map R (single)");
+    syncs0 = __atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED);
+    make_fi(&fi, USER_VA + 0x20, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "the single-path R read resolves");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "slot 0 filled");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_file_fill_syncs_for_test, __ATOMIC_RELAXED) - syncs0, 0ull,
+                   "no single-fill sync outside the class");
+    drop_proc(p);
+    burrow_unref(v);
 }
 
 // #45 / REVENANT 4.6: an R-only (rodata) FILE mapping demand-pages with a

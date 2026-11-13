@@ -48,8 +48,9 @@
 // allocating nothing, when the cap is hit), and a take with a non-NULL `as`
 // uncharges the nodes it freed. The DATA page is the caller's charge in both
 // directions -- the pagemap never charges or uncharges a slot's page. FILE
-// Burrows pass NULL (their pages are the Image cache's, shared by every space
-// that maps the file, bounded by EXEC_FILE_MAX); ANON_LAZY Burrows pass the
+// Burrows pass NULL (their pages are the system cache's -- a cached image's
+// shared by every space that maps the file, a private image's held by its
+// mapping -- bounded by EXEC_FILE_MAX); ANON_LAZY Burrows pass the
 // mapping address space. So page_count reads as data pages plus the nodes
 // that index them (plus the page tables, since audit F1) -- dense, one node
 // per 512 pages plus the root; sparse, up to `depth` nodes per touched page
