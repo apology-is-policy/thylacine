@@ -40,20 +40,22 @@
 #                on does not hold the next. Secure attention: 1280x800, the
 #                rule on row 47.
 #
-# The cap is 79691776 bytes (76 MiB). Measured 2026-11-13 on QEMU 10.0.2 with
+# The cap is 81788928 bytes (78 MiB). Measured 2026-11-13 on QEMU 10.0.2 with
 # this image, by one traced boot of this sequence with no cap (QEMU's trace
 # events virtio_gpu_cmd_res_create_2d and virtio_gpu_cmd_res_unref, four bytes
 # a pixel): under a cap the device would hold 67.3 MB at the most (71.4 MB,
 # had Lictor's making come at the session's fullest moment), and 56.1 MB,
 # without a change, for as long as the largest image is asked for; with that
 # image, 91.5 MB. A cap over the first figure and at most the last refuses
-# that image and nothing else, and this one is 8 MB from the nearer of the
-# two. Asked for straight from the boot's display, where the session grows at
-# the same change, the same image leaves about 5 MB between them, which is
-# less than one more full-screen buffer of the session's: that is what the
-# second step is for. A session that takes more of the device moves the
-# figures: a refusal out of its place below, or the largest image made, says
-# that before it says anything of Lictor.
+# that image and nothing else. This one is 10.4 MB over the 71.4 and 9.7 MB
+# under the 91.5, and a full-screen buffer of the session's at 2048x1080 is
+# 8.8 MB: one more of them at its fullest moment, or one fewer while the
+# image is asked for, changes nothing here. Asked for straight from the
+# boot's display, where the session grows at the same change, the same image
+# leaves about 5 MB between the two figures, which is less than one such
+# buffer: that is what the second step is for. A session that takes more of
+# the device moves the figures: a refusal out of its place below, or the
+# largest image made, says that before it says anything of Lictor.
 #
 # NOT asserted: a making the device accepts and then does not back; a release
 # that is not answered for (a stall), after which the spare stays owed; memory
@@ -75,7 +77,7 @@ catch {unset ::env(THYLACINE_SCALE)}
 catch {unset ::env(THYLACINE_HIDPI)}
 set ::env(THYLACINE_VNC_SOCKET) /tmp/ls-graphical-sak-unmade-[pid].sock
 set ::env(THYLACINE_DISPLAY) vnc-unix
-set cap 79691776
+set cap 81788928
 if {[info exists ::env(LS_SAK_UNMADE_CAP)]} {
     set cap $::env(LS_SAK_UNMADE_CAP)
 }
@@ -310,12 +312,35 @@ expect {
     }
 }
 
-# The boot, read off the transcript: closing it writes out what expect still
-# holds of it. The session's own line is looked for the same way first, so
-# that a transcript with nothing in it does not read as a quiet boot. The
-# waits here and after the next display are the ones the cap was measured
-# with: the session's start holds more of the device than the session does.
-after 8000
+# The boot. The 8 s here and the wait after the next display are the ones the
+# cap was measured with: the session's start holds more of the device than
+# the session does, so this is where a cap too low would refuse first. They
+# are read as they pass: a sleep reads nothing, and a line said in it would
+# be met by the next leg and fail under that leg's name.
+set ::what "the boot"
+lc_within 8 {
+    -re {(tapestryd: gpu [^\r\n]*(resp_type=|submit error)[^\r\n]*)[\r\n]} {
+        lc_fail "the device answered otherwise than asked before the display changed, and under this cap the session is to fit: $expect_out(1,string)"
+    }
+    -re {(lictor: trusted screen[^\r\n]*)[\r\n]} {
+        lc_fail "at its start Lictor said a line of its screen, and 1280x800 at one is the display's own: $expect_out(1,string)"
+    }
+    -re {halcyond: FAIL session[^\r\n]*[\r\n]} {
+        lc_fail "the session failed: [string trim $expect_out(0,string)]"
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "the boot"
+    }
+    timeout {
+    }
+    eof {
+        lc_fail "qemu exited after the session's start"
+    }
+}
+# What came before the session's start is read off the transcript: closing it
+# writes out what expect still holds of it. The session's own line is looked
+# for the same way first, so that a transcript with nothing in it does not
+# read as a quiet boot.
 log_file
 if {[catch {exec grep -a -c {halcyond: session up 1280x800 px} $transcript} up]} {
     lc_fail "the transcript does not hold the session's start, so nothing can be read off it: $up"
@@ -323,7 +348,7 @@ if {[catch {exec grep -a -c {halcyond: session up 1280x800 px} $transcript} up]}
 if {[catch {exec grep -a -o {lictor: trusted screen[ -~]*} $transcript} said]} {
     set said "nothing"
 }
-if {[catch {exec grep -a -o {tapestryd: gpu [ -~]*resp_type=[ -~]*} $transcript} refusals]} {
+if {[catch {exec grep -a -o -E {tapestryd: gpu [ -~]*(resp_type=|submit error)[ -~]*} $transcript} refusals]} {
     set refusals "none"
 }
 log_file -a $transcript
