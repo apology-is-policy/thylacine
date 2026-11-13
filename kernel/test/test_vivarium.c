@@ -264,6 +264,84 @@ void test_vivarium_mmap_descriptor_errnos(void) {
     TEST_EXPECT_EQ(f[3], -(s64)T_E_NODEV, "MAP_FIXED control: the same floor");
 }
 
+static s64 viv_mmap_args(struct Proc *p, u64 addr, u64 len, u64 prot, u64 flags,
+                         u64 fd, u64 off) {
+    struct exception_context c;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_MMAP;
+    c.regs[0] = addr; c.regs[1] = len; c.regs[2] = prot;
+    c.regs[3] = flags; c.regs[4] = fd; c.regs[5] = off;
+    bool native = viv_linux_dispatch_for_test(&c, p);
+    current_thread()->note_interruptible = false;
+    return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
+}
+
+// The phenotype judges an mmap in Linux's order -- arm64 sys_mmap's offset
+// check, fget, then do_mmap's length, window and access mode -- and an
+// anonymous call reads neither fd nor offset. Each refusal is paired with a
+// call one step later in that order, which answers the next step's errno.
+void test_vivarium_mmap_order_is_linux(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t rfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devnull.attach(""));
+    hidx_t wfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, devnull.attach(""));
+    hidx_t ofd = viv_opath_handle(p, &devnull);
+    const u64 none  = (u64)PROC_HANDLE_MAX - 1u;
+    const u64 fixed = EXEC_USER_BURROW_BASE + 0x200000ull;
+    const u64 R     = VIV_PROT_READ;
+    const u64 RW    = VIV_PROT_READ | VIV_PROT_WRITE;
+    const u64 PRIV  = VIV_MAP_PRIVATE;
+    const u64 FIX   = VIV_MAP_PRIVATE | VIV_MAP_FIXED;
+    const u64 ANON  = VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS;
+    const u32 VRW   = (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
+    struct Handle probe;
+    bool empty = handle_get(p, (hidx_t)none, &probe) < 0;
+    if (!empty) handle_put(&probe);
+    bool ok = rfd >= 0 && wfd >= 0 && ofd >= 0 && empty;
+    s64 r[13];
+    for (int i = 0; i < 13; i++) r[i] = 0;
+    bool anon_fd = false, anon_dead = false, anon_canon = false;
+    if (ok) {
+        r[0]  = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, none, 0x10);
+        r[1]  = viv_mmap_args(p, 0, PAGE_SIZE, R, ANON, (u64)(u32)-1, 0x10);
+        r[2]  = viv_mmap_args(p, 0, 0, R, PRIV, none, 0);
+        r[3]  = viv_mmap_args(p, 0, 0, R, PRIV, (u64)rfd, 0);
+        r[4]  = sys_mmap_file_for_proc(p, none, 0, false, 0);
+        anon_fd    = viv_anon_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, ANON, (u64)rfd, 0), VRW);
+        anon_dead  = viv_anon_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, ANON, none, PAGE_SIZE), VRW);
+        anon_canon = viv_anon_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, ANON, (u64)(u32)-1, 0), VRW);
+        r[5]  = viv_mmap_args(p, 0, PAGE_SIZE, RW, PRIV, (u64)wfd, 0);
+        r[6]  = viv_mmap_args(p, 0, PAGE_SIZE, RW, PRIV, (u64)ofd, 0);
+        r[7]  = viv_mmap_args(p, 0, PAGE_SIZE, RW, PRIV, (u64)rfd, 0);
+        r[8]  = viv_mmap_args(p, 0, (u64)BURROW_ATTACH_MAX + PAGE_SIZE, R, PRIV, (u64)wfd, 0);
+        r[9]  = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, (u64)wfd, 0);
+        r[10] = viv_mmap_args(p, fixed, BURROW_RESERVE_MAX + PAGE_SIZE, R, FIX, (u64)wfd, 0);
+        r[11] = viv_mmap_args(p, fixed, PAGE_SIZE, R, FIX, (u64)wfd, 0);
+        r[12] = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, (u64)rfd, 0);
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(ok, "handles, and an empty slot");
+    TEST_EXPECT_EQ(r[0], -(s64)T_E_INVAL, "an unaligned offset is refused before the descriptor");
+    TEST_EXPECT_EQ(r[1], -(s64)T_E_INVAL, "and on an anonymous call too");
+    TEST_EXPECT_EQ(r[2], -(s64)T_E_BADF,  "the descriptor is judged before the length: EBADF");
+    TEST_EXPECT_EQ(r[3], -(s64)T_E_INVAL, "control: a live descriptor reaches the length: EINVAL");
+    TEST_EXPECT_EQ(r[4], -(s64)T_E_INVAL, "the native door keeps its own order: the length first");
+    TEST_ASSERT(anon_fd,    "MAP_ANONYMOUS ignores a live descriptor");
+    TEST_ASSERT(anon_dead,  "and a dead one, and a nonzero offset");
+    TEST_ASSERT(anon_canon, "control: the canonical anonymous call");
+    TEST_EXPECT_EQ(r[5], -(s64)T_E_ACCES, "a shape no arm serves still refuses a write-only descriptor: EACCES");
+    TEST_EXPECT_EQ(r[6], -(s64)T_E_BADF,  "and an O_PATH one: EBADF");
+    TEST_EXPECT_EQ(r[7], -(s64)T_E_NOSYS, "control: a readable one is declined");
+    TEST_EXPECT_EQ(r[8], -(s64)T_E_NOMEM, "the file arm's window is judged before the access mode");
+    TEST_EXPECT_EQ(r[9], -(s64)T_E_ACCES, "control: within the window, the access mode: EACCES");
+    TEST_EXPECT_EQ(r[10], -(s64)T_E_NOMEM, "the fixed arm's window is judged before the access mode");
+    TEST_EXPECT_EQ(r[11], -(s64)T_E_ACCES, "control: within it, EACCES");
+    TEST_EXPECT_EQ(r[12], -(s64)T_E_NODEV, "control: a readable descriptor passes to the opt-in floor");
+}
+
 // A T2 shell narrows its own words by its own Linux prototype. readlinkat's
 // bufsiz is an int: Linux refuses one that is not positive before it reads the
 // path, and a high half it never sees cannot widen the copy. getrandom's flags

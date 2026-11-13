@@ -1152,6 +1152,7 @@ void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
 void test_vivarium_mmap_dev_zero_is_anonymous(void);
 void test_vivarium_mmap_descriptor_errnos(void);
+void test_vivarium_mmap_order_is_linux(void);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_git_chunk_rows(void);

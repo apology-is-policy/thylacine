@@ -1575,6 +1575,7 @@ struct test_case g_tests[] = {
     { "notewait.syscall_refusals", test_notewait_syscall_refusals, false, NULL },
     { "vivarium.mmap_dev_zero_is_anonymous", test_vivarium_mmap_dev_zero_is_anonymous, false, NULL },
     { "vivarium.mmap_descriptor_errnos",     test_vivarium_mmap_descriptor_errnos,     false, NULL },
+    { "vivarium.mmap_order_is_linux",        test_vivarium_mmap_order_is_linux,        false, NULL },
     { "vivarium.timespec_to_ns", test_vivarium_timespec_to_ns, false, NULL },
     { "notes.unwind_sets_the_mark", test_notes_unwind_sets_the_mark, false, NULL },
     { "notes.native_class", test_notes_native_class, false, NULL },

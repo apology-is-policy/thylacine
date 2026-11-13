@@ -363,20 +363,27 @@ writable file mapping exists" true by construction, and it is an allow-list
 (`PROT_BTI`/`PROT_MTE`/`PROT_GROWSDOWN` fall outside it unenumerated) for the
 same reason the anon arm is; `len` is still deliberately unjudged.
 
-**`/dev/zero` is anonymous memory (operator vote 115).** Before any arm judges
-an `mmap`, the shell copies its six words and `viv_mmap_zero_as_anon` rewrites a
-descriptor naming devzero that a file mapping would accept (the cores' own
-lookup: open for reading, not `O_PATH`) into the anonymous call (flags gain
-`MAP_ANONYMOUS`, `fd` -1, offset 0; the Spoor is looked up once and released), so
-it is served exactly where `MAP_ANONYMOUS` is and declined where that is, as
-Linux's `mmap_zero` does. `vivarium.mmap_dev_zero_is_anonymous` drives it
-through the dispatcher, read-write and read-only (a lazy anonymous Burrow at
-the asked prot), with `/dev/null` as the control (`ENOSYS` and `ENODEV`), and
-a write-only and an `O_PATH` `/dev/zero` left to the file arm in the
-read-only shape (`EACCES`, `EBADF`, as Linux; the read-write private shape no
-arm admits answers `ENOSYS` for them, where Linux answers the same two). A request no arm admits answers `ENOSYS` before any device
-is asked (round 32 F4: the scripture had said every such device answers
-`ENODEV`).
+**One descriptor lookup, in Linux's order; `/dev/zero` is anonymous memory
+(operator vote 115).** `viv_mmap` judges an unaligned offset (`EINVAL`) first;
+`MAP_ANONYMOUS` drops the descriptor and the offset; any other call takes ONE
+`sys_get_mapping_spoor` (`EBADF` for nothing or `O_PATH`; readability reported,
+not judged) and holds that Spoor through every arm, so the devzero decision and
+the map are made on the same file. A zero length is `EINVAL` next. A readable
+devzero becomes the anonymous call (flags gain `MAP_ANONYMOUS`, `fd` -1, offset
+0, the Spoor released) and is served exactly where `MAP_ANONYMOUS` is, as
+Linux's `mmap_zero` does; a write-only one is `EACCES`. The file arms run their
+window (`mmap_file_window` / `mmap_fixed_file_window`, shared with the native
+door), then `EACCES` for an unreadable descriptor, then the shared bodies
+(`mmap_file_body` / `mmap_fixed_file_body`, which consume the Spoor). A shape no
+arm serves answers `EACCES` for an unreadable descriptor and `ENOSYS` for a
+readable one, before any device is asked (round 32 F4: the scripture had said
+every such device answers `ENODEV`). `vivarium.mmap_dev_zero_is_anonymous`
+drives the devzero cases through the dispatcher (read-write and read-only map a
+lazy anonymous Burrow at the asked prot; `/dev/null` is the control, `ENOSYS`
+and `ENODEV`; write-only `EACCES`, `O_PATH` `EBADF`), and
+`vivarium.mmap_order_is_linux` pins the order, each refusal beside a call one
+step later that answers the next step's errno, with the native door's
+length-first order as a control.
 
 **The two anonymous arms changed at B-1a.** `vivarium_mmap_decide`'s allow-list
 (`VIV_MMAP_PROT_ADMITTED` = R|W) is unchanged, but `PROT_NONE` inside it is now

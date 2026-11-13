@@ -2438,30 +2438,42 @@ prove the decision; the guest legs prove the plumbing.
 
 **`/dev/zero` is anonymous memory (operator vote 115, 2026-11-13).** Linux maps
 it so (`mmap_zero`), and a program that predates `MAP_ANONYMOUS` still asks for
-memory that way. The shell rewrites a descriptor naming devzero that a file
-mapping would accept (open for reading, not `O_PATH`) into the anonymous call
-before any arm judges it: flags gain `MAP_ANONYMOUS`, `fd` becomes -1, the
-offset 0. It is then served exactly where `MAP_ANONYMOUS` is and declined where
-that is (`MAP_SHARED`, `PROT_EXEC`): the phenotype has no shared anonymous
-memory, so a shared `/dev/zero` map answers `ENOSYS` where Linux would share
-one zero-filled object across fork (`shmem_zero_setup`; operator vote 117 keeps
-the decline and queues shared anonymous memory as its own chunk). A write-only or `O_PATH` `/dev/zero`
-descriptor is left to the file arms: in a shape a file arm admits (read-only
-private, or `MAP_FIXED`) it answers `EACCES` or `EBADF` from the descriptor
-check, as Linux does; in the common read-write private shape no arm admits it
-and it answers `ENOSYS`, where Linux answers `EACCES` or `EBADF`. A read-only private map of any other device that backs no
+memory that way. The shell turns a readable `/dev/zero` descriptor into the
+anonymous call before any arm judges it: flags gain `MAP_ANONYMOUS`, `fd`
+becomes -1, the offset 0. It is then served exactly where `MAP_ANONYMOUS` is and
+declined where that is (`MAP_SHARED`, `PROT_EXEC`): the phenotype has no shared
+anonymous memory, so a shared `/dev/zero` map answers `ENOSYS` where Linux would
+share one zero-filled object across fork (`shmem_zero_setup`; operator vote 117
+keeps the decline and queues shared anonymous memory as its own chunk). A
+write-only `/dev/zero` answers `EACCES` and an `O_PATH` one `EBADF`, in every
+shape, as Linux does. A read-only private map of any other device that backs no
 mapping answers `ENODEV`, which matches Linux for `/dev/null`, `/dev/urandom`,
 procfs and terminals; a request no arm admits at all (a writable private file
-map without `MAP_FIXED`, or any `MAP_SHARED` one) answers `ENOSYS` before any
-device is asked, where Linux would answer `ENODEV` for such a device.
+map without `MAP_FIXED`, or any `MAP_SHARED` one) answers `ENOSYS` for a
+readable descriptor before any device is asked, where Linux would answer
+`ENODEV` for such a device.
 
-Both file arms judge the descriptor in Linux's relative order: `EBADF` (one
-naming nothing, or opened `O_PATH`) before `EACCES` (not open for reading)
-before `EPERM` (a noexec mount) and `ENODEV` (a device that backs no mapping).
-Until audit round 32 the cores answered `EBADF` for a write-only descriptor and
-`EINVAL` for an `O_PATH` one. Both still run their length and window checks
-before the descriptor, so a bad descriptor with a zero length answers `EINVAL`
-where Linux, whose `fget` comes first, answers `EBADF`.
+The shell judges an `mmap` in Linux's order (arm64 `sys_mmap`, then
+`ksys_mmap_pgoff`, then `do_mmap`, read from v6.12). An unaligned offset is
+`EINVAL` before anything else. An anonymous call ignores its descriptor and its
+offset, as Linux does (until 2026-11-13 the shell demanded -1 and 0 and answered
+`ENOSYS` otherwise). Any other call looks its descriptor up once -- `EBADF` for
+one naming nothing or opened `O_PATH`, the two `fget` refuses -- and holds that
+file through every arm, so the `/dev/zero` decision is made about the file that
+gets mapped (the shell used to look twice, and a sibling's `dup2` between the
+looks could turn a file map into `ENODEV`). A zero length is `EINVAL` next, then
+the arm's window (`ENOMEM` past the length cap or outside the burrow window,
+`EINVAL` for a range that wraps), then the access mode: `EACCES` for a
+descriptor not open for reading, which Linux asks at `do_mmap`'s `FMODE_READ`,
+after its window. Past that the arms keep their own gates in Linux's relative
+order: `EPERM` for an executable map off a noexec mount, then `ENODEV` for a
+device that backs no mapping. Three divergences remain: a range that wraps is `EINVAL` where Linux says `EOVERFLOW`; a
+write-only descriptor in a shape no arm serves, or a write-only `/dev/zero`,
+has no arm window to judge first, so a length too large to map answers `EACCES`
+there where Linux answers `ENOMEM`; and a `MAP_FIXED` request outside the burrow
+window is declined by the arm's domain before its window. The native door,
+`SYS_BURROW_MAP_FILE`, keeps its own order -- the length and window before the
+descriptor -- with the same codes (operator vote 116).
 
 ### 6.22 Signals — the frame shape (V-6, design)
 
