@@ -34,7 +34,14 @@ impl Driver for Lictor {
         }
         if inputs.iter().filter(|i| i.keyboard).count() != 1 { return Err(Error::Hardware); }
         let screen = Screen::new(&mut gpu, lictor::backend::screen::declared_scale())?;
-        let device = Device::new(gpu, 0)?;
+        #[cfg_attr(not(feature = "test-mode"), allow(unused_mut))]
+        let mut device = Device::new(gpu, 0)?;
+        #[cfg(feature = "test-mode")]
+        {
+            let mut line = [0u8; 1024];
+            device.test_declare(lictor::gpu_api::bootarg_declared(
+                lictor::backend::bootargs(&mut line), lictor::gpu_api::TEST_LEVERS_WORD));
+        }
         Ok(Self { device, screen, inputs, seat: Seat::default() })
     }
     fn serve(mut self, _resources: &BoundResources) -> Result<(), Error> {

@@ -26,19 +26,22 @@
 #                have left with the device, which answers twice that it has
 #                no such resource. Each time Lictor says its screen stays
 #                2048x1080 at one, six times "to be tried again" and the
-#                seventh not. Every line is read and each is the next one
-#                wanted, so a refusal more than these (one of the session's
-#                own, were the cap not to fit it) fails here.
+#                seventh not; and after the seventh, which no making
+#                follows, it lets go of the spare once more. Every line is
+#                read and each is the next one wanted, so a refusal more
+#                than these (one of the session's own, were the cap not to
+#                fit it) fails here.
 #   stands:      secure attention. The scanout is 2048x1080, the rail's rule
 #                is device row 47 and rows 94 and 95 are the background: the
 #                screen that stood is whole after seven makings that failed.
-#   given up:    21 s from the seventh line without another making. Were
-#                they to go on, the eighth would be 19.2 s after it, and one
-#                put off by the episode would come when the episode ends.
-#   afterwards:  the display becomes 1280x800. Lictor lets go of the spare
-#                once more and makes that screen, at one: an event given up
-#                on does not hold the next. Secure attention: 1280x800, the
-#                rule on row 47.
+#   given up:    21 s from the last of those lines without another making.
+#                Were they to go on, the eighth would be 19.2 s after the
+#                seventh, and one put off by the episode would come when the
+#                episode ends.
+#   afterwards:  the display becomes 1280x800, and Lictor makes that screen,
+#                at one, with nothing to let go of first: an event given up
+#                on leaves no spare owed and does not hold the next. Secure
+#                attention: 1280x800, the rule on row 47.
 #
 # The cap is 81788928 bytes (78 MiB). Measured 2026-11-13 on QEMU 10.0.2 with
 # this image, by one traced boot of this sequence with no cap (QEMU's trace
@@ -375,6 +378,8 @@ for {set n 1} {$n <= 7} {incr n} {
     lappend lines $REFUSED
     lappend lines [expr {$n < 7 ? "$STAYS, to be tried again" : $STAYS}]
 }
+# No making follows the seventh to let go of what it may have left.
+lappend lines {*}$NO_SPARE
 set began [clock milliseconds]
 tell 4096x2160
 told $lines "2048x1080 at 100%" "the display became 4096x2160"
@@ -385,7 +390,7 @@ set gave_up [clock milliseconds]
 if {$gave_up - $began < 18900} {
     lc_fail "seven makings in [expr {$gave_up - $began}] ms from before the display was told: the six waits between them are 18900 ms"
 }
-lc_pass "a trusted screen the device would not make: seven makings refused over [expr {($gave_up - $began) / 1000}]s, the screen said to stay 2048x1080 at one"
+lc_pass "a trusted screen the device would not make: seven makings refused over [expr {($gave_up - $began) / 1000}]s, the screen said to stay 2048x1080 at one, the spare let go of after the last"
 
 # Stands.
 attention "on a display of 4096x2160"
@@ -419,13 +424,13 @@ lc_pass "the event was given up on at the seventh making"
 
 # Afterwards.
 tell 1280x800
-told [concat $NO_SPARE [list "lictor: trusted screen 1280x800 at 1x for a display of 1280x800"]] "1280x800 at 100%" "the display became 1280x800"
+told [list "lictor: trusted screen 1280x800 at 1x for a display of 1280x800"] "1280x800 at 100%" "the display became 1280x800"
 attention "on 1280x800"
 dumped 1280 800 after "the trusted screen on 1280x800"
 off 0 47 1280 48 $RULE "at one the rail's rule is device row 47, the whole width"
 off 0 94 1280 96 $GROUND "device rows 94 and 95 are the background, the whole width"
 ended "the second trusted episode ended"
-lc_pass "the next display was followed: 1280x800 at one, made after the spare was let go of once more"
+lc_pass "the next display was followed: 1280x800 at one, with no spare left owed to it"
 
 catch {file delete -force $transcript $shot $ppm}
 lc_pass "ls-graphical-sak-unmade: under a cap, a display followed, seven makings refused for the next, the screen that stood, and the display after it followed"

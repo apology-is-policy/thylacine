@@ -288,9 +288,13 @@ The rules that keep this out of the trusted path's critical section:
   did not answer leaves the other reserved resource possibly made, or
   possibly still there. It is let go of, and that answered for, before it is
   made again; until then the screen stays as it is. The release is always the
-  device's to answer, never one the driver has put off for later, and one
-  that was not answered is asked again a bounded number of times, so that the
-  device does not hold the image that was until the display next changes.
+  device's to answer, never one the driver has put off for later. One that
+  was not answered is asked again six times, at the session's waits and
+  counted from the making that left it, and a following that is given up on
+  lets go of what its last making may have left, once, there and then. What
+  is still not answered for after that is the device's until the display
+  next changes: an asking the device does not answer is a stall, which holds
+  every client's commands, so it is not made without end.
 - **Nothing a client says is asked,** as before: the rect and the EDID are
   the device's, and the declaration is the kernel's command line.
 

@@ -222,6 +222,14 @@ impl Follow {
         self.due_at = Some(now_ms.saturating_add(QUIET_MS << self.retries));
         true
     }
+
+    /// What `step` called for is done, and something it left behind is
+    /// still owed (a release the device did not answer). `retry` asks for
+    /// that too, and its askings are counted from here: what the doing
+    /// spent is not taken from what the owing has.
+    pub fn renew(&mut self) {
+        self.retries = 0;
+    }
 }
 
 impl Default for Follow {
@@ -505,6 +513,25 @@ mod tests {
             assert!(f.retry(now));
         }
         assert!(!f.retry(now));
+        // What is done on its last asking and leaves something owed has
+        // all of them again for that, and no more than all.
+        let mut f = Follow::new();
+        assert_eq!(f.step(1, 0), Step::Wait);
+        assert_eq!(f.step(1, QUIET_MS), Step::Ask);
+        for _ in 0..RETRY_MAX {
+            assert!(f.retry(QUIET_MS));
+        }
+        assert!(!f.retry(QUIET_MS));
+        f.renew();
+        let mut now = 100_000;
+        for n in 1..=RETRY_MAX {
+            assert!(f.retry(now), "renewed {n}");
+            assert_eq!(f.step(1, now + (QUIET_MS << n) - 1), Step::Wait, "renewed {n}");
+            assert_eq!(f.step(1, now + (QUIET_MS << n)), Step::Ask, "renewed {n}");
+            now += QUIET_MS << n;
+        }
+        assert!(!f.retry(now));
+        assert_eq!(f.step(1, now + 3_600_000), Step::Wait);
         // A mode pinned while an asking waits to be made again stands.
         let mut f = Follow::new();
         assert_eq!(f.step(1, 0), Step::Wait);

@@ -30,6 +30,11 @@ pub struct Device {
     owner: u64,
     pub presentation: Presentation,
     refused_retirements: u64,
+    /// The kernel's command line declared this boot one whose levers may be
+    /// armed (`TEST_LEVERS_WORD`). The compositor asks for the arming and is
+    /// not trusted to: every shot below breaks a trusted takeover.
+    #[cfg(feature = "test-mode")]
+    test_declared: bool,
     /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
     test_latch_shots: u8,
@@ -67,12 +72,15 @@ impl Device {
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
             refused_retirements: 0,
+            #[cfg(feature = "test-mode")] test_declared: false,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
+    #[cfg(feature = "test-mode")]
+    pub fn test_declare(&mut self, declared: bool) { self.test_declared = declared; }
     pub fn bind_owner(&mut self, owner: u64) -> bool {
         if owner == 0 || (self.owner != 0 && self.owner != owner) { return false; }
         self.owner = owner; true
@@ -590,6 +598,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
+                    if !self.test_declared { return Err(Error::BadField); }
                     // Three for the compositor's bring-up and health step,
                     // three for the display's binds (a mode's from the
                     // direct state, a mode's from the composed one, a

@@ -84,16 +84,8 @@ pub struct Screen {
 /// the compositor reads it at its own start. None when there is none, when
 /// it is not one of the scales there are, or when the line cannot be read.
 pub fn declared_scale() -> Option<u16> {
-    use libthyla_rs::{t_close, t_open, t_read, T_OREAD, T_WALK_OPEN_FROM_ROOT};
-    // SAFETY: a path literal and a buffer of this frame.
-    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
-    if fd < 0 { return None; }
-    let mut buf = [0u8; 1024];
-    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
-    unsafe { t_close(fd); }
-    // A line that fills the buffer may have been cut inside the token.
-    if n <= 0 || n as usize >= buf.len() { return None; }
-    match libhalcyon::scale::declared_scale(&buf[..n as usize]) {
+    let mut line = [0u8; 1024];
+    match libhalcyon::scale::declared_scale(super::bootargs(&mut line)) {
         libhalcyon::scale::Declared::Scale(pct) => Some(pct),
         _ => None,
     }
@@ -167,22 +159,32 @@ impl Screen {
         // A stall a client armed is for that client's next command.
         #[cfg(feature = "test-mode")]
         let shot = gpu.test_stall_set_aside();
+        let stood = self.image;
         let made = self.refit(gpu);
         // The image before this one, where its making could not let go of
         // it: held, it is the device's memory until the display next changes.
         let kept = made.is_ok() && self.spare_owed && !self.release_spare(gpu);
+        if made.is_err() || kept {
+            // The release a making left owed is asked for as often as a
+            // making is, whatever the making took.
+            if kept && self.image != stood { self.follow.renew(); }
+            let again = !gpu.engine_dead()
+                && self.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000);
+            let tail = if again { ", to be tried again" } else { "" };
+            crate::backend::diagnostic(&match made {
+                Err(why) => alloc::format!("lictor: trusted screen stays {}x{} at {}x: {}{}\n",
+                    self.width, self.height, self.scale, why, tail),
+                Ok(()) => alloc::format!("lictor: trusted screen {}x{} at {}x: the image before it was not let go of{}\n",
+                    self.width, self.height, self.scale, tail),
+            });
+            // No making is to come that would let go of what this one may
+            // have left with the device, so it is let go of here, once.
+            if made.is_err() && !again && self.spare_owed && matches!(gpu.engine(), Engine::Live) {
+                let _ = self.release_spare(gpu);
+            }
+        }
         #[cfg(feature = "test-mode")]
         gpu.test_stall_put_back(shot);
-        if made.is_ok() && !kept { return; }
-        let again = !gpu.engine_dead()
-            && self.follow.retry(libthyla_rs::time::monotonic_ns() / 1_000_000);
-        let tail = if again { ", to be tried again" } else { "" };
-        crate::backend::diagnostic(&match made {
-            Err(why) => alloc::format!("lictor: trusted screen stays {}x{} at {}x: {}{}\n",
-                self.width, self.height, self.scale, why, tail),
-            Ok(()) => alloc::format!("lictor: trusted screen {}x{} at {}x: the image before it was not let go of{}\n",
-                self.width, self.height, self.scale, tail),
-        });
     }
     /// The reserved resource that is not the image, let go of. A refusal is
     /// an answer: the device has no such resource, which is what is wanted.

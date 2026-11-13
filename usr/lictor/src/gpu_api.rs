@@ -337,6 +337,14 @@ pub fn retirement_hold(
         Hold::Clear
     }
 }
+/// The word on the kernel's command line that declares a boot one whose test
+/// levers may be armed. The platform writes that line; no client can.
+pub const TEST_LEVERS_WORD: &[u8] = b"thylacine.test-latch-dead";
+/// Whether a kernel command line holds `word`, whole: ended by white space,
+/// a NUL (the FDT property carries one) or the line's end.
+pub fn bootarg_declared(bootargs: &[u8], word: &[u8]) -> bool {
+    bootargs.split(|b| b.is_ascii_whitespace() || *b == 0).any(|w| w == word)
+}
 /// Whether the broker runs `request` now or leaves it parked. A park must end:
 /// a seat episode ends, and in-flight chains retire. A retirement nothing can
 /// clear is admitted at once, and one parked `PARK_BOUND_MS` is admitted
@@ -597,6 +605,18 @@ mod admission_tests {
         for r in retirements() { assert!(r.retires() && !r.seat(), "{r:?}"); }
         for r in ordinary() { assert!(!r.retires() && !r.seat(), "{r:?}"); }
         for r in seat() { assert!(r.seat() && !r.retires(), "{r:?}"); }
+    }
+    #[test]
+    fn a_lever_is_declared_by_a_whole_word_of_the_command_line() {
+        let w = TEST_LEVERS_WORD;
+        for line in [&b"thylacine.test-latch-dead"[..], b"console=ttyAMA0 thylacine.test-latch-dead thylacine.scale=200\0",
+            b"a\tthylacine.test-latch-dead\n", b"thylacine.test-latch-dead\0"] {
+            assert!(bootarg_declared(line, w), "{line:?}");
+        }
+        for line in [&b""[..], b"thylacine.test-latch-deadx", b"xthylacine.test-latch-dead", b"thylacine.test-latch-dead=1",
+            b"thylacine.test-latch", b"thylacine.test-latch -dead", b"thylacine.scale=200"] {
+            assert!(!bootarg_declared(line, w), "{line:?}");
+        }
     }
     #[test]
     fn a_retirement_nothing_can_clear_runs_to_its_refusal() {

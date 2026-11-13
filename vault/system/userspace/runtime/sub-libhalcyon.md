@@ -734,7 +734,10 @@ the asking was made and failed (a change the device did not take, an allocation
 that failed, a stall that began inside the asking): the caller calls `retry`,
 and `step` answers `Ask` again after a wait that doubles from twice the quiet
 time. `retry` is false once `RETRY_MAX` (6) askings have been made again, 18.9 s
-in all, and the event is forgotten. Holds between failed askings neither spend
+in all, and the event is forgotten. `renew` starts that count again for
+something a doing left owed: Lictor calls it when a making succeeded and the
+image before it was not let go of, so that the release has all six askings
+whatever the making took. Holds between failed askings neither spend
 those askings nor give them back, and a hold waits the quiet time whatever the
 last failure's wait was. An event that arrives during either wait takes the old
 one's place, with all its askings and its own first `hold`.

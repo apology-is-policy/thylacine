@@ -558,7 +558,11 @@ found no bind, and so does a change that fails. Its legs:
   `bound, late` for the standing mode, then `not followed (errno E), to be
   asked again`, then the second asking makes the change. The bind is the
   failed change's own: it reads the display it was for (round R1 F1), and
-  under the lever the stall is over when the change returns. Until f5e8bd028
+  under the lever the stall is over when the change returns. The same read
+  is made for a `mode auto` that is refused, so under a declared scale the
+  mode that stands may be rescaled for the display that is now although the
+  verb answers an error: the display did change, and the mode is shown on it
+  (round R2's question). Until f5e8bd028
   the bind was `bind_pump`'s, a pass later, and the leg read it after `not
   followed` and before the host was asked again (round 2's finding: between
   the two the device scans the screen that was given up). The leg fails on

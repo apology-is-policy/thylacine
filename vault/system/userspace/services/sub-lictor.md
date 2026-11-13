@@ -360,14 +360,22 @@ first command, and only `release_spare` clears it. That detaches and
 unreferences the reserved resource that is not the image, and clears the flag
 when both commands were answered: the engine live afterwards and no stall
 across them (`Gpu::stalls` unchanged). A refusal is an answer: the device has
-no such resource, which is what is wanted. It is called in three places. A
+no such resource, which is what is wanted. It is called in four places. A
 making ends with it, for the image that was. The next making begins with it
-while the flag is set, and gives up if it is not answered. And `follow` calls
+while the flag is set, and gives up if it is not answered. `follow` calls
 it after any asking that succeeded with the flag still set, so that an image
 the device kept is not its memory until the display next changes (round R1
 F5). Not answered there, `follow` says
 `lictor: trusted screen WxH at Kx: the image before it was not let go of`,
-with `, to be tried again` while `Follow::retry` has tries left.
+with `, to be tried again` while `Follow::retry` has tries left. Those tries
+are counted from the making that left the image (`Follow::renew`, called when
+the pass made a new image and kept its old one), not from the making's own: a
+making that succeeded on its last asking used to leave the release none
+(round R2 F2). And `follow` calls it once more when a following is given up
+on with the flag set and the engine live, after its `stays` line, because no
+making is to come that would. What is still owed after that stays owed until
+the display next changes. It is not asked for without end: an asking the
+device does not answer is a stall, and a stall holds every client's commands.
 
 The unreference is `Gpu::unref_own`, not `Gpu::resource_unref`. That one
 answers Ok for a release it has put off (`condemn`: a resource the display may
@@ -436,16 +444,18 @@ between what the session holds and what it holds with the largest trusted
 image. The display grows to 2048x1080 and both follow. It then becomes
 4096x2160, which leaves the session's mode as it is, and the device answers
 the making of the 35.4 MB image "out of memory" seven times: the first, and
-six more after waits that double. The scenario reads all 26 lines in their
+six more after waits that double. The scenario reads all 28 lines in their
 order (from the second making on, the spare let go of and refused twice as a
 resource the device has not; the making refused; the screen said to stay
-2048x1080 at one, six times to be tried again and the seventh not), requires
+2048x1080 at one, six times to be tried again and the seventh not; then the
+spare let go of once more, since no making follows to do it), requires
 the 18.9 s of waits, then reads the 2048x1080 picture under secure attention,
-waits out 21 s with no eighth making, and has a display of 1280x800 made and
-shown. The cap is a measured number: a session that takes more of the device
+waits out 21 s with no eighth making, and has a display of 1280x800 made,
+with no release before it, and shown. The cap is a measured number: a session that takes more of the device
 moves it, and the scenario says so where a refusal comes out of its place.
-In a guest on 2026-11-13 (QEMU 10.0.2, HVF, 74c60e75a) it is green, each refusal
-`resp_type=0x1201`, both dumps pixel for pixel the host renderer's pictures,
+In a guest on 2026-11-13 (QEMU 10.0.2, HVF) the scenario as it was at
+74c60e75a, with 26 lines and before a give-up let go of its spare, is green,
+each refusal `resp_type=0x1201`, both dumps pixel for pixel the host renderer's pictures,
 and five faults are each red at the check that knows it: no cap; a give-up
 that lets go of the standing image (seen only by the picture leg, as a
 refused transfer); a release that names the standing image; a seventh asking
@@ -612,6 +622,13 @@ of a client's slot, which are not refused there. The shot still rides the next
 synchronous command whoever sends it, so a seat takeover landing between the
 compositor's aim and its command would take it. That needs test-mode, the
 bootarg and the operator's chord, and vote 30 recovers the seat.
+The bootarg is Lictor's own to read. `Request::TestArmLatch` is refused
+(`BadField`) on a boot whose command line does not hold
+`thylacine.test-latch-dead` (`gpu_api::bootarg_declared` over
+`backend::bootargs`, read once at start; `Device::test_declare`), so the
+compositor, which asks for the arming and is not trusted to, cannot arm the
+latch, seat and stall shots by its own word. Until 2026-11-13 only tapestryd
+read the word, and `TestArmLatch` armed all three for any client (round R2 F1).
 `CtxAttachResource` links the attachment in the ledger before the device
 answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
 resource can still retire. tapestryd aims three at the
@@ -931,6 +948,18 @@ Open after that review:
   request in every build. The verb is now refused (`BadField`) without the
   feature, like the four `Test*` verbs beside it; nothing in the tree sends it
   (the backend runs the selftest itself at init).
+- The context-hold verbs are in every image too, and need no arming.
+  `TestHoldCtx` reaches any client that has a warp context, so on a virgl
+  device, through tapestryd's `warp-hold`; a held context's retirements are
+  swallowed, `Gpu::all_work_retired` stays false, and a trusted takeover then
+  fails at the kernel's quiesce deadline for as long as the hold stands. The
+  failure is recoverable and authorization stays closed, as with a hung GL
+  chain, but the verb makes it free. On this tree it stands, read from the
+  code and not run here. It is corona's entry of 2026-11-03 (a poisoned
+  fence denies the graphical SAK), and corona's landing branch cures it: the
+  seat asks `Gpu::takeover_clear` (vote 50), which reads no fenced slot, with
+  `ls-graphical-sak-poison` for its scenario. It reaches this tree with main.
+  The verbs themselves close with #880.
 - There is no layout under 800x720 layout pixels. A display smaller than that
   is given a screen of twice or more its size (since 2026-11-11; before that it
   refused the whole seat at startup), which the frontend shows scaled down.

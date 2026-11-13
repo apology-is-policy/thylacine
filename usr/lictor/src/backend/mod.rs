@@ -23,4 +23,16 @@ pub fn diagnostic(text: &str) {
     if crate::endpoint::call(crate::endpoint::STATUS, &mut status).is_ok() && status.phase == 2 { return; }
     let _ = libthyla_rs::t_putstr(text);
 }
+/// The kernel's command line. A line that fills the buffer may have been cut
+/// inside a word, so it is read as none, and so is one that cannot be read.
+pub fn bootargs(buf: &mut [u8; 1024]) -> &[u8] {
+    use libthyla_rs::{t_close, t_open, t_read, T_OREAD, T_WALK_OPEN_FROM_ROOT};
+    // SAFETY: a path literal and the caller's buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
+    if fd < 0 { return &[]; }
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd); }
+    if n <= 0 || n as usize >= buf.len() { return &[]; }
+    &buf[..n as usize]
+}
 pub mod seat;
