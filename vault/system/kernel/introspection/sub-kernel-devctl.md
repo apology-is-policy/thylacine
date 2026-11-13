@@ -72,8 +72,9 @@ unconditionally.
 ## Contract
 
 Walk `/ctl/<leaf>`, read text. Single-level: `..` from anywhere is the apex, and
-a walk from a leaf has no meaning. Offset-aware reads over a freshly generated
-2 KiB snapshot.
+a walk from a leaf has no meaning. A read renders its leaf afresh into a 4 KiB
+buffer and answers from the caller's offset, except `procs`, which is one read
+(below).
 
 `stat_native` reports the apex as a directory and each leaf as a regular file,
 **with size 0** — deliberately. Every file is generated at read time from live
@@ -338,9 +339,7 @@ reader that needs every Proc does not read this file. It lists `/proc`, a
 directory with no such bound, and reads each `status`
 ([[sub-kernel-devproc]]); `ps`, `prowl`, diorama, halcyon and `srvfull-probe`
 do that through libthyla-rs's `procs` module ([[sub-libthyla-rs]]).
-`/ctl/9p-sessions` ends a cut render the same way, with a line of its own.
-
-`devctl.procs_rows_whole` links two Procs of its own, formats the table into
+`/ct`devctl.procs_rows_whole` links two Procs of its own, formats the table into
 every buffer size from one byte up, and compares each result's shape with the
 whole table's: every line whole, every row nine columns, the rows the whole
 table's first rows by pid, the cut line present exactly when a row is
@@ -348,20 +347,44 @@ missing, and at least one size that holds rows and the line together. It
 compares shape, not bytes, because `CPU_NS` moves between two renders.
 `tools/interactive/ps-many.exp` reads the file on a freshly booted guest and
 requires no cut line, then with seventy more Procs and requires it after a
-whole nine-column row. It reads with `cat`, which reads to end of file, and
-every read renders the file afresh: when a later rendering is longer, `cat`
-prints its last bytes after the first. Each of those ends with a cut line
-too, so after the first cut line the scenario fails on a row that no cut
-line follows and on a row followed by part of a cut line, and on nothing
-else: a line that is neither a whole row nor a cut line's end is a row's
-tail from a later rendering or another program's console output, and is
-reported as a step. The first table itself must be one rendering: the
-header, whole rows and the cut line with nothing between, and no pid twice
-(a pid twice is a first table without its line and a later one's end after
-it). What `cat` cannot show is a first rendering without its cut line when
-the second supplies exactly that line: the bytes are the same, and the
-kernel test above is what holds every size to it. Its first boot showed a
-lone `)` line after the table, and the leg as first written (the cut line
+whole nine-column row, with nothing of a later rendering after it (below).
+
+### One read (2026-11-13; operator vote 99)
+
+`/ctl/procs` answers end of file at any offset past 0, and it is rendered to
+the caller's buffer, up to `DEVCTL_READ_BUF`, so a short read holds the rows
+that fit, each whole, then the cut line. A buffer without room for the header
+and the line is refused with `ERANGE`, as getcwd refuses one shorter than the
+path: an empty answer would read as end of file, a table with no Proc. The
+refusal comes from `format_procs` rendering nothing, so it is the same bound
+the cut line keeps.
+
+Every read rendered the table afresh, and a reader that read to end of file
+joined a second rendering's tail to the first: when the second was longer,
+`cat` printed its last bytes after the cut line (7 bytes, a cut line's end, in
+both of ps-many's boots before the rule). Rows are unpadded decimals and
+`CPU_NS` moves every tick, so the length moves between any two reads. A read
+past offset 0 now renders nothing, which also takes the proc-table walk off
+every later read.
+
+A reader with a small buffer now gets fewer rows and the cut line where it
+used to get the whole table, possibly torn: Pouch stdio reads 1 KiB at a time
+and Go's `os.ReadFile` starts at 512 bytes. No first-party program opens the
+file (a search of usr/ for the path and for the leaf name, 2026-11-13, finds
+only pouch-hello's stat); it is read through `cat`, which reads 8 KiB, and
+`head`, which reads 4 KiB. A per-open snapshot for every rendered file, which
+would serve such readers whole, is its own chunk after the clipboard arc (the
+same vote).
+
+`devctl.procs_one_read` reads through `devctl_read` with two Procs of its own
+linked: the whole table in one read, end of file at offset 1 and at the
+table's middle, whole rows and the cut line for a buffer one byte short of the
+table, and `-ERANGE` for 8 bytes. Without the rule the first two read a tail,
+the third the table's first bytes cut mid-row, and the last 8 bytes.
+`ps-many.exp` fails its second leg on a whole row or a cut line's end after
+the cut line, where it used to report them: `cat`'s second read finds end of
+file. Another program's console line there is reported as a step.
+t line
 directly before the marker) read it as a table without the line.
 
 ### A cut kernel-stack table says so, and keeps its peak (2026-11-13)

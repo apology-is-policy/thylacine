@@ -208,12 +208,11 @@ stops after the last whole row and ends with this line:
 (cut: more processes than one read holds; /proc lists them all)
 ```
 
-The table is produced again for each read, so read it with one read of 4 KiB
-or more: such a read that does not end with that line holds every process the
-reader may see. A program that reads on to the end of the file, as `cat` does,
-asks a second time, and when
-the second table is longer than the first it prints that table's last few
-characters after the first one. `ps` and
+The file is one read. A read of 4 KiB or more that does not end with that line
+holds every process the reader may see. A smaller read holds the rows that fit
+and ends with the same line. A second read finds the end of the file, so `cat`
+shows one table. A read too small for the heading and that line fails with
+`ERANGE`. `ps` and
 `prowl` take their rows from `/proc`: they list the directory, which has no
 such limit, and read each process's status file, so they show every process on
 a system of any size. Their rows are read one after another. Each row describes

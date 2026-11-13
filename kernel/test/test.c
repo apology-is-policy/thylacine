@@ -1948,6 +1948,7 @@ struct test_case g_tests[] = {
     { "devctl.procs_tables_column",    test_devctl_procs_tables_column,    false, NULL },
     { "devctl.counters_gated",         test_devctl_counters_gated,         false, NULL },
     { "devctl.procs_rows_whole",       test_devctl_procs_rows_whole,       false, NULL },
+    { "devctl.procs_one_read",         test_devctl_procs_one_read,         false, NULL },
     { "devctl.cpu_sources_live",       test_devctl_cpu_sources_live,       false, NULL },
     { "devctl.read_memory_format",     test_devctl_read_memory_format,     false, NULL },
     { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },

@@ -9,13 +9,14 @@
 # asserts:
 #   - /ctl/procs has no cut line on the small system and ends with it on the
 #     large one. The pair is one variable apart: a line that is always there,
-#     or never, fails one leg. cat reads to end of file and every read renders
-#     the file afresh, so when a later rendering is longer cat also prints its
-#     last bytes: what follows the cut line must not end on a row. cat cannot
-#     tell a first rendering without its cut line from one with it when the
-#     second rendering supplies exactly that line (the bytes are the same);
-#     the kernel test devctl.procs_rows_whole holds every size to it. The small
-#     leg holds while the booted system fits one read (about sixty Procs).
+#     or never, fails one leg. The file is one read (vote 99): cat's second
+#     read, past offset 0, finds end of file, so nothing of a later rendering
+#     follows the cut line -- no whole row and no cut line's end. Without the
+#     rule that shows only when a later rendering was longer; the kernel test
+#     devctl.procs_one_read turns red without it at every run, and
+#     devctl.procs_rows_whole holds every buffer size to whole rows and the
+#     line. The small leg holds while the booted system fits one read (about
+#     sixty Procs).
 #   - every pid /proc lists both before and after a ps is in that ps. Such a
 #     Proc was alive throughout the listing (pids are never reused), and the
 #     listing owes it a row. Reading the sixty rows that fit omits the rest.
@@ -112,38 +113,26 @@ foreach {- pid} [regexp -all -inline -line {^([0-9]+) } [string map [list "\r" "
     }
     lappend seen $pid
 }
-# What cat printed after that table. Its later reads return the last bytes of
-# later renderings, and each of those ends with a cut line: a row there is
-# followed by rows and then a whole cut line, and the last such line is a cut
-# line's end (an empty line is one: the line's newline alone). A line that is
-# neither is a row's tail from a later rendering, or another program's, written
-# to the same console; it says nothing about how the table ends.
+# What cat printed after that table. Its second read is past offset 0 and finds
+# end of file, so a whole row there, or a line that ends a cut line (an empty
+# line is one: the line's newline alone), is a later rendering's tail: the read
+# past offset 0 was answered. A line that is neither is another program's,
+# written to the same console; it says nothing about how the table ends.
 set plain [string map [list "\\" ""] $cutline]
 set after_cut [string map [list "\r" ""] $after_cut]
-set last ""
-set ends 0
-set rows 0
 set others 0
 foreach line [lrange [split $after_cut "\n"] 0 end-1] {
     set at [expr {[string length $plain] - [string length $line]}]
     if {$at >= 0 && [string range $plain $at end] eq $line} {
-        if {$last eq "row" && $at != 0} {
-            lc_fail "/ctl/procs with seventy more Procs: a row after the cut line is followed by part of a cut line, `$line` (2)"
-        }
-        incr ends
-        set last cut
+        lc_fail "/ctl/procs with seventy more Procs: after the cut line, a cut line's end `$line` -- cat read a second rendering, so a read past offset 0 was answered (2)"
     } elseif {[regexp "^$row9\$" $line]} {
-        incr rows
-        set last row
+        lc_fail "/ctl/procs with seventy more Procs: after the cut line, a whole row -- cat read a second rendering, so a read past offset 0 was answered (2)"
     } else {
         incr others
         lc_step "ps-many(2): after the cut line, a line that is neither a whole row nor a cut line's end: `[string range $line 0 79]`"
     }
 }
-if {$last eq "row"} {
-    lc_fail "/ctl/procs with seventy more Procs: a row follows the cut line and no cut line follows it (2)"
-}
-lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table of [llength $seen] whole rows with the cut line (cat's read to end of file printed [string length $after_cut] more byte(s): $ends cut line end(s), $rows whole row(s), $others other line(s))"
+lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table of [llength $seen] whole rows with the cut line, and cat read nothing after it ($others other line(s) on the console)"
 
 # ---- (3) ps lists every Proc alive throughout it ----------------------------
 set before [pids_of "ls /proc | cat" $ls_row "ls1"]

@@ -1308,3 +1308,48 @@ void test_devctl_procs_rows_whole(void) {
     TEST_ASSERT(again > 0 && !sh.cut && !sh.torn && sh.rows == ref.rows,
                 "the whole table again, at full size, is whole and uncut");
 }
+
+// /ctl/procs is a one-read file (vote 99). Read through devctl_read: a read past
+// offset 0 answers end of file although the table is longer, so no second
+// rendering's tail follows the first; a buffer one byte short of the table gets
+// whole rows and the cut line, never the table's first bytes; a buffer without
+// room for the header and the cut line is refused with ERANGE, not answered
+// with nothing.
+void test_devctl_procs_one_read(void) {
+    static char buf[4096];     // devctl's own cap: a larger buffer reads no more
+    static char whole[4096];
+
+    struct Proc *own[2] = { proc_alloc(), proc_alloc() };
+    TEST_ASSERT(own[0] != NULL && own[1] != NULL, "proc_alloc for the table's own rows");
+    for (int i = 0; i < 2; i++) {
+        own[i]->state = PROC_STATE_ALIVE;
+        proc_test_link(own[i]);
+    }
+
+    struct Spoor *c = open_ctl_leaf("procs");
+    long full = c ? devctl.read(c, whole, (long)sizeof whole, 0) : -1;
+    long past = c ? devctl.read(c, buf, (long)sizeof buf, 1) : -1;
+    long late = c ? devctl.read(c, buf, (long)sizeof buf, full > 0 ? full / 2 : 1) : -1;
+    struct prw_shape ref = { 0 }, sh = { 0 };
+    if (full > 0) prw_shape_of(whole, (size_t)full, &ref);
+    long shy = (c && full > 1) ? devctl.read(c, buf, full - 1, 0) : -1;
+    if (shy > 0) prw_shape_of(buf, (size_t)shy, &sh);
+    long tiny = c ? devctl.read(c, buf, 8, 0) : 0;
+    if (c) spoor_clunk(c);
+
+    for (int i = 0; i < 2; i++) {
+        proc_test_unlink(own[i]);
+        own[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(own[i]);
+    }
+
+    TEST_ASSERT(c != NULL, "open /ctl/procs");
+    TEST_ASSERT(full > 0 && !ref.torn && !ref.cut && ref.rows >= 3,
+                "the whole table, three rows or more, in one read");
+    TEST_EXPECT_EQ(past, 0, "a read at offset 1 answers end of file");
+    TEST_EXPECT_EQ(late, 0, "a read in the table's middle answers end of file");
+    TEST_ASSERT(shy > 0 && shy < full, "a buffer one byte short is answered, shorter");
+    TEST_ASSERT(shy > 0 && !sh.torn && !sh.short_row && sh.cut && sh.rows < ref.rows,
+                "a buffer one byte short holds whole rows and the cut line");
+    TEST_EXPECT_EQ(tiny, (long)-T_E_RANGE, "a buffer without room for the header and the cut line is refused");
+}

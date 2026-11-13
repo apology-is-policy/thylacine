@@ -166,8 +166,10 @@ bool devctl_system_counters_readable(const struct Proc *reader) {
 //
 // One read holds the rows that fit the buffer, not every Proc: the walk stops at
 // the first row that does not fit (format_procs), and the table then ends with
-// PROCS_CUT_LINE, whose room is kept free for it. A reader that needs every Proc
-// lists /proc -- a directory, with no such bound -- and reads each status.
+// PROCS_CUT_LINE, whose room is kept free for it. The buffer is the reader's own,
+// up to DEVCTL_READ_BUF, and there is no second read (devctl_read). A reader that
+// needs every Proc lists /proc -- a directory, with no such bound -- and reads
+// each status.
 #define PROCS_HEADER   "PID    PPID    NAME    STATE    THREADS    PAGES    TABLES    CHILDREN    CPU_NS\n"
 #define PROCS_CUT_LINE "(cut: more processes than one read holds; /proc lists them all)\n"
 #define PROCS_CUT_LEN  (sizeof(PROCS_CUT_LINE) - 1u)
@@ -1257,8 +1259,21 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (!devctl_kernel_base_readable(reader)) return -T_E_ACCES;   // a refusal: ERRORS.md
     }
 
+    // /ctl/procs is a one-read file: past offset 0 it answers end of file, and it
+    // is rendered to the caller's buffer, so a short read holds the rows that fit,
+    // each whole, then the cut line. A second read would render the table again,
+    // and its tail after the first read's head is a table no moment ever had. A
+    // buffer without room for the header and the cut line is refused, as getcwd
+    // refuses one shorter than the path: an empty answer would read as no Procs.
+    size_t cap = DEVCTL_READ_BUF;
+    if (kind == CTL_KIND_PROCS) {
+        if (off > 0) return 0;
+        if ((size_t)n < cap) cap = (size_t)n;
+    }
+
     char content[DEVCTL_READ_BUF];
-    size_t total = leaf->fmt(reader, content, sizeof(content));
+    size_t total = leaf->fmt(reader, content, cap);
+    if (kind == CTL_KIND_PROCS && total == 0) return -T_E_RANGE;   // ERRORS.md: below the one-read minimum
 
     if ((size_t)off >= total) return 0;
     size_t avail = total - (size_t)off;
