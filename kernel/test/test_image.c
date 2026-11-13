@@ -31,6 +31,7 @@
 
 #include "test.h"
 
+#include <thylacine/addrspace.h>    // vote 118: a payer for the bypass test
 #include <thylacine/burrow.h>
 #include <thylacine/dev.h>
 #include <thylacine/image.h>
@@ -292,6 +293,39 @@ void test_image_eviction_bounds_cache(void) {
 
     TEST_EXPECT_EQ(image_cache_evict_idle_for_test(), IMAGE_CACHE_MAX, "all idle images evicted");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
+}
+
+// Round 34 F2: a cache full of LIVE images bypasses -- the image is never
+// registered and never idle-reclaimable, so it takes a payer like a private one.
+void test_image_bypass_takes_a_payer(void) {
+    (void)image_cache_evict_idle_for_test();
+    struct Burrow *held[IMAGE_CACHE_MAX];
+    int n = 0;
+    for (int i = 0; i < IMAGE_CACHE_MAX; i++) {
+        struct Burrow *b = image_lookup_or_create(mk_spoor(0x30000 + (u64)i, 1), 0, PAGE_SIZE,
+                                                  /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN,
+                                                  NULL, false);
+        if (b) held[n++] = b;            // our ref keeps each entry live, not idle
+    }
+    struct AddrSpace *as = addrspace_alloc(16);
+    struct Burrow *x = as ? image_lookup_or_create(mk_spoor(0x3F000, 1), 0, PAGE_SIZE,
+                                                   /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN,
+                                                   as, false) : NULL;
+    bool priv  = x && x->file_private;
+    bool payer = x && burrow_file_payer_for_test(x) == as;
+    bool unregistered = true;
+    for (int i = 0; i < n; i++) if (held[i] == x) unregistered = false;
+    if (x) burrow_unref(x);              // the bypass's only ref: it frees here
+    for (int i = 0; i < n; i++) burrow_unref(held[i]);
+    (void)image_cache_evict_idle_for_test();
+    if (as) addrspace_unref(as);
+
+    TEST_EXPECT_EQ(n, IMAGE_CACHE_MAX, "the cache holds a full set of live images");
+    TEST_ASSERT(as != NULL, "a payer space");
+    TEST_ASSERT(x != NULL, "one more versioned image is served");
+    TEST_ASSERT(unregistered, "by the bypass, not a cached entry");
+    TEST_ASSERT(priv, "the bypass image is private");
+    TEST_ASSERT(payer, "and its payer is the space it was asked for");
 }
 
 void test_image_bad_arg_retains_spoor(void) {

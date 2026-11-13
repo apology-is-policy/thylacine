@@ -2264,6 +2264,52 @@ void test_demand_page_file_private_read_holds_no_charge(void) {
     TEST_EXPECT_EQ(drc, 0, "detach");
 }
 
+// Round 34 F6: an exempt payer's cap still binds a holder that is not exempt:
+// the waiver needs both verdicts.
+void test_demand_page_file_private_exempt_payer_binds_holder(void) {
+    struct Proc *p = make_proc();
+    struct Proc *q = make_proc();
+    if (!p || !q) { drop_proc(q); drop_proc(p); TEST_ASSERT(false, "proc_alloc failed"); }
+    g_rev_read_fail = false;
+    g_rev_read_eof  = -1;
+    struct Spoor *s = spoor_alloc(&g_rev_private_dev);
+    struct Burrow *v = s ? image_lookup_or_create(s, 0, V118_PAGES * ONE_PAGE, /*exec=*/false,
+                                                  BURROW_FILE_LIMIT_UNKNOWN, p->as,
+                                                  /*payer_exempt=*/true) : NULL;
+    if (!v) { if (s) spoor_clunk(s); drop_proc(q); drop_proc(p); TEST_ASSERT(false, "a private image"); }
+    int mrc = burrow_map(p, v, USER_VA, V118_PAGES * ONE_PAGE, VMA_PROT_READ);
+    burrow_unref(v);
+
+    struct AddrSpace *child = addrspace_clone(p->as, false);
+    struct AddrSpace *qown  = q->as;
+    enum fault_result r = FAULT_UNHANDLED_USER;
+    u32 res = 0, rec = 0;
+    bool q_exempt = proc_resource_exempt(q);
+    if (child) {
+        const u32 budget0 = p->as->page_budget;
+        p->as->page_budget = p->as->page_count + 2u;  // the exempt payer: two pages under its cap
+        q->as = child;
+        r   = v118_fault(q, 0);                     // the holder is not exempt
+        res = burrow_image_resident_count(v);
+        rec = burrow_file_charge_pages_for_test(v);
+        q->as = qown;
+        p->as->page_budget = budget0;
+        addrspace_unref(child);
+    }
+    int drc = v118_detach(p, 0, V118_PAGES);
+    drop_proc(q);
+    drop_proc(p);
+    (void)image_cache_evict_idle_for_test();
+
+    TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_ASSERT(child != NULL, "the fork");
+    TEST_ASSERT(!q_exempt, "the holder is not exempt");
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the holder's fault is served");
+    TEST_EXPECT_EQ(res, 2u, "its read-ahead is held to the payer's cap: two pages, not 64");
+    TEST_EXPECT_EQ(rec, 2u, "and the record holds them");
+    TEST_EXPECT_EQ(drc, 0, "detach");
+}
+
 // A fork's child is not the payer: its mints are charged to the payer, its
 // leaves to itself.
 void test_demand_page_file_private_holder_pays_leaves(void) {
