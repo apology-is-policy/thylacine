@@ -1553,18 +1553,22 @@ fn mode_can_be_made(w: u32, h: u32) -> bool {
 }
 
 /// The stall lever's display half (`thylacine.test-latch-dead`): a display
-/// event for a host of one of these heights has one bind retire past its
-/// deadline -- the first bind of the mode change it leads to, or the bind
-/// of the switch to direct that follows the change.
+/// event for a host of one of these heights has one command retire past its
+/// deadline -- the first bind of the mode change it leads to, the bind of
+/// the switch to direct that follows the change, or the EDID query the
+/// change ends with.
 #[cfg(feature = "test-mode")]
 const TEST_STALL_MODE_H: u32 = 797;
 #[cfg(feature = "test-mode")]
 const TEST_STALL_SWITCH_H: u32 = 787;
 #[cfg(feature = "test-mode")]
+const TEST_STALL_EDID_H: u32 = 1277;
+#[cfg(feature = "test-mode")]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum StallBind {
+enum StallStep {
     Mode,
     Switch,
+    Edid,
 }
 
 /// What became of an asking of the host's display.
@@ -1818,11 +1822,11 @@ pub struct Comp {
     test_stall_ctx_aimed: bool,
     #[cfg(feature = "test-mode")]
     test_stall_conv_aimed: bool,
-    /// The lever's display half: which bind the next shot is for, and the
+    /// The lever's display half: which step the next shot is for, and the
     /// host size it was aimed by (one shot a size, so the asking that
     /// follows the stall is not stalled too).
     #[cfg(feature = "test-mode")]
-    test_stall_bind: Option<StallBind>,
+    test_stall_step: Option<StallStep>,
     #[cfg(feature = "test-mode")]
     test_stall_host: (u32, u32),
     /// A health copy met a GPU stall and no copy has verified since.
@@ -2740,7 +2744,7 @@ impl Comp {
             #[cfg(feature = "test-mode")]
             test_stall_ctx_aimed: false,
             #[cfg(feature = "test-mode")]
-            test_stall_bind: None,
+            test_stall_step: None,
             #[cfg(feature = "test-mode")]
             test_stall_host: (0, 0),
             #[cfg(feature = "test-mode")]
@@ -6283,29 +6287,31 @@ impl Comp {
     /// size.
     #[cfg(feature = "test-mode")]
     fn test_stall_aim(&mut self, host_w: u32, host_h: u32) {
-        // A shot aimed for the display that was, which found no bind.
-        self.test_stall_bind = None;
+        // A shot aimed for the display that was, which found no step.
+        self.test_stall_step = None;
         if !self.test_latch_armed || self.test_stall_host == (host_w, host_h) {
             return;
         }
-        self.test_stall_bind = match host_h {
-            TEST_STALL_MODE_H => Some(StallBind::Mode),
-            TEST_STALL_SWITCH_H => Some(StallBind::Switch),
+        self.test_stall_step = match host_h {
+            TEST_STALL_MODE_H => Some(StallStep::Mode),
+            TEST_STALL_SWITCH_H => Some(StallStep::Switch),
+            TEST_STALL_EDID_H => Some(StallStep::Edid),
             _ => return,
         };
         self.test_stall_host = (host_w, host_h);
     }
 
-    /// The shot, called just before the bind it is for.
+    /// The shot, called just before the step it is for.
     #[cfg(feature = "test-mode")]
-    fn test_stall_shot(&mut self, which: StallBind) {
-        if self.test_stall_bind != Some(which) {
+    fn test_stall_shot(&mut self, which: StallStep) {
+        if self.test_stall_step != Some(which) {
             return;
         }
-        self.test_stall_bind = None;
+        self.test_stall_step = None;
         let what = match which {
-            StallBind::Mode => "the mode's bind",
-            StallBind::Switch => "the bind of the switch to direct",
+            StallStep::Mode => "the mode's bind",
+            StallStep::Switch => "the bind of the switch to direct",
+            StallStep::Edid => "the display's EDID",
         };
         if self.gpu.test_stall_next() {
             say!("tapestryd: test-latch-dead: {} retires past its deadline", what);
@@ -6344,10 +6350,10 @@ impl Comp {
             self.test_stall_aim(host_w, host_h);
             let changed = self.change_mode(w, h);
             // A change that reached no bind spends no shot on a later one,
-            // and one that failed is followed by no switch.
+            // and one that failed is followed by no switch and no EDID.
             #[cfg(feature = "test-mode")]
-            if changed.is_err() || self.test_stall_bind == Some(StallBind::Mode) {
-                self.test_stall_bind = None;
+            if changed.is_err() || self.test_stall_step == Some(StallStep::Mode) {
+                self.test_stall_step = None;
             }
             if let Err(e) = changed {
                 // The mode that stood is shown on the display that is now,
@@ -6390,6 +6396,8 @@ impl Comp {
         // The EDID is asked with it: a change of display is the one time
         // it changes, and it can change under a mode that does not. Not
         // answered, the scale stands until it is.
+        #[cfg(feature = "test-mode")]
+        self.test_stall_shot(StallStep::Edid);
         if !self.read_edid() {
             return Followed::Unfinished(E_IO);
         }
@@ -6613,7 +6621,7 @@ impl Comp {
         // old screen + geometry byte-for-byte intact.
         if self.scanout == Scanout::Composed {
             #[cfg(feature = "test-mode")]
-            self.test_stall_shot(StallBind::Mode);
+            self.test_stall_shot(StallStep::Mode);
             if self.gpu.set_scanout(new.res, w, h).is_err() {
                 say!("tapestryd: mode rebind failed; old geometry retained");
                 self.free_screen(new);
@@ -8611,7 +8619,7 @@ impl Comp {
                     // being handed exists; printing "composed" before it, as
                     // this line once did, reported an intent as an event.
                     #[cfg(feature = "test-mode")]
-                    self.test_stall_shot(StallBind::Mode);
+                    self.test_stall_shot(StallStep::Mode);
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
                         say!(
@@ -20466,7 +20474,7 @@ impl Conn {
                     }
                 }
                 #[cfg(feature = "test-mode")]
-                comp.test_stall_shot(StallBind::Switch);
+                comp.test_stall_shot(StallStep::Switch);
                 if comp.gpu.set_scanout(res, w, h).is_ok() {
                     // Verdict-gated (round-7 F3 -- the round-4 F4 shape at
                     // its THIRD site; the img arms were fixed, this one

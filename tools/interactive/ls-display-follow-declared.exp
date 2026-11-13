@@ -34,9 +34,10 @@
 #                leg knows that the following did resume.
 #
 # NOT asserted: the console's cells and its redraw (ls-display-follow's); the
-# `scale auto` verb, which no program in the tree sends; a follow, or a read
-# under a pin, whose EDID is not answered; a host that shows a mode smaller
-# than its rect a pixel to a pixel and still reports the rect.
+# `scale auto` verb (ls-halcyon-scale-session's); a follow whose EDID is not
+# answered (ls-display-follow-edid's), and a read under a pin whose EDID is
+# not; a host that shows a mode smaller than its rect a pixel to a pixel and
+# still reports the rect.
 #
 # The panel writes the mode it applied to this pool's /lib/aurora/config. From
 # the leg by size to the end of the leg that asks for auto, a failure of a

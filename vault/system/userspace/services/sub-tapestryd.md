@@ -218,7 +218,17 @@ two sizes and not the millimetres. Until the second audit round on this (G5)
 it waited for both, and a host that doubled under a mode that stayed, with the
 EDID unanswered, left the session at twice its size. It still waits for the
 bind: a read whose bind is not taken leaves the scale that stood until an
-asking succeeds.
+asking succeeds. `tools/interactive/ls-display-follow-edid.exp` drives it: the
+gate image under a declared 200 for a display of 3456x2160, the host becoming
+2000x1277, and the stall lever's third aim (below) on the EDID query the
+change ends with. Read in the order said, the scale goes 100 -> 200 first,
+then the lever says the query retires past its deadline, the event is said
+not finished and to be asked again, and the second asking is followed at 200.
+With the scale derived only after the answer the lever's line comes first,
+and the scenario fails there. Against a scripted guest it reads as wanted in
+15 cases, 13 of them faults. NOT YET RUN IN A GUEST: the order of the
+compositor's lines is taken from a real follow under a declaration and a real
+stall of a bind, and no run has had both.
 
 Tests. The rule, on a host (`own_pct`, `carried_pct` and `nearest_pct`,
 [[sub-libhalcyon]]). The boot's use of it and `derive_scale`'s, in a guest:
@@ -244,9 +254,19 @@ resumed. From the leg by size to the end of the leg that asks for auto, a
 failure of a leg's own check asks the panel for auto, waits for that line and
 says in its report whether the pool is left pinned, because the panel writes
 the mode to the pool's `/lib/aurora/config`; a line that must not be said
-fails at once and says the pool is left pinned. Run by no test: the `scale
-auto` verb, which no program in the tree sends; an EDID that is not answered,
-in a follow or under a pin; an event that leads to no mode.
+fails at once and says the pool is left pinned. Not run by this scenario:
+the `scale auto` verb, which a session sends at its start
+(`ls-halcyon-scale-session.exp`, [[sub-halcyond]]); a follow whose EDID is not
+answered (`ls-display-follow-edid.exp`). Run by no test: a read under a pin
+whose EDID is not answered; an event that leads to no mode.
+
+`follow_expect` in `tools/interactive/display-follow.tcl`, which these
+scenarios share, waits with one pattern that is either the line wanted or the
+line for a follow put off by a stall, and takes the one said first. As two
+patterns the stalled line was taken wherever it stood in what expect had read,
+and a line waited for and said before it went with it: a timeout where the
+line had been said. `ls-display-follow-edid`'s scripted guest found it, by a
+case that was red before the change and is green after.
 
 **When a change is followed.** [[sub-lictor]] counts the device's display
 events and every reply of the broker carries the count; `Gpu::display_events`
@@ -495,8 +515,9 @@ late` for a bind of the screen made again after one that was not taken (by the
 pass, at a change's first step, or by the follow after its change), and
 `tapestryd: scanout direct N is
 not known to be scanned; its client is asked to draw`; under the stall lever,
-`tapestryd: test-latch-dead: the mode's bind retires past its deadline` and
-`... the bind of the switch to direct retires past its deadline`; and from the
+`tapestryd: test-latch-dead: the mode's bind retires past its deadline`,
+`... the bind of the switch to direct retires past its deadline` and `... the
+display's EDID retires past its deadline`; and from the
 test of a size,
 `tapestryd: mode WxH refused -- screen weave N unallocatable (rc)` and the
 same with `surface weave`.
@@ -539,8 +560,11 @@ pixels high stalls the bind of its mode's new screen (the change's own bind
 from the composed state, the bind on entering it from the direct state; a bind
 that was owed before the change takes no shot), one for a host 787 high stalls
 the bind of the next 2D switch to direct, which is the one that follows the
-change. A shot is not kept for another display: the next aim clears one that
-found no bind, and so does a change that fails. Its legs:
+change, and one for a host 1277 high stalls the EDID query the followed change
+ends with (`StallStep::Edid`, the shot taken in `display_read` after a
+declared scale is derived; `ls-display-follow-edid.exp`'s). A shot is not kept
+for another display: the next aim clears one that found no step, and so does a
+change that fails. Its legs:
 
 - A, from the direct state: the bind on entering the composed state is not
   answered. Wanted, in order: `BIND FAILED`, `mode WxH is set; the display is

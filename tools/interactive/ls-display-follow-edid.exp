@@ -1,0 +1,209 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-display-follow-edid.exp -- a declared scale does not
+# wait for an EDID that is not answered (HALCYON-SCALE.md section 3;
+# AURORA-CONFIG.md section 3.4).
+#
+# A followed change ends by asking the display's EDID, since a change of
+# display is the one time it changes. While the platform declares a scale the
+# EDID decides nothing: the declaration is carried to the mode by the mode's
+# size over the display's, and both are known once the mode's screen is
+# bound. So the compositor derives the scale first and asks the EDID after
+# it. Derived only after the answer, a display whose device stalls on that
+# one query is drawn at the scale of the mode before it until the event is
+# asked again.
+#
+# One boot of the gate image (`tools/build.sh kernel --config ci`), the
+# platform declaring 200 percent for a display of 3456x2160, with the stall
+# lever (THYLACINE_TEST_LATCH_DEAD=1, GPU-DESIGN.md 4.5.15: the next
+# synchronous command is executed and then reported as past its deadline),
+# aimed by the host's size: a display event for a host 1277 pixels high has
+# the EDID query its change ends with stalled.
+#
+#   the boot:    the first mode is half the display, and the scale is 100.
+#   the follow:  the host becomes 2000x1277, which can be a mode. The lines
+#                are read in the order said: the scale goes 100 -> 200, THEN
+#                the lever says the EDID's query retires past its deadline,
+#                the event is said not finished and to be asked again, and
+#                the second asking is followed at 200.
+#
+# The four are read with one pattern that is any of them, which matches the
+# one said first; patterns in a list would be taken in the order listed
+# whatever the order said. The lever's line and the unfinished event are the
+# proof that the EDID was not answered: a run in which it was answered reads
+# nothing this scenario is for, and fails.
+#
+# NOT reached: a display read under a pinned mode whose EDID is not answered
+# (the lever is aimed by a mode change), and a boot with no declaration,
+# where the scale does wait for the EDID.
+#
+# HVF like its ls-gfx siblings.
+
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_GPU_RES) 3456x2160
+set ::env(THYLACINE_SCALE) 200
+catch {unset ::env(THYLACINE_HIDPI)}
+set ::env(THYLACINE_VNC_SOCKET) /tmp/ls-display-follow-edid-[pid].sock
+set ::env(THYLACINE_DISPLAY) vnc-unix
+set ::env(THYLACINE_TEST_LATCH_DEAD) 1
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_require_image {shell}
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set ppm /tmp/ls-display-follow-edid-[pid].ppm
+
+source [file join [file dirname [info script]] display-follow.tcl]
+
+# The next of the four lines this scenario orders, whichever is said first.
+proc next_of {what} {
+    set ::what $what
+    set line ""
+    lc_within 60 {
+        -re {(tapestryd: scale \d+ -> \d+ \([a-z-]+\)|tapestryd: test-latch-dead: the display's EDID retires past its deadline|tapestryd: display event \d+: the mode is \d+x\d+, not finished[^\r\n]*|tapestryd: display event \d+: followed, [^\r\n]*)[\r\n]} {
+            set line $expect_out(1,string)
+        }
+        timeout {
+            lc_fail "60s without $what"
+        }
+        eof {
+            lc_fail "qemu exited waiting for $what"
+        }
+    }
+    return $line
+}
+
+# ---------- the boot: half the display, at half the declaration ----------
+lc_boot
+set what "the boot"
+expect_before {
+    -re {tapestryd: [^\r\n]*t_dma_create_weave\((\d+)\) failed -?\d+} {
+        lc_fail "a surface or a screen could not be allocated during '$::what': $expect_out(0,string)"
+    }
+    -re {tapestryd: mode (\d+x\d+) refused -- (screen|surface) weave} {
+        lc_fail "$expect_out(1,string) could not be allocated ($expect_out(2,string)) during '$::what'"
+    }
+    -re {tapestryd: no mode for a display of (\d+x\d+);} {
+        lc_fail "no mode was found for a host of $expect_out(1,string) during '$::what'"
+    }
+    -re {tapestryd: display event \d+: the mode is pinned and stands} {
+        lc_fail "the mode is pinned during '$::what': this pool's /lib/aurora/config holds a fixed mode"
+    }
+    -re {tapestryd: test-latch-dead: [^\r\n]* stall REFUSED by the broker} {
+        lc_fail "the broker had no stall shot left during '$::what'"
+    }
+    -re {lictor: stall shot LOST[^\r\n]*} {
+        lc_fail "during '$::what': $expect_out(0,string)"
+    }
+    -re {lictor: gpu synchronous command missed its \d+ ms deadline[^\r\n]*} {
+        lc_fail "a stall nobody aimed, during '$::what': $expect_out(0,string)"
+    }
+    -re {tapestryd: display event \d+: not followed[^\r\n]*[\r\n]} {
+        lc_fail "during '$::what': [string trim $expect_out(0,string)]"
+    }
+    -re {EXTINCTION:} {
+        lc_extinction_fail "extinction during '$::what'"
+    }
+}
+set timeout $lc_boot_timeout
+set what "the boot's first mode"
+expect {
+    -re {tapestryd: mode 1728x1080 for a display of 3456x2160} {
+        lc_step "saw: the first mode is fitted"
+    }
+    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} {
+        lc_fail "the compositor serves $expect_out(1,string) with no fitted mode said before it"
+    }
+    timeout {
+        lc_fail "the boot did not get to a fitted mode"
+    }
+    eof {
+        lc_fail "qemu exited during boot"
+    }
+}
+set what "the boot's scale"
+set said ""
+expect {
+    -re {tapestryd: scale (\d+) \(([a-z]+)\)} {
+        set said "$expect_out(1,string) ($expect_out(2,string))"
+    }
+    -re {tapestryd: serving /srv/tapestry \+ /srv/warp \((\d+x\d+)\)} {
+        lc_fail "the compositor serves $expect_out(1,string) with no scale said before it"
+    }
+    timeout {
+        lc_fail "the compositor never said its scale"
+    }
+    eof {
+        lc_fail "qemu exited during boot"
+    }
+}
+if {$said ne "100 (declared)"} {
+    lc_fail "the boot's scale is $said, want 100 (declared): the 200 declared is the display's, and the first mode is half of it"
+}
+set what "the login"
+lc_login michael correct-horse-battery-staple-v1
+# The arm is asked of the compositor's state, not of its boot line, which can
+# land on either side of the login prompt.
+set what "reading the lever's state"
+lc_send "cat /dev/tapestry/ctl; echo ctl-read"
+lc_within 30 {
+    -re {display 1728 1080[^\n]*\n(.|\n)*test-latch-dead armed(.|\n)*\nctl-read} {
+        lc_step "the compositor is at 1728x1080 with the lever armed"
+    }
+    -re {\nctl-read} {
+        lc_fail "the compositor's ctl carries no display line of 1728 by 1080 or no armed lever"
+    }
+    timeout {
+        lc_fail "the compositor's ctl never answered (30s)"
+    }
+    eof {
+        lc_fail "qemu exited while reading the compositor's ctl"
+    }
+}
+wait_dims "1728 1080" "the boot's fitted mode"
+lc_pass "follow-edid: half a display of 3456x2160 boots at 100 of the 200 declared, with the stall lever armed"
+
+# ---------- the follow: the scale first, the EDID after it ----------
+tell 2000x1277
+follow_expect {tapestryd: display event \d+: asking the host} "the event is taken up"
+follow_expect [up 2000x1277] "a size that can be a mode is the mode"
+set shot "tapestryd: test-latch-dead: the display's EDID retires past its deadline"
+
+set line [next_of "the scale after the host became 2000x1277"]
+if {$line eq $shot} {
+    lc_fail "the EDID's query was reached before the scale changed: a declared scale is carried by the mode's size over the display's and does not wait for the EDID"
+} elseif {[string match "*not finished*" $line]} {
+    lc_fail "the event was said not finished before the scale changed and before the EDID was asked ('$line'): the mode's screen was not bound, which this scenario does not reach"
+} elseif {[string match "*: followed, *" $line]} {
+    lc_fail "the event was followed with no change of scale ('$line'), want 100 -> 200 (mode)"
+} elseif {$line ne "tapestryd: scale 100 -> 200 (mode)"} {
+    lc_fail "read '$line' where 'tapestryd: scale 100 -> 200 (mode)' was due"
+}
+lc_pass "follow-edid: the declaration was carried to 2000x1277 before the EDID was asked (100 -> 200)"
+
+set line [next_of "the lever's line for the EDID's query"]
+if {[string match "*: followed, *" $line]} {
+    lc_fail "the EDID was answered and the event followed ('$line'): the lever did not fire, and this run read nothing about an EDID that is not answered"
+} elseif {$line ne $shot} {
+    lc_fail "read '$line' where the lever's line for the EDID's query was due"
+}
+set line [next_of "the event said not finished"]
+if {![regexp {^tapestryd: display event \d+: the mode is 2000x1277, not finished \(errno \d+\), to be asked again$} $line]} {
+    lc_fail "read '$line' where the event of 2000x1277 said not finished and to be asked again was due"
+}
+lc_pass "follow-edid: the EDID's query was not answered, and the event is to be asked again"
+
+set line [next_of "the second asking"]
+if {![regexp {^tapestryd: display event \d+: followed, 2000x1277 at 200%$} $line]} {
+    lc_fail "read '$line' where the event followed at 2000x1277 and 200% was due"
+}
+wait_dims "2000 1277" "followed to 2000x1277"
+lc_pass "follow-edid: the second asking read the EDID and the event is followed at 200"
+
+file delete -force $ppm
+set what "the shutdown"
+lc_quit
+file delete -force $::env(THYLACINE_VNC_SOCKET)
+lc_pass "ls-display-follow-edid: a declared scale was carried to the mode before an EDID that was not answered, and the event was followed when it was"
+exit 0

@@ -1,7 +1,7 @@
 # tools/interactive/display-follow.tcl -- what the scenarios about a display
 # that follows its host share (ls-display-follow.exp, ls-display-stall.exp,
-# ls-display-follow-declared.exp, ls-graphical-sak-follow.exp,
-# ls-graphical-sak-unmade.exp).
+# ls-display-follow-declared.exp, ls-display-follow-edid.exp,
+# ls-graphical-sak-follow.exp, ls-graphical-sak-unmade.exp).
 #
 # Not a scenario: tools/test-interactive.sh runs every *.exp in this directory,
 # and this is not one. tools/check-expect-forms.py reads it with them. Sourced
@@ -114,20 +114,34 @@ proc wait_redraw {label} {
     lc_fail "the scanout's picture did not change after a command was typed ($label): the device shows a screen nothing is drawn into"
 }
 # Wait for a line of the compositor's. A follow that is put off because the
-# device is stalled before it is asked is noted and waited out.
+# device is stalled before it is asked is noted and waited out. One pattern
+# that is either line, which matches the one said first: as two patterns the
+# stalled line would be taken wherever it stood in what was read, and the
+# line waited for, said before it, would go with it.
 proc follow_expect {re what} {
     global timeout
     set ::what $what
-    set timeout 30
-    expect {
-        -re {tapestryd: display event \d+: the device is stalled; to be asked when it answers} {
-            lc_step "note: the device was stalled when '$what' was due; waited for"
-            exp_continue
+    set stalled {tapestryd: display event \d+: the device is stalled; to be asked when it answers}
+    while {1} {
+        set got ""
+        set timeout 30
+        expect {
+            -re "($stalled|$re)" {
+                set got $expect_out(1,string)
+            }
+            timeout {
+                lc_fail "timeout (30s) waiting for \[$re\] during '$what'"
+            }
+            eof {
+                lc_fail "qemu exited during '$what'"
+            }
         }
-        -re $re { lc_step "saw: $what" }
-        timeout { lc_fail "timeout (30s) waiting for \[$re\] during '$what'" }
-        eof     { lc_fail "qemu exited during '$what'" }
+        if {![regexp -- $stalled $got]} {
+            break
+        }
+        lc_step "note: the device was stalled when '$what' was due; waited for"
     }
+    lc_step "saw: $what"
 }
 # The compositor's lines for a change: begun (said before it, with the state
 # the scanout is in then), up (said after it), and followed (said last, once
