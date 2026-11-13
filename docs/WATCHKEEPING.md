@@ -41,7 +41,7 @@ it:
 | Part | What it does | Concrete implementation |
 |---|---|---|
 | **Standing orders** | the behavioural contract the agent loads every session: what autonomy covers, what must be escalated, what a checkpoint is, that ending a turn is a decision, that the handoff is always already written | `CLAUDE.md` sections + a small set of memory files |
-| **The watch instruments** | hooks that measure the context budget, ask "is stopping a decision?", and re-inject intent after a compaction | `~/.claude/ctx-hook.sh` (PostToolUse), `tools/stop-hook.sh` (Stop), `~/.claude/resume-note.py` (SessionStart) |
+| **The watch instruments** | hooks that measure the context budget and re-inject intent after a compaction (a Stop hook that asked "is stopping a decision?" ran 2026-08-16 to 2026-11-13, §4.7) | `~/.claude/ctx-hook.sh` (PostToolUse), `~/.claude/resume-note.py` (SessionStart) |
 | **The change of watch** | governed self-compaction: prove the tree is clean and progress was made, write a one-shot resume note, type `/compact` into your own pane, and have a detached watcher press Enter on the far side | `tools/thyla-selfcompact.sh` + `tools/thyla-nudge-watch.sh`, tmux |
 | **The bridge telephone** | a floor-based channel between agents: calls, notes that cannot carry a decision, disputes settled by naming a measurement, presence, a human seat no agent can forge | `yip` (Go, stdlib-only; MCP server + CLI + hooks + a switchboard TUI) |
 | **The engine-room telegraph** | leases on shared machines — testimony instead of measurement, wall-clock expiry, no licence to kill; a waiter whose turn has ended is woken when its lease comes | `yip hold / release / steal / resources` + `tools/thyla-wake.sh`, tmux |
@@ -144,7 +144,9 @@ stop the run and go to the human. (Standing orders §"Autonomy + escalation".)
 summary belongs to *stopping* — the budget line, an escalation item, out of
 moves, or the user asking. A checkpoint that is run through gets three lines
 and the next tool call. **The tell** that you are handing back: you are
-writing a `Key` table or an `Ahead` line. Made structural by the Stop hook.
+writing a `Key` table or an `Ahead` line. Made structural by the Stop hook
+from 2026-08-16 until the operator retired it on 2026-11-13 (§4.7); a standing
+order alone since.
 
 **P3. A checkpoint is not a stopping point; the budget line is the signal.**
 Stopping early is not free — a fresh context re-derives subsystem knowledge
@@ -159,8 +161,8 @@ moment. A compaction is only free when the handoff is already current; the
 self-compaction script refuses on a dirty tree for exactly this reason.
 
 **P5. Hooks ask; they do not veto. And they fail open.** Only the model can
-tell an earned yield from an unearned one, so the Stop hook blocks *once* with
-a question and lists the legitimate exits. Every error path in every hook
+tell an earned yield from an unearned one, so the Stop hook (retired
+2026-11-13, §4.7) blocked *once* with a question and listed the legitimate exits. Every error path in every hook
 exits 0: a hook that fails closed can trap a session in a loop it cannot talk
 its way out of, which is worse than any missed nudge.
 
@@ -267,8 +269,7 @@ their fix is wrong — the finding survives independently.
  |                                                                                                     |
  |  on EVERY tool call (PostToolUse):  ctx-hook  -- silent below the checkpoint line                   |
  |                                     yip hook  -- heartbeat; "[yip] main spoke on 0021, floor yours" |
- |  on every attempt to end the turn:  Stop hook -- "is ending the turn a DECISION? (1-4)"  asks once  |
- |                                     yip hook  -- blocks while you owe the peer a reply              |
+ |  on every attempt to end the turn:  yip hook  -- blocks while you owe the peer a reply              |
  |                                                                                                     |
  |  ... 600k CHECKPOINT WINDOW (ctx-hook, once per crossing) ------------------------------------------+---+
  +-----------------------------------------------------------------------------------------------------+   |
@@ -330,7 +331,7 @@ wrote it, because that session never loaded it).
 | Whole-system stewardship | there is no "my chunk"; a surfaced defect preempts; encounter a bug → enqueue a bug, before anything else |
 
 **How it was proven.** Behaviourally, twice, by failing (field report §2) —
-which is why the Stop hook exists. The stewardship and coordination rules each
+which is why the Stop hook was built (retired 2026-11-13, §4.7). The stewardship and coordination rules each
 carry a worked failure in the text itself, on purpose: a rule with its
 specimen attached is one a future reader can re-derive.
 
@@ -561,8 +562,8 @@ its own background tasks — three times in one day):
   like the operator asking for something, and is worse than a missed wake.
 
 The nudge text is tagged `[auto-nudge]` because it lands in the transcript
-looking like the operator speaking, and it is not; the Stop hook (§4.7)
-excludes it from "the user spoke".
+looking like the operator speaking, and it is not; the Stop hook (§4.7, now
+retired) excluded it from "the user spoke".
 
 **Proven.** Both stems discriminate; refuses without a pane; the bound exits 1
 and sends nothing; the send path proven end to end against a runtime-random
@@ -573,7 +574,12 @@ died instantly on `setsid` (absent on macOS) — caught only by the second leg,
 in the ledger, so the residual risk the commit named ("neither marker has been
 observed in a real pane") is retired.
 
-### 4.7 The Stop hook — "is ending the turn a decision?"
+### 4.7 The Stop hook — "is ending the turn a decision?" (retired)
+
+**Retired 2026-11-13.** The operator disabled it globally as obsolete, built
+for older models, and `tools/stop-hook.sh` was deleted. Nothing enforces the
+question now; the hand-back skill keeps it as a rule the model applies itself.
+The rest of this section is the record of what the hook did and why.
 
 **Why.** The 600k rule was behavioural only, and it failed twice. `CLAUDE.md`
 itself named the mechanism that would make it structural — a Stop hook —
@@ -1016,8 +1022,7 @@ the machine and unversioned today, which the field report flags). Wire them:
 {
   "hooks": {
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "~/.claude/resume-note.py" }] }],
-    "PostToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.claude/ctx-hook.sh" }] }],
-    "Stop":         [{ "hooks": [{ "type": "command", "command": "<repo>/tools/stop-hook.sh" }] }]
+    "PostToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.claude/ctx-hook.sh" }] }]
   }
 }
 ```
@@ -1076,7 +1081,7 @@ reasoning.
 | resume-note | arm a slot by hand (fresh `.note` → `.pending` + `.meta`), start a session: header names head/reason; slot deleted; `consumed` row | fresh transcript, no slot: nothing emitted |
 | selfcompact `--check` | first run allows; static HEAD twice → BELAY rc 3; HEAD moved resets | dirty tracked change → REFUSED; not in tmux → REFUSED; untracked-only → allowed (the control that must not refuse) |
 | nudge-watch | runtime-random marker rendered in a scratch pane: fires within ~2 s, ledger row | marker absent: silent to the bound, `nudge-timeout`, **and the process was alive the whole time** |
-| stop-hook | a transcript ≥ floor with ≥ 6 assistant turns and no genuine user turn → block JSON; with tool-results and notifications interleaved → still blocks; **and the second stop of a continuation after ≥ 6 further turns → blocks again** (R12) | below floor / above ceiling / few turns → exit 0 silently; the immediate re-stop after an answer (few turns since the block record) → silent; a "Stop hook feedback" record or a textless user record does NOT reset the user counter |
+| stop-hook (retired 2026-11-13) | a transcript ≥ floor with ≥ 6 assistant turns and no genuine user turn → block JSON; with tool-results and notifications interleaved → still blocks; **and the second stop of a continuation after ≥ 6 further turns → blocks again** (R12) | below floor / above ceiling / few turns → exit 0 silently; the immediate re-stop after an answer (few turns since the block record) → silent; a "Stop hook feedback" record or a textless user record does NOT reset the user counter |
 | yip | `make test` (Go tests + e2e over an isolated line); `yip doctor` in each checkout; from each checkout `yip presence` shows `(you)` on the *right* member | an uninstalled checkout attaches to a peer — the impersonation trap |
 | leases | two shells `hold` the same resource: exactly one HELD, the other WAITING #1; `release` resolves it; `steal` refused while time remains | `go test -race` — the 24-goroutine exclusivity test |
 
@@ -1120,7 +1125,7 @@ Numbers from the running system as of 2026-08-17; every one has a source.
 |---|---|
 | Runs cross context boundaries unattended | ledger: two full automatic cycles (`allow` → `nudge-sent` 4–11 s → `consumed` 90–120 s) on 2026-08-16 for main; journal 2026-08-16 opens "Resumed from a self-compaction at the 600k checkpoint. The nudge fix worked on its first live test" |
 | Compaction volume the human no longer hand-pastes | 163 boundaries in main's live transcript, 123 in aux's, 58 in the vault's (`isCompactSummary` records) — each was a manual `/compact` + paste before the note hook, and is a manual `/compact` still on the tracks without the self-compaction pair |
-| The Stop hook catches unearned yields and yields to earned ones | fired at 132k/20 turns this session; answered "2"; no repeat |
+| The Stop hook (retired 2026-11-13) catches unearned yields and yields to earned ones | fired at 132k/20 turns this session; answered "2"; no repeat |
 | Cross-track review finds what one track cannot | field report §3: three files one sweep could not see; a stale-doc line refuted by measurement (5 scenarios/76 min/4 burned retries contended vs 8/10 min/0 quiet); every cross-track finding right about the defect (and wrong about the fix — P15) |
 | The channel carries what a human could not | 22 calls, 149 turns, 25 notes, ~618 KB of turn text since 2026-08-04; the largest single merge instruction ~14 KB |
 | Serialization pays in evidence, not just wall clock | after standing down: 33/35, 0 fail, 0 retries burned vs 4 burned contended — a burned retry cannot distinguish "host was busy" from "intermittently broken" |
@@ -1325,7 +1330,7 @@ hazard and asserts it away is what keeps the hazard unexamined.
 *Files referenced (Thylacine main worktree unless noted): `CLAUDE.md`
 (§"Autonomy + escalation", "The checkpoint contract", "A checkpoint is not a
 stopping point", "Operational summary patterns"), `docs/JOURNAL.md`,
-`docs/AUTONOMY-FIELD-REPORT.md`, `tools/stop-hook.sh`,
+`docs/AUTONOMY-FIELD-REPORT.md`, `tools/stop-hook.sh` (deleted 2026-11-13),
 `tools/thyla-selfcompact.sh`, `tools/thyla-nudge-watch.sh`,
 `tools/thyla-tmux.sh`, `~/.claude/ctx-hook.sh`, `~/.claude/resume-note.py`,
 `~/.claude/settings.json`; memory `feedback_turn_end_is_a_decision.md`,

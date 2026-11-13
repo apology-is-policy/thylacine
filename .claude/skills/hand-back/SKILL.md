@@ -16,39 +16,17 @@ description: Use when actually STOPPING an autonomous run and handing back to th
 
 **The tell:** if you are writing a `Key` table, an `Arc state` field, or an `Ahead` line, you are writing a hand-back. Stop and ask whether you actually intend to stop. If you do not, delete it and make the next tool call instead.
 
-**The `Stop` hook now exists** (`tools/stop-hook.sh`, user-requested
-2026-08-16 after a run stopped at a checkpoint it should have run through --
-having written the very `Ahead` line named above as the tell). This paragraph
-used to say the hook was "deliberately not built"; it was built precisely
-because behaviour that is only as good as remembering it was not good enough.
-
-What it does, so you recognize it rather than argue with it: on a stop it
-computes the same budget `ctx-hook.sh` does, and if you are **between 120k and
-the checkpoint line** (`CKPT` in `.claude/ctx-thresholds`) and have taken **>= 6 assistant turns since the user
-last spoke** -- i.e. an autonomous run, not a reply -- it blocks ONCE and asks
-which of four cases applies. Three of them (an §"Autonomy + escalation" item, a
-question you have now answered, a genuine block) make stopping CORRECT: name it
-in a clause and stop, and it will not ask again. The fourth is the one it exists
-for -- **open the chunk you just named on your own `Next` line instead of
-yielding.**
-
-It is a question, not a veto, because only you can tell an earned yield from an
-unearned one. It stays silent below 120k (conversational), at/above the checkpoint line
-(stopping is what scripture wants there, and a second voice contradicting
-`ctx-hook.sh` would be worse than silence), and whenever `stop_hook_active` is
-already set. **It fails OPEN on every error path** -- a Stop hook that failed
-closed could trap a session in a loop it cannot talk its way out of, which is
-far worse than a missed nudge. Discrimination-tested across all seven
-conditions, including the two legs most likely to be silently wrong: a
-tool-result and a system notification must NOT count as "the user spoke", or the
-counter resets constantly and the hook goes quiet during exactly the runs it is
-for.
-
-It lives IN THE REPO rather than in `~/.claude/` (where `ctx-hook.sh` sits, and
-whose absence CLAUDE.md's compaction rules already flag as leaving that rule
-with no brake). One copy, no sync obligation, and it survives a fresh clone;
-`~/.claude/settings.json` points its `Stop` event at this path. Install on a new
-machine is that one settings entry.
+**Nothing enforces this; it is yours to remember.** A `Stop` hook
+(`tools/stop-hook.sh`, built 2026-08-16 after a run stopped at a checkpoint
+having written the very `Ahead` line named above as the tell) used to ask the
+question below once per mid-budget stop. The operator retired it on 2026-11-13
+as obsolete, built for older models, and the script is gone. Its question
+stands as the rule: before you end an autonomous run below the checkpoint line
+(`CKPT` in `.claude/ctx-thresholds`), say which of four cases this is. Three
+make stopping CORRECT -- an §"Autonomy + escalation" item, a question from the
+user you have now answered, a genuine block -- so name it in a clause and stop.
+The fourth is everything else: **open the chunk you just named on your own
+`Next` line instead of yielding.**
 
 End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review.
 
