@@ -98,6 +98,9 @@ mod tests {
         // Two of them between two readings are one return.
         assert_eq!(epoch.read(10, 0), Reading::Resumed);
         assert_eq!(epoch.read(10, 0), Reading::Standing);
+        // A generation is a name, not a count: one that differs is another.
+        assert_eq!(epoch.read(4, 0), Reading::Resumed);
+        assert_eq!(epoch.read(4, 0), Reading::Standing);
     }
 
     #[test]
