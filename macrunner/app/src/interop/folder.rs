@@ -361,10 +361,37 @@ pub fn ftruncate(fd: RawFd, size: u64) -> Result<(), u32> {
     Ok(())
 }
 
+/// Commit `fd` to the disk itself. macOS's fsync(2) stops at the drive, whose cache can still
+/// lose the data; F_FULLFSYNC asks the drive to flush it. A file system with no such request (an
+/// SMB mount) answers ENOTSUP and gets fsync(2), as Go's File.Sync does.
 pub fn fsync(fd: RawFd) -> Result<(), u32> {
-    // SAFETY: a live descriptor.
-    check(unsafe { libc::fsync(fd) })?;
-    Ok(())
+    durable(
+        // SAFETY: a live descriptor; F_FULLFSYNC takes no argument.
+        || unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) },
+        // SAFETY: a live descriptor.
+        || unsafe { libc::fsync(fd) },
+    )
+}
+
+fn durable(full: impl Fn() -> libc::c_int, plain: impl Fn() -> libc::c_int) -> Result<(), u32> {
+    match retried(full) {
+        Ok(()) => Ok(()),
+        Err(libc::ENOTSUP) => retried(plain).map_err(errno::linux),
+        Err(e) => Err(errno::linux(e)),
+    }
+}
+
+/// A call's macOS errno, EINTR retried.
+fn retried(call: impl Fn() -> libc::c_int) -> Result<(), i32> {
+    loop {
+        if call() >= 0 {
+            return Ok(());
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            e => return Err(e.unwrap_or(libc::EIO)),
+        }
+    }
 }
 
 /// Where a metadata change lands: an open descriptor, or a name in a directory.
@@ -397,6 +424,61 @@ mod tests {
             .filter(|s| !s.is_empty())
             .map(|s| s.as_bytes().to_vec())
             .collect()
+    }
+
+    /// A stand-in for a libc call: answers each `rcs` in turn, setting errno from `errs`.
+    fn scripted(rcs: &'static [(libc::c_int, i32)], calls: &std::cell::Cell<usize>) -> libc::c_int {
+        let (rc, err) = rcs[calls.get().min(rcs.len() - 1)];
+        calls.set(calls.get() + 1);
+        // SAFETY: the calling thread's errno slot.
+        unsafe { *libc::__error() = err };
+        rc
+    }
+
+    #[test]
+    fn a_sync_asks_the_drive_and_falls_back_only_where_it_cannot() {
+        let (full, plain) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let run = |f: &'static [(libc::c_int, i32)], p: &'static [(libc::c_int, i32)]| {
+            full.set(0);
+            plain.set(0);
+            durable(|| scripted(f, &full), || scripted(p, &plain))
+        };
+        assert_eq!(run(&[(0, 0)], &[(0, 0)]), Ok(()));
+        assert_eq!(
+            (full.get(), plain.get()),
+            (1, 0),
+            "a full sync needs no plain one"
+        );
+        assert_eq!(run(&[(-1, libc::ENOTSUP)], &[(0, 0)]), Ok(()));
+        assert_eq!(
+            (full.get(), plain.get()),
+            (1, 1),
+            "ENOTSUP falls back to fsync"
+        );
+        assert_eq!(
+            run(&[(-1, libc::ENOTSUP)], &[(-1, libc::EIO)]),
+            Err(5),
+            "whose error counts"
+        );
+        assert_eq!(run(&[(-1, libc::EIO)], &[(0, 0)]), Err(5));
+        assert_eq!(
+            plain.get(),
+            0,
+            "any other error is the answer, with no fallback"
+        );
+        assert_eq!(run(&[(-1, libc::EINTR), (0, 0)], &[(0, 0)]), Ok(()));
+        assert_eq!((full.get(), plain.get()), (2, 0), "EINTR asks again");
+    }
+
+    #[test]
+    fn a_file_and_a_directory_sync_to_the_disk() {
+        let d = scratch("fsync");
+        fs::write(d.join("f"), b"x").unwrap();
+        let f = fs::File::open(d.join("f")).unwrap();
+        assert_eq!(fsync(f.as_raw_fd()), Ok(()), "a file opened for reading");
+        let dir = fs::File::open(&d).unwrap();
+        assert_eq!(fsync(dir.as_raw_fd()), Ok(()), "a directory");
+        assert_eq!(fsync(-1), Err(9), "no descriptor: EBADF");
     }
 
     #[test]
