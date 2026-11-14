@@ -1259,6 +1259,8 @@ struct test_case g_tests[] = {
                                        test_addrspace_share_drains_at_last_ref, false, NULL },
     { "addrspace.proc_alloc_in_shares",
                                        test_addrspace_proc_alloc_in_shares, false, NULL },
+    { "addrspace.overrefund_is_counted",
+                                       test_addrspace_overrefund_is_counted, false, NULL },
     { "proc.rfork_rfmem_refuses_without_addrspace",
                                        test_proc_rfork_rfmem_refuses_without_addrspace, false, NULL },
     { "fork.frame_init",               test_fork_frame_init,               false, NULL },
@@ -3870,6 +3872,15 @@ void test_run_all(void) {
             if (!current_test->failed)
                 test_fail("a ledger pairing broke (see ACCOUNT-UNPAIRED)");
             account_unpaired_rewind_for_test(0u);
+        }
+
+        // The same for an address space's own counts, which floor at zero: an
+        // over-refund reads as a smaller count wherever the count sat low.
+        if (addrspace_overrefunds() != 0u) {
+            uart_puts("ADDRSPACE-OVERREFUND ");
+            if (!current_test->failed)
+                test_fail("an address space count was refunded past zero (see ADDRSPACE-OVERREFUND)");
+            addrspace_overrefunds_rewind_for_test(0u);
         }
 
         // The user pool's test park is the seventh piece of that state. A

@@ -471,6 +471,7 @@ void test_resource_page_cap_attach_enforced(void) {
     // The 2-page attach would push to cap+1 -> refused at the cap check, which
     // precedes burrow_create_anon (nothing allocated).
     const u32 cap = p->as->page_budget;
+    const u32 pc0 = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
     __atomic_store_n(&p->as->page_count, cap - 1u, __ATOMIC_RELEASE);
     s64 over = sys_burrow_attach_for_proc(p, 2u * PAGE_SIZE);
     TEST_EXPECT_EQ(over, (s64)(-T_E_NOMEM), "over-cap attach -> -ENOMEM");
@@ -489,19 +490,20 @@ void test_resource_page_cap_attach_enforced(void) {
     TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), cap - 1u,
                    "detach uncharged 1 page");
 
-    __atomic_store_n(&p->as->page_count, 0u, __ATOMIC_RELEASE);   // the parked count, undone
+    __atomic_store_n(&p->as->page_count, pc0, __ATOMIC_RELEASE);   // the parked count, undone
     res_drop(p);
 
     // An exempt Proc's attach bypasses the cap in the real syscall path.
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
     const u32 scap = sys->as->page_budget;
+    const u32 spc0 = __atomic_load_n(&sys->as->page_count, __ATOMIC_ACQUIRE);
     __atomic_store_n(&sys->as->page_count, scap - 1u, __ATOMIC_RELEASE);
     s64 ex = sys_burrow_attach_for_proc(sys, 2u * PAGE_SIZE);
     TEST_ASSERT(ex >= 0, "exempt attach past the cap succeeds");
     TEST_EXPECT_EQ(__atomic_load_n(&sys->as->page_count, __ATOMIC_ACQUIRE), scap + 1u,
                    "exempt charged past the cap");
     (void)sys_burrow_detach_for_proc(sys, (u64)ex, 2u * PAGE_SIZE);
-    __atomic_store_n(&sys->as->page_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sys->as->page_count, spc0, __ATOMIC_RELEASE);
     res_drop(sys);
 }
 
@@ -513,6 +515,7 @@ void test_resource_page_cap_attach_enforced(void) {
 // coherent without the lock when no peer races).
 void test_resource_vma_cap(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
+    const u32 vc0 = __atomic_load_n(&p->as->vma_count, __ATOMIC_ACQUIRE);
 
     // Boundary: charge at MAX-1 succeeds (-> MAX), the next is refused (no over-cap).
     __atomic_store_n(&p->as->vma_count, PROC_VMA_MAX - 1u, __ATOMIC_RELEASE);
@@ -526,22 +529,27 @@ void test_resource_vma_cap(void) {
     TEST_EXPECT_EQ(p->as->vma_count, PROC_VMA_MAX - 1u, "uncharge re-opens a slot");
     TEST_ASSERT(proc_vma_charge(p), "charge succeeds again after uncharge");
 
-    // Over-uncharge clamps at 0 (no underflow).
+    // Over-uncharge clamps at 0 (no underflow), and is counted.
     __atomic_store_n(&p->as->vma_count, 0u, __ATOMIC_RELEASE);
+    u64 o0 = addrspace_overrefunds();
     proc_vma_uncharge(p);
+    u64 over = addrspace_overrefunds() - o0;
+    addrspace_overrefunds_rewind_for_test(o0);
     TEST_EXPECT_EQ(p->as->vma_count, 0u, "over-uncharge clamps at 0 (no underflow)");
+    TEST_EXPECT_EQ(over, 1u, "and the over-uncharge is counted");
 
     // Saturation guard: a charge on a maxed counter is refused (no wrap).
     __atomic_store_n(&p->as->vma_count, 0xFFFFFFFFu, __ATOMIC_RELEASE);
     TEST_ASSERT(!proc_vma_charge(p), "saturated counter refuses a charge");
-    __atomic_store_n(&p->as->vma_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, vc0, __ATOMIC_RELEASE);
 
     // Exempt Procs (PRINCIPAL_SYSTEM) bypass the cap; the count is still maintained.
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
+    const u32 svc0 = __atomic_load_n(&sys->as->vma_count, __ATOMIC_ACQUIRE);
     __atomic_store_n(&sys->as->vma_count, PROC_VMA_MAX, __ATOMIC_RELEASE);
     TEST_ASSERT(proc_vma_charge(sys), "exempt charges past the cap");
     TEST_EXPECT_EQ(sys->as->vma_count, PROC_VMA_MAX + 1u, "exempt is unbounded by the cap");
-    __atomic_store_n(&sys->as->vma_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sys->as->vma_count, svc0, __ATOMIC_RELEASE);
 
     res_drop(p); res_drop(sys);
 }
@@ -705,6 +713,6 @@ void test_resource_detach_shared_in_keeps_page_count(void) {
                    "the shared-in charge IS refunded (by burrow_unmap, off the flag)");
 
     burrow_unref(v);                                  // drop our construction ref
-    __atomic_store_n(&p->as->page_count, 0u, __ATOMIC_RELEASE);
+    proc_page_uncharge(p, kPre);                      // undo the load-bearing pre-charge
     res_drop(p);
 }

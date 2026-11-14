@@ -578,6 +578,7 @@ void test_addrspace_kproc_has_none(void);
 void test_addrspace_charge_helpers_refuse_without_as(void);
 void test_addrspace_share_drains_at_last_ref(void);
 void test_addrspace_proc_alloc_in_shares(void);
+void test_addrspace_overrefund_is_counted(void);
 void test_proc_rfork_rfmem_refuses_without_addrspace(void);
 // LINEAGE L-4b: the per-page COW share count.
 void test_cow_set_sole_never_inherits(void);

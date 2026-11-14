@@ -1706,6 +1706,7 @@ void test_demand_page_lazy_charge_on_fault_oom(void) {
     TEST_ASSERT(p != NULL, "proc_alloc failed");
     // A proc_alloc'd Proc is principal_id 0 (PRINCIPAL_INVALID) -> NOT exempt, so the
     // I-32 page cap applies. Park page_count AT the cap so the next commit fails.
+    u32 pc0 = p->as->page_count;
     p->as->page_count = p->as->page_budget;
 
     struct Burrow *v = burrow_create_anon_lazy(ONE_PAGE);
@@ -1723,7 +1724,7 @@ void test_demand_page_lazy_charge_on_fault_oom(void) {
     TEST_ASSERT(walk_to_l3_entry(p->as->pgtable_root, USER_VA) == 0, "no PTE on a cap-hit");
     TEST_EXPECT_EQ((u64)p->as->page_count, (u64)p->as->page_budget, "page_count unchanged (charge rolled back)");
 
-    p->as->page_count = 0;     // reset (hygiene; drop_proc doesn't touch page_count)
+    p->as->page_count = pc0;   // the parked count, undone
     drop_proc(p);
     burrow_unref(v);
 }

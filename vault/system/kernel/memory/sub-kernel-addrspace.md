@@ -102,7 +102,24 @@ which is the Linux memcg shape; and `addrspace_charge_table` /
 the Image cache's; the mapping is the holder's -- charged per leaf installed,
 refunded per leaf cleared; `file_pages`; the round-2 audit's F8)
 (`/proc/<pid>/status` `tables:` and `file:`; the capacity probe's data census
-is `pages:` minus both). The
+is `pages:` minus both).
+
+**Every uncharge floors its count at zero, and counts the refund it could
+not cover.** A refund past zero is a broken pairing -- a double refund, or a
+refund to the wrong space -- and the floor alone made it read as a smaller
+number wherever the count sat low, which is how a mutant that refunded a
+payer's leaves twice stayed green. So each of the five (`page_count`,
+`vma_count`, `shared_map_pages`, `file_pages`, `pgtable_pages`) still floors,
+and I-32 still fails clean, but the refund is also added to one global count,
+`addrspace_overrefunds`: `/ctl/memory`'s `overrefund:` line
+([[sub-kernel-devctl]]), and a per-test check in the suite's runner
+([[sub-substrate-kernel-suite]]) -- the memory accounts' `unpaired` shape
+([[sub-kernel-accounts]]) for the space's own counts. `file_pages` and
+`pgtable_pages` refund `page_count` first, so one short refund can count
+twice; `addrspace.overrefund_is_counted` isolates each of the five, with an
+exact refund as its control.
+
+The
 address space carries a `u64 id` from a global counter at `addrspace_alloc`
 -- never reused, unlike a pid -- because the eager charge record
 ([[sub-kernel-burrow]]) must name the space that PAID: a non-CLOEXEC Loom that

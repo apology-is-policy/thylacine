@@ -99,6 +99,8 @@ the same prefix, no numbers, no verdict word.
 
 **Ledger check.** After each test the runner prints `ACCOUNT-UNPAIRED` and reddens the test if a memory account pairing broke, then clears the count: [[sub-kernel-accounts]].
 
+**Overrefund check.** The same for an address space's own counts: `ADDRSPACE-OVERREFUND` and a red test when one was refunded past zero, then the count is cleared ([[sub-kernel-addrspace]]). A test that refunds past zero on purpose (`resource.vma_cap`, `addrspace.overrefund_is_counted`) asserts the count moved and puts it back first.
+
 ## Data structures
 
 `struct test_case` (in `test.h`) is one row: the name as it appears in the log,

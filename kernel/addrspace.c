@@ -588,13 +588,32 @@ bool addrspace_charge_table(struct AddrSpace *as, bool exempt) {
     return true;
 }
 
+static u64 g_addrspace_overrefunds;
+
+static void addrspace_overrefund(void) {
+    __atomic_fetch_add(&g_addrspace_overrefunds, 1u, __ATOMIC_RELAXED);
+}
+
+u64 addrspace_overrefunds(void) {
+    return __atomic_load_n(&g_addrspace_overrefunds, __ATOMIC_RELAXED);
+}
+
+#ifdef KERNEL_TESTS
+void addrspace_overrefunds_rewind_for_test(u64 count) {
+    __atomic_store_n(&g_addrspace_overrefunds, count, __ATOMIC_RELAXED);
+}
+#endif
+
 void addrspace_uncharge_table(struct AddrSpace *as) {
     if (!as) return;
     addrspace_uncharge_pages(as, 1);
     u32 cur = __atomic_load_n(&as->pgtable_pages, __ATOMIC_RELAXED);
-    while (cur > 0 && !__atomic_compare_exchange_n(&as->pgtable_pages, &cur, cur - 1,
-                                                   true, __ATOMIC_RELAXED,
-                                                   __ATOMIC_RELAXED)) { }
+    for (;;) {
+        if (cur == 0) { addrspace_overrefund(); return; }
+        if (__atomic_compare_exchange_n(&as->pgtable_pages, &cur, cur - 1, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 bool addrspace_charge_file(struct AddrSpace *as, bool exempt) {
@@ -610,8 +629,10 @@ void addrspace_uncharge_file(struct AddrSpace *as, u32 npages) {
     for (;;) {
         u32 nv = (cur >= npages) ? cur - npages : 0;
         if (__atomic_compare_exchange_n(&as->file_pages, &cur, nv, true,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            if (cur < npages) addrspace_overrefund();
             return;
+        }
     }
 }
 
@@ -655,8 +676,10 @@ void addrspace_uncharge_pages(struct AddrSpace *as, u32 npages) {
     for (;;) {
         u32 nv = (cur >= npages) ? cur - npages : 0;
         if (__atomic_compare_exchange_n(&as->page_count, &cur, nv,
-                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            if (cur < npages) addrspace_overrefund();
             return;
+        }
     }
 }
 
@@ -679,8 +702,10 @@ void addrspace_uncharge_vma(struct AddrSpace *as) {
     for (;;) {
         u32 nv = (cur > 0) ? cur - 1 : 0;
         if (__atomic_compare_exchange_n(&as->vma_count, &cur, nv,
-                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            if (cur == 0) addrspace_overrefund();
             return;
+        }
     }
 }
 
@@ -703,7 +728,9 @@ void addrspace_uncharge_shared_map(struct AddrSpace *as, u32 npages) {
     for (;;) {
         u32 nv = (cur >= npages) ? cur - npages : 0;
         if (__atomic_compare_exchange_n(&as->shared_map_pages, &cur, nv,
-                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            if (cur < npages) addrspace_overrefund();
             return;
+        }
     }
 }

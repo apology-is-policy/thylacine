@@ -481,7 +481,14 @@ void addrspace_uncharge_table(struct AddrSpace *as);
 bool addrspace_charge_file(struct AddrSpace *as, bool exempt);
 void addrspace_uncharge_file(struct AddrSpace *as, u32 npages);
 
+// Every uncharge above floors its count at zero, so I-32 fails clean on a refund
+// the count cannot cover; this counts each such refund, which would otherwise pass
+// as a smaller number (memaccount.h's account_unpaired, for the space's own counts).
+u64 addrspace_overrefunds(void);
+
 #ifdef KERNEL_TESTS
+// Tests that refund past zero on purpose put the count back before the runner reads it.
+void addrspace_overrefunds_rewind_for_test(u64 count);
 // The in-kernel tests' reach into addrspace.c (.claude/rules/kernel-code.md,
 // "Cross-file declarations"): hooks compiled only with the tests, and
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).

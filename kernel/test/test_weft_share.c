@@ -606,6 +606,7 @@ void test_weft_shared_map_budget_cap(void) {
     int m0 = burrow_mapping_count(v);
 
     // Pre-load the counter to the cap: the next share must fail CLEAN.
+    u32 sm0 = client->as->shared_map_pages;
     client->as->shared_map_pages = PROC_SHARED_MAP_MAX_PAGES;
     spin_lock(&client->as->lock);
     TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), -1,
@@ -617,7 +618,7 @@ void test_weft_shared_map_budget_cap(void) {
         "the refused share charged nothing");
 
     // Back under the cap: the share succeeds + charges; the drain uncharges.
-    client->as->shared_map_pages = 0;
+    client->as->shared_map_pages = sm0;
     spin_lock(&client->as->lock);
     TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
         "an under-budget share succeeds");

@@ -725,7 +725,9 @@ pages actually free — reachable from a handle close, which holds no
 address-space lock. What [[lock-vma]] still buys is the *cap decision*: held
 across check-then-charge it makes the bound exact against another charge on the
 same address space, and charges from outside it can overshoot by at most the
-smaller. A floor, not an accountant.
+smaller. A floor, not an accountant -- though a refund past the floor is now
+counted ([[sub-kernel-addrspace]]), and the `resource.*` tests that park a count
+by hand put back the value they found rather than zero.
 
 The child cap is the deliberate exception: it reads under the table lock and
 the increment happens at a later, separate hold, so it carries a bounded

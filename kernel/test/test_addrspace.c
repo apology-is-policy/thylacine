@@ -373,3 +373,45 @@ void test_addrspace_charge_helpers_refuse_without_as(void) {
     proc_vma_uncharge(kp);
     proc_shared_map_uncharge(kp, 1);
 }
+
+// Every count floors at zero, so a refund past it would pass as a smaller number;
+// each of the five is counted, and an exact refund is not (the control, one
+// variable away). Each site is isolated: page_count stays above the refund
+// where the file and table counts are the ones short.
+void test_addrspace_overrefund_is_counted(void) {
+    struct AddrSpace *as = addrspace_alloc(16);
+    TEST_ASSERT(as != NULL, "a space");
+    u64 o0 = addrspace_overrefunds();
+
+    spin_lock(&as->lock);                     // the counter ops' stated precondition
+    bool charged = addrspace_charge_pages(as, 2, false);
+    addrspace_uncharge_pages(as, 2);
+    bool vcharged = addrspace_charge_vma(as, false);
+    addrspace_uncharge_vma(as);
+    u64 exact  = addrspace_overrefunds() - o0;
+    addrspace_uncharge_pages(as, 1);
+    u64 pages  = addrspace_overrefunds() - o0 - exact;
+    addrspace_uncharge_vma(as);
+    u64 vmas   = addrspace_overrefunds() - o0 - exact - pages;
+    addrspace_uncharge_shared_map(as, 1);
+    u64 shared = addrspace_overrefunds() - o0 - exact - pages - vmas;
+    bool two   = addrspace_charge_pages(as, 2, false);
+    addrspace_uncharge_file(as, 1);           // page_count 2 -> 1; file_pages short
+    u64 file   = addrspace_overrefunds() - o0 - exact - pages - vmas - shared;
+    addrspace_uncharge_table(as);             // page_count 1 -> 0; pgtable_pages short
+    u64 table  = addrspace_overrefunds() - o0 - exact - pages - vmas - shared - file;
+    u32 pc = as->page_count, vc = as->vma_count, sm = as->shared_map_pages;
+    u32 fp = as->file_pages, pt = as->pgtable_pages;
+    spin_unlock(&as->lock);
+    addrspace_overrefunds_rewind_for_test(o0);
+    addrspace_unref(as);
+
+    TEST_ASSERT(charged && vcharged && two, "the charges land under the budget");
+    TEST_EXPECT_EQ(exact, 0u, "an exact refund is not counted");
+    TEST_EXPECT_EQ(pages, 1u, "page_count refunded past zero is counted");
+    TEST_EXPECT_EQ(vmas, 1u, "vma_count refunded past zero is counted");
+    TEST_EXPECT_EQ(shared, 1u, "shared_map_pages refunded past zero is counted");
+    TEST_EXPECT_EQ(file, 1u, "file_pages refunded past zero is counted (page_count covered it)");
+    TEST_EXPECT_EQ(table, 1u, "pgtable_pages refunded past zero is counted (page_count covered it)");
+    TEST_EXPECT_EQ(pc + vc + sm + fp + pt, 0u, "every count still floors at zero");
+}
