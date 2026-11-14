@@ -7114,3 +7114,50 @@ void test_9p_client_async_share_leaves_sync_tags(void) {
     TEST_EXPECT_EQ((u64)async, 0ull, "and the async share");
     TEST_ASSERT(!dead, "the session stays live");
 }
+
+// A 9P renameat or link names two fids of ONE session, so Loom's RENAMEAT and
+// LINK with their second handle on another session are two servers: EXDEV, as
+// the sync rename answers (vote M15), inline, with nothing on the wire. The
+// controls are the same ops with the second handle on the first session.
+void test_9p_client_loom_two_sessions_exdev(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    u32 sub_fid = P9_NOFID;
+    struct Spoor *sub = loom_walk_sub(root, &sub_fid);
+    TEST_ASSERT(sub != NULL, "a second directory of the same session");
+    TEST_ASSERT(cl2_open() == 0, "a second session");
+    struct Spoor *other = dev9p_attach_client(&g_client2, 0);
+    TEST_ASSERT(other != NULL, "the second session's root");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root,  RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 1, sub,   RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 2, other, RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    const char *nm = "abcdef";
+    for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the owner");
+
+    DM_RENAMEAT(l, 0, "RENAMEAT, both directories in one session -> reaches the wire");
+    DM_LINK(l,     0, "LINK, both handles in one session -> reaches the wire");
+    loom_dm_leg(l, LOOM_OP_RENAMEAT, 6, 0, 3, 0, /*second handle=*/2, -(s32)T_E_XDEV,
+                "RENAMEAT into another session's directory -> -EXDEV, nothing on the wire");
+    loom_dm_leg(l, LOOM_OP_LINK, 3, 0, 0, 0, /*second handle=*/2, -(s32)T_E_XDEV,
+                "LINK naming another session's file -> -EXDEV, nothing on the wire");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(other);
+    spoor_clunk(sub);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    cl2_close();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}

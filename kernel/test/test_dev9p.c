@@ -1719,6 +1719,74 @@ void test_dev9p_rename(void) {
     teardown(root);
 }
 
+// Two dev9p mounts are two p9_clients, two servers, and a 9P renameat names two
+// fids of ONE session: a rename between them is EXDEV (vote M15), refused before
+// the wire. The Rlerror armed for the next Trenameat is the witness -- either
+// server would answer a rename that reached it with that -- and the control, a
+// rename within the first session, does reach it.
+static struct p9_client   g_client_b;
+static struct p9_loopback g_loopback_b;
+static u8 g_recv_buf_b[8192];
+static u8 g_loopback_resp_b[8192];
+
+void test_dev9p_rename_two_sessions(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "the first session's root");
+    TEST_ASSERT(p9_loopback_init(&g_loopback_b, g_loopback_resp_b, sizeof(g_loopback_resp_b),
+                                 dev9p_responder, NULL) == 0, "a second loopback");
+    TEST_ASSERT(p9_client_init(&g_client_b, /*root_fid=*/0, 8192,
+                               p9_loopback_ops_for(&g_loopback_b),
+                               g_recv_buf_b, sizeof(g_recv_buf_b)) == 0, "a second client");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client_b, uname, sizeof(uname),
+                                    aname, sizeof(aname), 0) == 0, "the second handshake");
+    struct Spoor *other = dev9p_attach_client(&g_client_b, /*root_fid=*/0);
+    TEST_ASSERT(other != NULL, "the second session's root");
+    TEST_ASSERT(other->dev == root->dev, "one Dev, two sessions");
+
+    g_renameat_fail_ecode = 39;
+    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(root, "old", other, "new"), (u64)(s64)(-T_E_XDEV),
+                   "a rename from one session's directory into another's -> EXDEV");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(other, "old", root, "new"), (u64)(s64)(-T_E_XDEV),
+                   "and the other way -> EXDEV");
+    TEST_EXPECT_EQ((u64)g_renameat_fail_ecode, (u64)39, "no Trenameat reached either server");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(root, "old", root, "new"), (u64)(s64)(-39),
+                   "the control: a rename within one session reaches its server");
+
+    g_renameat_fail_ecode = 0;
+    spoor_clunk(other);
+    p9_client_destroy(&g_client_b);
+    p9_loopback_destroy(&g_loopback_b);
+    teardown(root);
+}
+
+// The syscall's rename mechanics (SYS_RENAME and the phenotype renameat share
+// them) answer two devices EXDEV before they ask either Dev anything: before
+// the missing rename slot's OPNOTSUPP, which a ramfs directory alone still
+// earns, and before any wire op.
+void test_dev9p_rename_in_dirs_two_devs(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "a dev9p root");
+    struct Spoor *rd = devramfs.attach("");
+    TEST_ASSERT(rd != NULL, "the ramfs root");
+    TEST_ASSERT(devramfs.rename == NULL, "devramfs has no rename slot");
+    struct Proc *p = current_thread()->proc;
+
+    g_renameat_fail_ecode = 39;
+    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, rd, root, "a", "b"), (u64)(s64)(-T_E_XDEV),
+                   "ramfs -> dev9p: EXDEV, before ramfs's missing slot");
+    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, root, rd, "a", "b"), (u64)(s64)(-T_E_XDEV),
+                   "dev9p -> ramfs: EXDEV, before any Dev op");
+    TEST_EXPECT_EQ((u64)g_renameat_fail_ecode, (u64)39, "nothing reached the server");
+    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, rd, rd, "a", "b"), (u64)(s64)(-T_E_OPNOTSUPP),
+                   "the control: within ramfs, the missing slot -> OPNOTSUPP");
+
+    g_renameat_fail_ecode = 0;
+    spoor_clunk(rd);
+    teardown(root);
+}
+
 // dev9p.unlink routes through p9_client_unlinkat -> Tunlinkat; the responder
 // Runlinkat makes it return 0. Both the file (flags 0) and the rmdir
 // (P9_UNLINK_AT_REMOVEDIR) flag values reach the wire intact.

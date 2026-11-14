@@ -5326,9 +5326,9 @@ static int sys_copy_component(u64 name_va, u64 name_len, char *scratch) {
 // phenotype renameat shell run the SAME dev-slot check, the SAME same-Dev
 // invariant, and the SAME A-2d W|X gates. `od`/`nd` are BORROWED (the caller
 // clunks); the names are validated kernel-space components.
-static s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od,
-                                struct Spoor *nd, const char *old_name,
-                                const char *new_name) {
+VISIBLE_IF_KERNEL_TESTS
+s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od, struct Spoor *nd,
+                         const char *old_name, const char *new_name) {
     // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
     // both directories MUST be on the same Dev (dev9p_rename adds the same-
     // session guard). Rejected here before any Dev op, and before the slot
@@ -5418,11 +5418,11 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     // HOLDS the source (od) and lands the destination in the SAME member when
     // both fds name one LIVE union (Plan 9 within-member rename), else the
     // MCREATE member (nd). Non-union dirfds act on od/nd directly; a
-    // cross-member move then falls to spoor_rename_in_dirs's same-Dev guard
-    // (EXDEV -> EINVAL). Once the union has DISSOLVED each handle means its own
-    // member[0] -- two handles on one point may hold different ones (shed r4
-    // F2: taken while dissolved, the shortcut renamed into od's member[0] a
-    // directory the caller never named for the destination).
+    // cross-member move then falls to spoor_rename_in_dirs's same-Dev guard, or
+    // dev9p's same-session one (EXDEV). Once the union has DISSOLVED each handle
+    // means its own member[0] -- two handles on one point may hold different
+    // ones (shed r4 F2: taken while dissolved, the shortcut renamed into od's
+    // member[0] a directory the caller never named for the destination).
     bool same_union = od->union_snap && od->union_snap->point &&
                       nd->union_snap && nd->union_snap->point &&
                       spoor_same_mount_identity(od->union_snap->point,
@@ -15849,8 +15849,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // the destination lands in the member holding the source, not the
         // union's MCREATE member. Otherwise the source parent selects the member
         // holding oldleaf and a different-union / non-union dest selects its
-        // create target; spoor_rename_in_dirs's same-Dev guard then answers a
-        // genuine cross-member move as cross-server (EXDEV -> EINVAL).
+        // create target; spoor_rename_in_dirs's same-Dev guard (or dev9p's
+        // same-session one) then answers a genuine cross-member move EXDEV.
         bool same_union = od_union && nd_union &&
                           spoor_same_mount_identity(od_res, nd_res);
         struct Spoor *od = viv_union_member(p, od_res, od_union, oldleaf,

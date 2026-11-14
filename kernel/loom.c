@@ -2624,9 +2624,10 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     if (has_second) {
         struct p9_client *cl2; u32 f2;
         if (dev9p_client_fid(sp2, &cl2, &f2) != 0) { err = -(s32)T_E_INVAL; goto fail; }
-        // A 9P renameat/link names two fids in ONE fid namespace -- reject a
-        // cross-session pair (mirrors sys_rename's same-Dev/same-p9_client gate).
-        if (cl2 != cl)                             { err = -(s32)T_E_INVAL; goto fail; }
+        // A 9P renameat/link names two fids in ONE fid namespace, so a pair from
+        // two sessions is two servers: EXDEV, as the sync rename answers it
+        // (vote M15), and nothing reaches the wire.
+        if (cl2 != cl)                             { err = -(s32)T_E_XDEV;  goto fail; }
         fid2 = f2;
     }
     // LOOM.md 8.5.1: the directory-mutation authority, after every rights and

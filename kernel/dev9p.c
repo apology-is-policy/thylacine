@@ -187,12 +187,13 @@ s64 dev9p_open_errno(struct Spoor *c) {
 // learns the class instead of "something broke". Anything outside the window is
 // a 9P-client-layer bug rather than a server verdict -> EIO.
 //
-// Note what does NOT need a registry entry: a server errno with no T_E_* name
-// (EISDIR 21, ENOTEMPTY 39, EXDEV 18, ...) crosses BY VALUE. pouch's
-// __syscall_ret and libthyla-rs's Error::from_syscall_return both map numerically,
-// so the motivating cases (unlink-a-directory, rmdir-a-non-empty-directory)
-// reach userspace correctly with no ABI append at all. Only errnos the KERNEL
-// originates need to be named in the registry.
+// Note what does NOT need a registry entry: a server errno crosses BY VALUE,
+// named or not (ENOTEMPTY 39 has no T_E_* name). pouch's __syscall_ret and
+// libthyla-rs's Error::from_syscall_return both map numerically, so the
+// motivating cases (unlink-a-directory, rmdir-a-non-empty-directory) reached
+// userspace correctly with no ABI append at all. Only errnos the KERNEL
+// originates need a name in the registry; a server's (EROFS, EFBIG) gets one
+// only so userspace can say it in words.
 static int dev9p_wire_errno(int rc) {
     if (rc == -T_E_PERM) return -T_E_ACCES;
     return (rc <= -2 && rc >= -4095) ? rc : -T_E_IO;
@@ -3048,14 +3049,19 @@ static long dev9p_readlink(struct Spoor *c, char *buf, long n) {
     return (long)len;
 }
 
-// 9P renameat is within one session). Names are NUL-terminated by the handler.
+// olddir / newdir are the caller's looked-up directory Spoors (not clone-walked:
+// Trenameat names the dirfids without transitioning them, like Tsync / Treaddir).
+// SYS_RENAME already required the same Dev; this adds the same-SESSION guard (two
+// dev9p mounts are distinct p9_clients, and a 9P renameat is within one session).
+// Names are NUL-terminated by the handler.
 static int dev9p_rename(struct Spoor *olddir, const char *oldname,
                         struct Spoor *newdir, const char *newname) {
     struct dev9p_priv *od = priv_of(olddir);
     struct dev9p_priv *nd = priv_of(newdir);
-    // #80: the local rejects below are all "these arguments cannot name a
-    // renameat" -> EINVAL. They are distinct from the wire verdicts, which pass
-    // through dev9p_wire_errno at the tail.
+    // #80: the local rejects below are "these arguments cannot name a
+    // renameat" -> EINVAL, except two sessions: two servers, EXDEV (vote M15),
+    // which `mv` reads as "copy, then remove". They are distinct from the wire
+    // verdicts, which pass through dev9p_wire_errno at the tail.
     if (!od || !nd) return -T_E_INVAL;
     if (od->fid == P9_NOFID || nd->fid == P9_NOFID ||
         od->cached_open || nd->cached_open) return -T_E_INVAL;   // a cached open
