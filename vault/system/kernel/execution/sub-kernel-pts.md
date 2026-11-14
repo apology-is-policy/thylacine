@@ -364,7 +364,9 @@ observer service-poster incarnation. "Untainted" is the binder's IMAGE
 (`proc_image_tainted_locked`, operator vote 120): a taint taken through memory it
 shares with another space counts. It is asked before [[lock-pts]], because it
 walks the binder's mappings under `as->lock`, an edge the pts lock must not gain;
-the lifecycle lock held across both keeps the answer current. A live binding cannot be replaced. Positive
+the lifecycle lock held across both keeps the answer current. Witness:
+`pts.bind_weighs_shared_taint` (a sealed host whose shared memory was debugged
+from another space is refused; over a private fork it binds). A live binding cannot be replaced. Positive
 IDs never wrap into negative errno; pool/ID exhaustion is ENOSPC. Retired entries
 remain charged while a watcher or post-unlock wake reference exists.
 

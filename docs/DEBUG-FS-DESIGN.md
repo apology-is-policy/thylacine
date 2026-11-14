@@ -694,8 +694,10 @@ in place, so the mapping survives.
 
 **The record.** Each `ANON_SHARED` Burrow carries `share_caps`, `share_guards` (the
 `NODUMP`, `NOTRACE` and `DEBUG_TAINTED` bits) and `share_spaces`. All three are
-written and read only under `g_proc_table_lock`, and nothing clears them. They
-have two writers:
+atomics, and nothing clears them. They are written under `g_proc_table_lock` and
+read there by the join and the taint readers; the unmap fold (below) reads
+`share_spaces` and `share_guards` under the unmapping space's `as->lock` alone.
+They have two writers:
 
 - **The fork's publication.** `proc_image_share_fork_locked` runs in the
   `rfork_internal` publication hold, beside the taint inheritance. It covers every
@@ -710,8 +712,11 @@ clone sets it on the child's unpublished space and the publication sets it on th
 parent's; it is never cleared. The join walks the target's mappings only when its
 space has `xshare`. The walk holds `as->lock`, under the established
 `g_proc_table_lock -> as->lock` edge that `format_maps` and the `mem` copy already
-take. For each Burrow with `share_spaces`, the join ORs the record into its caps
-and flags and sets `shared`.
+take. On the clearance redeem the join also runs inside `g_cap_grants.lock`
+(`proc_become_legate_locked`), which adds the edge `g_cap_grants.lock -> as->lock`;
+nothing under an `as->lock` takes the grant lock, so it is acyclic. For each
+Burrow with `share_spaces`, the join ORs the record into its caps and flags and
+sets `shared`.
 
 **Why one snapshot at the fork is enough.** Caps grow only by elevation, and
 elevation is refused for every Proc that maps a Burrow with `share_spaces`. So once
@@ -746,9 +751,22 @@ points also write it down where the record would otherwise lose it:
 A taint stamped through the other side AFTER this space unmapped does not reach
 it: that debug control happened after this image stopped holding the bytes.
 
-**Cost.** One mapping walk per join, only for a space that forked shared memory.
-It is bounded by `PROC_VMA_MAX` and runs with interrupts off under the two locks.
-The ordinary space never sets `xshare` and pays nothing.
+**Cost.** One mapping walk per join, only for a space that forked shared memory,
+under `g_proc_table_lock` with interrupts off. Audit round 36 (F1) showed that this
+is not bounded well enough. One program can arm `xshare` with a single shared
+mapping and a fork, and raise its space to `PROC_VMA_MAX` mappings at no page
+cost. After that, every reader of its `maps` (two joins) and each of its own forks
+(three walks) holds the global lock for a 65,536-entry walk. `format_maps` bounds
+its own hold by its output buffer, on purpose. The replacement awaits the
+operator's vote (OPEN-BUGS 2026-11-14T16:32Z). The ordinary space never sets
+`xshare` and pays nothing.
+
+**Witnesses.** `devproc.share_join_cover`, `_elevation`, `_seals`, `_taint` and
+`_fork_and_exec`, and `pts.bind_weighs_shared_taint`; each has a control one
+variable away (the same fork over a private map). The fork's inheritance and the
+exec swap run on a kernel-thread child's own thread. Only a fork from EL0 clones a
+space, so the publication's call site in `rfork_internal` is checked by review
+alone; the witnesses run the publication as it does.
 
 **What this does NOT close.**
 

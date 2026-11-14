@@ -649,9 +649,15 @@ elevates while mapping the Burrow; unmapped, the parent does),
 through the stamp, taken before it through the publication; `NOTRACE` after
 the fork refuses control) and `devproc.share_join_taint` (the child's taint
 reaches the parent's image but not its word, outlives the parent's unmap, and
-still refuses its elevation). A kernel test cannot reach a fork that continues
-at EL0, so the publication's call site in `rfork_internal`, and the exec and pts
-taint readers, are covered by review only.
+still refuses its elevation). `devproc.share_join_fork_and_exec` runs the
+fork's taint inheritance and the exec swap on a kernel-thread child's own
+thread: its grandchild is born tainted and its exec puts the taint on its word,
+and over a private map neither happens. `pts.bind_weighs_shared_taint`
+([[sub-kernel-pts]]) is the interaction gate's witness. Only a fork from EL0
+clones a space, so the publication's call site in `rfork_internal` is checked by
+review alone. The join's walk of the space's mappings is audit round 36 F1: it
+is unbounded in practice under the global lock, and its replacement awaits the
+operator's vote.
 
 ### The register write has a privilege guard
 

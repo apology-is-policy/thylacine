@@ -475,8 +475,14 @@ page, and before the map's first node, and a payer capped one page short of
 that node: each refusal takes the mint back), `nodes_paid_by_record` (vote
 121: across a two-level map the record and the payer's count hold every
 node, the child pays only its leaf, and the free refunds it all) and
-`node_charge_hand_over_adopts` (the payer lapses inside the mint, so the node
-charge makes the hand-over and the fault adopts again).
+`node_charge_hand_over_adopts` (the creator pays when the child faults; the
+payer lapses inside the mint, so the node charge makes the hand-over and the
+fault adopts again), `node_charge_takes_all_or_none` (audit round 36 F2: a
+payer with room for the page and one of a path's two nodes is refused whole,
+and neither the record nor the payer keeps a part) and
+`node_leftovers_refunded` (round 36 F2: the pagemap probe lets the child build
+the path in the first installer's window, and the first installer refunds the
+two nodes it no longer needs).
 
 **The share record (operator vote 120, 2026-11-14; DEBUG-FS-DESIGN 3.4).** An
 ANON_SHARED Burrow also carries `share_caps`, `share_guards` (the

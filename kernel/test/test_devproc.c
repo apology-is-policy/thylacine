@@ -5398,3 +5398,85 @@ void test_devproc_share_join_taint(void) {
     TEST_ASSERT(still, "the taint outlives the mapping (folded into the space's record)");
     TEST_ASSERT(rc != 0, "so the parent still does not elevate");
 }
+
+// The two taint carriers that run on a Proc's own thread: the fork's
+// inheritance (a child of a tainted IMAGE is born tainted) and the exec swap's
+// (the image's taint goes on the word before the image goes). A thunk child --
+// a real Proc on its own thread, fresh space -- maps one page, has a second
+// space cloned from it with the publication's record written (the sj_fork
+// shape: rfork_internal's own clone needs an EL0 fork context), the far side
+// debugged, then forks a grandchild and execs itself. Over a private map the
+// same steps taint neither.
+static struct {
+    bool premise;
+    u32  grandchild_word;   // the grandchild's own taint bit, read on its thread
+    u32  exec_word;         // the thunk's taint bit after its exec
+    int  done;
+} g_sjr;
+
+static void sjr_grandchild_thunk(void *arg) {
+    (void)arg;
+    g_sjr.grandchild_word = __atomic_load_n(&current_thread()->proc->proc_flags, __ATOMIC_ACQUIRE)
+                          & PROC_FLAG_DEBUG_TAINTED;
+    exits("ok");
+}
+
+static void sjr_thunk(void *arg) {
+    const bool shared = arg != NULL;
+    struct Proc *me = current_thread()->proc;
+    s64 va = sys_mmap_anon_core(me, PAGE_SIZE, VMA_PROT_RW, VMA_PROT_RW, shared);
+    struct AddrSpace *clone = va > 0 ? addrspace_clone(me->as, false) : NULL;
+    struct Proc *far = clone ? proc_alloc() : NULL;
+    struct AddrSpace *fown = NULL;
+    if (far) {
+        fown = far->as;
+        far->as = clone;
+        far->principal_id = me->principal_id;
+        far->state = PROC_STATE_ALIVE;
+        irq_state_t st = proc_table_lock_acquire();
+        proc_image_share_fork_locked(me, far);
+        proc_mark_debug_tainted_locked(far);
+        g_sjr.premise = (__atomic_load_n(&me->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                        (__atomic_load_n(&far->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) != 0;
+        proc_table_lock_release(st);
+        int gpid = rfork_with_caps(RFPROC, sjr_grandchild_thunk, NULL, CAP_NONE);
+        int gst = -1;
+        if (gpid <= 0 || wait_pid_for(gpid, 0, &gst) != gpid) g_sjr.premise = false;
+        struct AddrSpace *nas = addrspace_alloc(me->page_budget);
+        if (nas) {
+            proc_exec_replace(me, nas, me->phenotype);
+            g_sjr.exec_word = __atomic_load_n(&me->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED;
+            g_sjr.done = 1;
+        }
+        far->as = fown;
+        far->state = PROC_STATE_ZOMBIE;
+        proc_free(far);
+    }
+    if (clone) addrspace_unref(clone);
+    exits("ok");
+}
+
+static void sjr_run(bool shared, bool *premise, u32 *gword, u32 *eword) {
+    g_sjr.premise = false;
+    g_sjr.grandchild_word = shared ? 0u : PROC_FLAG_DEBUG_TAINTED;   // the losing value
+    g_sjr.exec_word       = shared ? 0u : PROC_FLAG_DEBUG_TAINTED;
+    g_sjr.done = 0;
+    int pid = rfork_with_caps(RFPROC, sjr_thunk, shared ? (void *)1 : NULL, CAP_NONE);
+    int st = -1;
+    int reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    *premise = pid > 0 && reaped == pid && g_sjr.premise && g_sjr.done == 1;
+    *gword = g_sjr.grandchild_word;
+    *eword = g_sjr.exec_word;
+}
+
+void test_devproc_share_join_fork_and_exec(void) {
+    bool sp = false, pp = false;
+    u32 sg = 0, se = 0, pg = PROC_FLAG_DEBUG_TAINTED, pe = PROC_FLAG_DEBUG_TAINTED;
+    sjr_run(true, &sp, &sg, &se);
+    sjr_run(false, &pp, &pg, &pe);
+    TEST_ASSERT(sp && pp, "premise: each thunk shared (or not) its page, the far side debugged, forked and exec'd");
+    TEST_ASSERT(sg != 0, "a child forked from a shared image debugged elsewhere is born tainted");
+    TEST_ASSERT(se != 0, "and the image's taint goes on the word at exec");
+    TEST_EXPECT_EQ(pg, 0u, "control: a private fork's child is born clean");
+    TEST_EXPECT_EQ(pe, 0u, "control: and its exec leaves the word clean");
+}

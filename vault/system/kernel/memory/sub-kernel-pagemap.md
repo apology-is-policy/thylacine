@@ -91,7 +91,10 @@ through a `struct pagemap_payer` -- a `charge(ctx, n, exempt)` that takes all
 payer that is not an address space: a shared anonymous Burrow's payer record
 (operator vote 121; [[sub-kernel-burrow]]'s `burrow_record_install`).
 `pagemap_install` is that install with an address-space payer built from `as`
-(or none, when `as` is NULL). `pagemap_take` empties slot `idx` (an absent or out-of-range slot reads as
+(or none, when `as` is NULL). Under KERNEL_TESTS,
+`g_pagemap_install_probe_for_test(pm, idx)` runs in the window where the
+shortfall is charged and allocated and the lock is dropped, so a test can have
+a rival build the path there (`shared_anon.node_leftovers_refunded`). `pagemap_take` empties slot `idx` (an absent or out-of-range slot reads as
 absent; it never fails) and hands back, in `freed[]` (capacity
 `PAGEMAP_MAX_DEPTH`), every node the take emptied, for the caller to
 `free_pages(.., 0)` AFTER dropping the lock; those nodes are uncharged from
