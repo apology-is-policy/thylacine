@@ -913,6 +913,12 @@ for later trees. A file added later is not a format break; a name or format chan
   shared.
   - Each directory is that host folder's tree, read-only or read-write as the app's setting
     says. A modifying operation on a read-only folder answers EROFS.
+  - The guest's kernel checks the modes the app reports before it asks the app (dev9p enforces
+    rwx, `kernel/dev9p.c` `.perm_enforced`, IDENTITY-DESIGN 9.7), and a read-only folder's
+    modes carry no write. So an ordinary user's create, open for writing (a truncation among
+    them), rename or remove there is refused in the guest with EACCES, and the app never sees
+    it. EROFS answers what the kernel passes on: the owner's change of a mode or of explicit
+    times, and any change by a process whose CAP_HOSTOWNER overrides the mode (vote M14).
   - The app never follows a host symbolic link while it resolves a walk or an open. A link is
     served as a link (readlink), and every open stays beneath the folder's root (macOS
     `O_NOFOLLOW_ANY` on each step).
@@ -956,6 +962,11 @@ press reaches the device tree's `gpio-keys` node, `KEY_POWER` on the PL061
 
 - A new guest power-key driver, warden-bound to the PL061, turns the press into an orderly
   shutdown. Power control therefore rides no interop file and needs no interop line.
+- The shutdown is Plan 9's (vote M16). The driver starts `fshalt`, a userspace program that
+  stops the services, syncs and halts stratumd, then writes `off` to a kernel control file
+  that only the host owner can open. `off` powers the machine off (PSCI `SYSTEM_OFF`) and
+  `reboot` restarts it (PSCI `SYSTEM_RESET`), as Plan 9's `/dev/reboot` is the host owner's
+  alone. A shutdown asked from the guest's own shell takes the same path.
 - If the guest has not powered off within a bound the app chooses, the app asks the person
   before it stops QEMU.
 
@@ -1111,7 +1122,8 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
    its row lands with it. The launcher's rule names the device ID, so `virtio-serial-pci`
    must map to `thylacine.virtio-pci-console` (today it would give `serial`,
    `run-vm.sh:929-938`). The power-key driver of vote M12 joins the allowance table the same
-   way, with its own row.
+   way, with its own row. The power control file of vote M16 is a kernel surface gated on
+   the host owner: its audit-trigger row lands with it.
 7. **`docs/ROADMAP.md`**: the arc's entry, and its bound: it takes no Phase 7 ship risk.
 8. **`docs/TAPESTRY.md` and `usr/tapestryd` (main and corona)**: a position that follows
    motion from the mouse seeds the made-up deltas and makes none (4.2, the captured
@@ -1123,9 +1135,10 @@ to print the ID registers from a scratch vCPU); it costs seconds per machine.
   headless build with hvf + dbus-display + virtfs + coreaudio + slirp; the in-kernel GIC
   boot (M-1). A2: the Rust app -- AppKit window, Metal layer, Unix.Map listener, keyboard/
   tablet input, fullscreen, menus; the helper an XPC service from the start (vote M1). A3: resize + HiDPI via SetUIInfo (A3a, the app tells the size; A3b, the guest takes a mode for any size told and follows a change: B5 as built). A4: the
-  virtio-serial guest driver posting `/srv/mac`, login's mount at `/mnt/mac`, the app's 9P
-  server with `snarf` and one shared folder under `folders/` (votes M5, M10, M11), and the
-  power-key driver that Quit presses (vote M12). A5: packaging -- ad-hoc signed
+  virtio-serial guest driver posting `/srv/mac`, newns's mount at `/mnt/mac` (vote M13), the
+  app's 9P server with `snarf` and one shared folder under `folders/` (votes M5, M10, M11),
+  and the power-key driver that Quit presses, with fshalt and the power control file
+  (votes M12, M16). A5: packaging -- ad-hoc signed
   bundle, DMG, the Open Anyway walkthrough; clonefile first run. Exit: a stranger installs
   it from the DMG and uses Halcyon for an hour, retina-crisp, copy/paste both ways.
 - **Beta (3D, audio in the app, suspend, updates).** B1: ANGLE + libepoxy + virglrenderer
@@ -1384,6 +1397,10 @@ overturn any of them.
 | F18 the sessions' way to the one port | channels: the virtio-serial driver frames the port into one channel per connection and posts `/srv/mac`; login mounts it at `/mnt/mac` in each session; each is its own 9P2000.L session, attached as that user, at `/srv`'s message size (4.4) | vote M10 (2026-11-13) | one pipe-pair mount for the graphical session, haul's model (4 KiB messages, one session); a 9P multiplexer inside the driver (a 9P parser and fid/tag rewriting in a driver) |
 | F19 the tree's version 1 | `snarf` and `folders/<name>/`; `display/` dropped (virtio-gpu carries the size and the scale); `power`, `time` and `open` later, as additions (4.4) | vote M11 (2026-11-13) | all of the 2026-11-10 draft at once; drawterm's `/mnt/term` shape (`dev/snarf`) |
 | F20 Quit's request | the `virt` machine's power button: QMP `system_powerdown`, the device tree's gpio-keys `KEY_POWER` on the PL061, a new guest power-key driver, an orderly shutdown (4.4) | vote M12 (2026-11-13) | a verb on the interop line (power control in the interop ABI); a `session` file in `/mnt/mac` (a system action on a per-session tree) |
+| F21 the session's mount | login starts every session program through newns, spawned as the user; newns opens `/srv/mac`, so the attach carries the user, mounts it at `/mnt/mac`, then execs the session program in place (4.4). It replaces F18's "login mounts it" | vote M13 (2026-11-14) | ut and halcyond each mounting it first; a kernel attach flag letting a CAP_SET_IDENTITY holder stamp a chosen principal |
+| F22 a read-only folder's refusal | the app answers EROFS and reports the folder's modes without write; the guest's kernel, which checks modes, refuses an ordinary user's change with EACCES before the app sees it; EROFS answers what the kernel passes on (4.4) | vote M14 (2026-11-14) | the app keeping the write bits, so every change reaches it and answers EROFS; a read-only mount flag in the guest |
+| F23 a move across devices | the kernel answers EXDEV for a rename between two devices, and `mv` copies and removes; libthyla-rs names EROFS, EXDEV, EFBIG and ENAMETOOLONG (`docs/ERRORS.md` rows, with the change) | vote M15 (2026-11-14) | the names only; leaving EINVAL and the bare numbers |
+| F24 power-off | a kernel control file only the host owner can open (`off` -> PSCI `SYSTEM_OFF`, `reboot` -> `SYSTEM_RESET`), written by a userspace `fshalt` after it stops the services and halts stratumd; the power-key driver starts fshalt (4.4) | vote M16 (2026-11-14) | a power syscall; the key driver sending a note to the service supervisor |
 | F17 capturing the pointer | the person's chord, Control-Command-G, now; a surface's own request once the guest can reach the app (4.2, 4.4) | aux, 2026-11-12, under the 2026-09-01 authorization | capture on a click or on full screen; a chord of modifiers alone; motion straight from the device |
 
 ## 12. What was not read, and what is UNVERIFIED
