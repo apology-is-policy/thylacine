@@ -62,6 +62,13 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   waiting for the held probe's end. The harness waited 10 s where the real lib waits 30, and the
   hold lasts 12 s. Its transcript showed the fake behaving as designed: the held connection stays
   dead after a new app comes. The harness now uses the real value.
+- **An open-ended capture, found by the guest.** Guest run 6 reached the session's leg and
+  failed there: `stat`'s `Uid: 1000` was read as `10`. The scenario's `([0-9]+|system)` matched
+  the first piece of the line the serial stream delivered, and the failure message cut the
+  transcript right after it. The memory already held this lesson (an unanchored number fires on
+  a partial chunk), and the scripted guest could not show it because it wrote each line whole.
+  Every capture now ends at the delimiter after it, and the scripted guest writes a byte at a
+  time: against it the old pattern is red (`owned by 1`) and the new one green.
 - **In the driver's build** (7584af216), each caught before its commit:
   - the fake app's pre-lease check failed twice, and both were the check's own mistakes: a walk
     from an already-opened fid, and a U+FFFD counted as one byte instead of three;
@@ -82,6 +89,14 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   HELLO, a wrong maxframe, no mount, a wrong principal at the attach, a wrong owner in `stat`,
   a mount that still reads with the app gone, the probe's walk wrong, the probe's owner wrong,
   held reads that still succeed, no HELLO on the new line, and no write.
+- **Guest run 6** (2026-11-14, 09:44Z to 09:48Z, a335f4541, QEMU 10.0.2 with HVF;
+  resid/live6-run6.out, `RESID-LIVE6 DONE bad=1`). In a real guest:
+  - the driver came up (`2 of 2 port(s) have queues, irq mode=Msix`) and posted `/srv/mac`;
+  - the line came up (`hello maxframe=16384` in the fake's log);
+  - the session's attach carried principal 1000, as `id` says;
+  - `cat /mnt/mac/snarf` read the Mac's text.
+  The leg then failed at the scenario's own `stat` capture (above), so the controls did not
+  run. The mac was released at the run's end.
 
 ### Decided by the operator
 
@@ -89,13 +104,15 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
 
 ### What "shown" covers
 
-Host-side only. No guest has run the driver, newns or login's change yet, and `ls-mac-line` has
-run only against a scripted guest. None of it is audited (round R5).
+In a guest (run 6): the driver, the line's HELLO, the session's attach as the user, and a read of
+`/mnt/mac/snarf` through the session's mount. Not yet: the rest of `ls-mac-line` (a program's
+walk, the app going away, a new app) and its red controls. None of it is audited (round R5).
 
 ### Open
 
-- Guest run 6 under the mac's lease: `ls-mac-line` green, with red controls (no HELLO at the
-  app's arrival, the app's departure not hanging connections up, newns not mounting).
+- Guest run 7 under the mac's lease, with the captures anchored: `ls-mac-line` green, with red
+  controls (no HELLO at the app's arrival, the app's departure not hanging connections up,
+  newns not mounting).
 - I-c: the app's mac1 line and 9P2000.L server; I-d: the power key and Quit; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor

@@ -18,7 +18,8 @@
 #      held connection's reads fail, the session's mount fails, and a new connect fails at once.
 #   5. A new app connects: the driver sends HELLO again and a new connect works.
 #
-# Uses the --config ci image (a serial-console login).
+# Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
+# it: the serial stream arrives in pieces, and an open-ended `([0-9]+)` matches the first piece.
 
 set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
@@ -121,16 +122,16 @@ if {$sess != $me} {
 lc_send "cat /mnt/mac/snarf"
 lc_within $lc_cmd_timeout {
     -re "hello from the mac"                 { lc_step "the session read /mnt/mac/snarf" }
-    -re {cat: /mnt/mac/snarf: ([^\r\n]*)}    { lc_fail "the session has no /mnt/mac: $expect_out(1,string)" }
-    -re {newns: ([^\r\n]*)}                 { lc_fail "newns said: $expect_out(1,string)" }
+    -re {cat: /mnt/mac/snarf: ([^\r\n]*)[\r\n]} { lc_fail "the session has no /mnt/mac: $expect_out(1,string)" }
+    -re {newns: ([^\r\n]*)[\r\n]}          { lc_fail "newns said: $expect_out(1,string)" }
     -re {EXTINCTION:}                        { lc_extinction_fail "kernel extinction at cat /mnt/mac/snarf" }
     timeout                                  { lc_fail "cat /mnt/mac/snarf printed neither the text nor an error" }
     eof                                      { lc_fail "unexpected EOF at cat /mnt/mac/snarf" }
 }
 lc_send "stat /mnt/mac/snarf"
 lc_within $lc_cmd_timeout {
-    -re {Uid:(?:\x1b\[[0-9;]*m)? *([0-9]+|system)} { set suid $expect_out(1,string) }
-    -re {stat: ([^\r\n]*)}                         { lc_fail "stat /mnt/mac/snarf failed: $expect_out(1,string)" }
+    -re {Uid:(?:\x1b\[[0-9;]*m)? *([0-9]+|system)[ \t\r\n]} { set suid $expect_out(1,string) }
+    -re {stat: ([^\r\n]*)[\r\n]}                  { lc_fail "stat /mnt/mac/snarf failed: $expect_out(1,string)" }
     -re {EXTINCTION:}                               { lc_extinction_fail "kernel extinction at stat /mnt/mac/snarf" }
     timeout                                         { lc_fail "stat /mnt/mac/snarf printed no Uid" }
     eof                                             { lc_fail "unexpected EOF at stat /mnt/mac/snarf" }
@@ -171,7 +172,7 @@ lc_expect "virtio-serial: the Mac app went away; every channel is closed" "the d
 lc_expect_re {mac-line-probe: hold [0-9]+: snarf read failed: } "the held connection's read fails"
 lc_send "cat /mnt/mac/snarf"
 lc_within $lc_cmd_timeout {
-    -re {cat: /mnt/mac/snarf: ([^\r\n]*)}     { lc_step "the session's mount fails: $expect_out(1,string)" }
+    -re {cat: /mnt/mac/snarf: ([^\r\n]*)[\r\n]} { lc_step "the session's mount fails: $expect_out(1,string)" }
     -re "hello from the mac|from-the-guest"   { lc_fail "the session's mount still reads with the app gone" }
     -re {EXTINCTION:}                         { lc_extinction_fail "kernel extinction at cat /mnt/mac/snarf (app gone)" }
     timeout                                   { lc_fail "cat /mnt/mac/snarf with the app gone printed nothing" }
