@@ -6,7 +6,7 @@ parent: moc-userspace
 code: [usr/lib/macline/Cargo.toml, usr/lib/macline/src/lib.rs, usr/virtio-serial/Cargo.toml, usr/virtio-serial/src/lib.rs, usr/virtio-serial/src/console.rs, usr/virtio-serial/src/relay.rs, usr/virtio-serial/src/main.rs, usr/mac-line-probe/Cargo.toml, usr/mac-line-probe/src/main.rs, tools/mac-app-fake.py, tools/interactive/ls-mac-line.exp]
 audit: hard
 guarded-by: [inv-i34]
-validated-by: [prose]
+validated-by: [prose, gate-interactive]
 locks: []
 abis: []
 design: ["docs/MAC-RUNNER.md"]
@@ -114,8 +114,11 @@ resid/r6-fake-check.py, 45 checks). The guest build checks. `ls-mac-line` covers
 - a new app.
 
 It passes against a scripted guest that plays the driver's end, with the fake app as the app
-(aux-gate `scendry-mac`: 2 runs green, 11 faults red, each at its own check). It has NOT YET
-RUN IN A GUEST. Not yet audited (round R5).
+(aux-gate `scendry-mac`: 2 runs green, 11 faults red, each at its own check). In a guest under
+HVF (run 7, 2026-11-14, 81f009549) it was green twice, all five legs, and each of three control
+builds turned it red at its own leg: a driver that sends no HELLO at leg 1, one whose
+app-departure hangs no connection up at leg 4, and a newns that does not mount at leg 2. The
+Mac's end there is the fake app. Not yet audited (round R5).
 
 ## Seams
 

@@ -6,7 +6,7 @@ parent: moc-userspace
 code: [usr/newns/Cargo.toml, usr/newns/src/main.rs]
 audit: hard
 guarded-by: [inv-i22, inv-i27, inv-i1]
-validated-by: [prose]
+validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
 abis: []
@@ -97,8 +97,11 @@ The kernel facts this rests on were read for the build:
 - leg 4: with the app gone, the session's mount fails.
 
 The scenario ran against a scripted guest (aux-gate `scendry-mac`): 2 runs green, and 11 faults
-red, each at its own check. It has NOT YET RUN IN A GUEST, and newns is not yet audited (round
-R5).
+red, each at its own check. In a guest (run 7, 2026-11-14, 81f009549) it was green twice, and a
+build whose newns does not mount turned it red at leg 2. A build whose driver sends no HELLO
+showed the one line a session prints when the app is not on the line
+(`newns: /mnt/mac not mounted: I/O error`), and the session started. newns is not yet audited
+(round R5).
 
 ## Seams
 

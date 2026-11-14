@@ -97,6 +97,23 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   - `cat /mnt/mac/snarf` read the Mac's text.
   The leg then failed at the scenario's own `stat` capture (above), so the controls did not
   run. The mac was released at the run's end.
+- **Guest run 7** (2026-11-14, 09:58Z to 10:22Z, 81f009549, QEMU 10.0.2 with HVF;
+  resid/live6-run7.out, `RESID-LIVE6 DONE bad=0`; logs in resid/live/run7/):
+  - the gate image as built: `ls-mac-line` green, all five legs, in 96 s. The guest printed the
+    driver's whole round: `2 of 2 port(s) have queues, irq mode=Msix`, `/srv/mac on port 1; the
+    Mac app is on the line`, `the Mac app went away; every channel is closed`, and the app on the
+    line again for leg 5;
+  - three control bakes, each red at the check that knows its fault (ctl8.py; each bake's
+    changed binary hashed in the output):
+    - no HELLO at the app's arrival: red at leg 1, `the fake's log had no [hello
+      maxframe=16384]`. The guest's login printed M13's one line, `newns: /mnt/mac not mounted:
+      I/O error`, and the session started anyway;
+    - the app's departure hanging no connection up: legs 1 to 3 green, red at leg 4, `the held
+      connection's read fails` timed out;
+    - newns not mounting: red at leg 2, the fake's log had no attach from login;
+  - the gate image as committed, baked again: green again, all five legs, in 97 s.
+  The mac was released at the run's end. 7584af216, a335f4541 and 81f009549 are pushed to
+  GitHub aux-3-mac (verified with ls-remote); Codeberg is behind.
 
 ### Decided by the operator
 
@@ -104,15 +121,15 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
 
 ### What "shown" covers
 
-In a guest (run 6): the driver, the line's HELLO, the session's attach as the user, and a read of
-`/mnt/mac/snarf` through the session's mount. Not yet: the rest of `ls-mac-line` (a program's
-walk, the app going away, a new app) and its red controls. None of it is audited (round R5).
+In a guest (run 7, twice green): every leg of `ls-mac-line` -- the line's HELLO both ways, the
+session's mount attached as the user and read through, a program's walk with ownership checked
+against `id`, the app going away under a held connection and the session's mount, and a new
+app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
+tools/mac-app-fake.py, not the app: the app's own line and server are I-c. None of it is audited
+(round R5).
 
 ### Open
 
-- Guest run 7 under the mac's lease, with the captures anchored: `ls-mac-line` green, with red
-  controls (no HELLO at the app's arrival, the app's departure not hanging connections up,
-  newns not mounting).
 - I-c: the app's mac1 line and 9P2000.L server; I-d: the power key and Quit; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor
