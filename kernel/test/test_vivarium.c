@@ -426,8 +426,8 @@ void test_vivarium_mmap_shared_dev_zero(void) {
 }
 
 // The phenotype judges an mmap in Linux's order -- arm64 sys_mmap's offset
-// check, fget, then do_mmap's length, window and access mode -- and an
-// anonymous call reads neither fd nor offset. Each refusal is paired with a
+// check, fget, then do_mmap's length, window, map type and access mode -- and
+// an anonymous call reads neither fd nor offset. Each refusal is paired with a
 // call one step later in that order, which answers the next step's errno.
 void test_vivarium_mmap_order_is_linux(void) {
     struct Proc *p = proc_alloc();
@@ -447,8 +447,8 @@ void test_vivarium_mmap_order_is_linux(void) {
     bool empty = handle_get(p, (hidx_t)none, &probe) < 0;
     if (!empty) handle_put(&probe);
     bool ok = rfd >= 0 && wfd >= 0 && ofd >= 0 && empty;
-    s64 r[15];
-    for (int i = 0; i < 15; i++) r[i] = 0;
+    s64 r[18];
+    for (int i = 0; i < 18; i++) r[i] = 0;
     bool anon_fd = false, anon_dead = false, anon_canon = false;
     if (ok) {
         r[0]  = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, none, 0x10);
@@ -469,6 +469,9 @@ void test_vivarium_mmap_order_is_linux(void) {
         r[12] = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, (u64)rfd, 0);
         r[13] = viv_mmap_args(p, 0, PAGE_SIZE, R, 0, (u64)wfd, 0);
         r[14] = viv_mmap_args(p, 0, PAGE_SIZE, R, VIV_MAP_SHARED, (u64)wfd, 0);
+        r[15] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, PRIV, (u64)wfd, 0);
+        r[16] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, PRIV, (u64)rfd, 0);
+        r[17] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, R, 0, (u64)wfd, 0);
     }
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
@@ -493,6 +496,9 @@ void test_vivarium_mmap_order_is_linux(void) {
     TEST_EXPECT_EQ(r[12], -(s64)T_E_NODEV, "control: a readable descriptor passes to the opt-in floor");
     TEST_EXPECT_EQ(r[13], -(s64)T_E_INVAL, "no map type is EINVAL, before the access mode");
     TEST_EXPECT_EQ(r[14], -(s64)T_E_ACCES, "control: a served type with the same descriptor reaches it: EACCES");
+    TEST_EXPECT_EQ(r[15], -(s64)T_E_NOMEM, "a shape no arm serves, past the window: ENOMEM before EACCES (r[5])");
+    TEST_EXPECT_EQ(r[16], -(s64)T_E_NOMEM, "and before declining a readable descriptor (r[7])");
+    TEST_EXPECT_EQ(r[17], -(s64)T_E_NOMEM, "and before the map type (r[13])");
 }
 
 // A T2 shell narrows its own words by its own Linux prototype. readlinkat's

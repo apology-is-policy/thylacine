@@ -15907,12 +15907,15 @@ static s64 viv_mmap(struct Proc *p, const u64 *args) {
             return mmap_fixed_file_body(p, sp, a[0], length, prot, a[5]);
         }
         // A shape no arm serves (read-write private without MAP_FIXED, shared).
-        // do_mmap's file branch switches on the map type before it asks
+        // do_mmap finds the window (__get_unmapped_area: ENOMEM for a length no
+        // window holds) before its file branch, as the anonymous side below
+        // does. The file branch switches on the map type before it asks
         // FMODE_READ, and a type that is not shared, shared-validate or
         // private is EINVAL whatever the descriptor (round 34 F5). Past that,
         // an unreadable descriptor is EACCES in every served type, as Linux;
         // a readable one is declined.
         spoor_clunk(sp);
+        if (a[1] > BURROW_RESERVE_MAX) return -(s64)T_E_NOMEM;
         u32 mtype = (u32)a[3] & (u32)VIV_MAP_TYPE;
         if (mtype != (u32)VIV_MAP_SHARED && mtype != (u32)VIV_MAP_PRIVATE &&
             mtype != (u32)VIV_MAP_SHARED_VALIDATE)
