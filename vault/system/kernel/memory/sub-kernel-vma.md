@@ -32,7 +32,11 @@ tearing it down.
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert_in` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
 round 4, F18); `vma_remove_in` unlinks, and extincts on a VMA its list does not
-hold (`vma_linked_in`, exact for a VMA in that list or in none);
+hold (`vma_linked_in`, exact for a VMA in that list or in none); before the
+unlink it folds a shared anonymous Burrow's share-record taint into the space's
+`guards_ever` (operator vote 120), so a taint taken through another space
+outlives this space's mapping, and the image join, which reads `guards_ever`
+after its walk of the mappings, sees it in one place or the other;
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain_in` tears the whole list down when the address
 space's last owner drops it.

@@ -344,7 +344,10 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
         // no payer flag (the child is not the payer: its leaves are charged to
         // it at fault, the mints to the payer). Nothing is charged here: the
         // child holds no page until it faults one, and a fault is where the
-        // charge is decided and can fail clean.
+        // charge is decided and can fail clean. The space is marked so the
+        // publication writes the Burrow's share record and the image join
+        // reads it (vote 120): `dst` is unpublished, so no lock is owed yet.
+        dst->xshare = 1u;
         break;
     default:
         // MMIO and DMA (I-5 / I-34 hardware). Refused whatever the prot: mapping

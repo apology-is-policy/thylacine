@@ -2174,12 +2174,20 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // COW child gets a private COPY, where whether a copy of a secret is itself
     // secret is decision A -- still the operator's open question, which
     // inheriting here would settle by accident.
-    u32 pflags = __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE);
-    if (pflags & PROC_FLAG_DEBUG_TAINTED)
+    // The parent's IMAGE taint, not only its word (vote 120): memory it shares
+    // with another space may have been under a debugger there, and the parent
+    // was never stamped for it (proc_image_tainted_locked).
+    if (proc_image_tainted_locked(parent))
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
                           __ATOMIC_RELAXED);
     if (note_table_crosses)
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELAXED);
+
+    // Shared anonymous memory the clone mapped into the child's new space
+    // (vote 120; DEBUG-FS-DESIGN 3.4): its record takes the parent's whole join
+    // and both words in this hold, before any gate can see the child, so from
+    // here every guard on either image weighs the other side too.
+    proc_image_share_fork_locked(parent, child);
 
     // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication
     // and for the taint's reason: the orphan rule runs under this lock at the
@@ -2972,12 +2980,71 @@ static void proc_image_join_one(struct Proc *q, struct proc_image_walk *w) {
     if (q->state == PROC_STATE_ZOMBIE) w->zombies++;
 }
 
+// Vote 120 (DEBUG-FS-DESIGN 3.4): visit every shared anonymous Burrow `as` maps
+// that a fork has mapped into another space. A Burrow split into several VMAs
+// is visited once per VMA, which only repeats an OR. Caller holds
+// g_proc_table_lock; the walk takes as->lock under it (the g_proc_table_lock ->
+// as->lock edge format_maps and the mem copy take; nothing under as->lock takes
+// g_proc_table_lock).
+static void proc_image_shared_visit(struct AddrSpace *as,
+                                    void (*fn)(struct Burrow *, void *), void *arg) {
+    if (!as || !as->xshare) return;
+    irq_state_t vs = spin_lock_irqsave(&as->lock);
+    for (struct Vma *v = as->vmas; v; v = v->next) {
+        if (v->magic != VMA_MAGIC) extinction("proc_image_shared_visit: corrupted VMA list entry");
+        struct Burrow *b = v->burrow;
+        if (b && b->type == BURROW_TYPE_ANON_SHARED &&
+            __atomic_load_n(&b->share_spaces, __ATOMIC_ACQUIRE))
+            fn(b, arg);
+    }
+    spin_unlock_irqrestore(&as->lock, vs);
+}
+
+static void proc_image_join_shared_one(struct Burrow *b, void *arg) {
+    struct ProcImageJoin *out = arg;
+    out->caps  |= __atomic_load_n(&b->share_caps, __ATOMIC_ACQUIRE);
+    out->flags |= __atomic_load_n(&b->share_guards, __ATOMIC_ACQUIRE);
+    out->shared = true;
+}
+
+static void proc_image_taint_one(struct Burrow *b, void *arg) {
+    if (__atomic_load_n(&b->share_guards, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED)
+        *(bool *)arg = true;
+}
+
+// Is `as`'s image tainted beyond what its Procs' own words say? The space's
+// record of departed holders (which vma_remove_in also feeds when a tainted
+// shared Burrow is unmapped) and the record of every shared anonymous Burrow
+// it maps that another space maps. The walk runs FIRST: an unmap folds into
+// guards_ever under as->lock before it unlinks, so a read of guards_ever after
+// the walk sees whatever the walk missed. Caller holds g_proc_table_lock.
+static bool proc_image_record_tainted_locked(struct AddrSpace *as) {
+    if (!as) return false;
+    bool t = false;
+    proc_image_shared_visit(as, proc_image_taint_one, &t);
+    return t || (__atomic_load_n(&as->guards_ever, __ATOMIC_RELAXED) & PROC_FLAG_DEBUG_TAINTED);
+}
+
+bool proc_image_tainted_locked(const struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) extinction("proc_image_tainted_locked: NULL or corrupted Proc");
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) ||
+           proc_image_record_tainted_locked(p->as);
+}
+
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     if (!out) extinction("proc_image_join_locked: NULL out");
     out->caps   = CAP_NONE;
     out->flags  = 0;
     out->shared = false;
     if (!p || !p->as) return;
+
+    // The other address spaces this image reaches through shared anonymous
+    // memory: each such Burrow's record holds every sharer's caps and guards,
+    // departed ones included, and any one of them makes the image shared.
+    // Asked before the sole-owner return below, which knows only this space,
+    // and before the space's own record is read, because an unmap folds a
+    // shared Burrow's taint into that record before it unlinks the mapping.
+    proc_image_shared_visit(p->as, proc_image_join_shared_one, out);
 
     // The holders that have LEFT the image, sole mapper or not: what they held is
     // still in the bytes (a creator's code aliases, a driver's device windows, a
@@ -3023,7 +3090,52 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     // true -- which is the direction that matters, since a missed sharer here is
     // a privilege question rather than a cosmetic one.
     u32 others = (u32)(refs - 1);
-    out->shared = others > w.zombies;
+    if (others > w.zombies) out->shared = true;
+}
+
+struct proc_image_share_note {
+    caps_t caps;
+    u32    guards;
+};
+
+static void proc_image_share_fork_one(struct Burrow *b, void *arg) {
+    const struct proc_image_share_note *n = arg;
+    __atomic_fetch_or(&b->share_caps, n->caps, __ATOMIC_RELAXED);
+    __atomic_fetch_or(&b->share_guards, n->guards, __ATOMIC_RELAXED);
+    __atomic_store_n(&b->share_spaces, true, __ATOMIC_RELEASE);
+}
+
+void proc_image_share_fork_locked(struct Proc *parent, struct Proc *child) {
+    if (!parent || parent->magic != PROC_MAGIC || !child || child->magic != PROC_MAGIC)
+        extinction("proc_image_share_fork_locked: NULL or corrupted Proc");
+    struct AddrSpace *cas = child->as;
+    if (!cas || cas == parent->as || !cas->xshare) return;
+    // Everything that could drive these bytes from the parent's side: its
+    // whole join (the Procs on its space, the space's departed holders, and
+    // the records of what it already shares), its own word, and the child's.
+    // Read in the hold that publishes the child, the one every elevation path
+    // holds, so an elevation that raced ahead is weighed here and one that
+    // comes after finds the Burrow shared and is refused.
+    struct ProcImageJoin j;
+    proc_image_join_locked(parent, &j);
+    struct proc_image_share_note n;
+    n.caps   = j.caps
+             | __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE)
+             | __atomic_load_n(&child->caps, __ATOMIC_ACQUIRE);
+    n.guards = (j.flags
+                | __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE)
+                | __atomic_load_n(&child->proc_flags, __ATOMIC_ACQUIRE))
+             & PROC_IMAGE_GUARDS;
+    // The child's space is unpublished, so no visitor marks it shared yet;
+    // walk it directly (its xshare came from the clone).
+    irq_state_t vs = spin_lock_irqsave(&cas->lock);
+    for (struct Vma *v = cas->vmas; v; v = v->next) {
+        if (v->magic != VMA_MAGIC) extinction("proc_image_share_fork_locked: corrupted VMA list entry");
+        struct Burrow *b = v->burrow;
+        if (b && b->type == BURROW_TYPE_ANON_SHARED) proc_image_share_fork_one(b, &n);
+    }
+    spin_unlock_irqrestore(&cas->lock, vs);
+    if (parent->as) parent->as->xshare = 1u;
 }
 
 static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
@@ -3031,13 +3143,24 @@ static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
         __atomic_fetch_or(&q->proc_flags, w->bits, __ATOMIC_RELAXED);
 }
 
+static void proc_image_stamp_shared_one(struct Burrow *b, void *arg) {
+    __atomic_fetch_or(&b->share_guards, *(const u32 *)arg, __ATOMIC_RELEASE);
+}
+
 // OR `bits` into `p` AND into every other mapper of its address space (zombies
-// included) -- a restriction on the image binds every door to it. Caller holds
-// g_proc_table_lock.
+// included), and into the share record of every shared anonymous Burrow its
+// space maps that another space maps too -- a restriction on the image binds
+// every door to it. Caller holds g_proc_table_lock, and no address space's lock.
+
 static void proc_image_stamp_locked(struct Proc *p, u32 bits) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_image_stamp_locked: NULL or corrupted Proc");
     __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
+    // And every other space this image reaches through shared anonymous
+    // memory (vote 120): the bits go on each such Burrow's record, which those
+    // spaces' joins read.
+    u32 guards = bits & PROC_IMAGE_GUARDS;
+    if (p->as && guards) proc_image_shared_visit(p->as, proc_image_stamp_shared_one, &guards);
     if (!p->as || addrspace_owner_count(p->as) <= 1) return;
     struct proc_image_walk w = { .target = p, .out = NULL, .zombies = 0, .bits = bits };
     proc_image_visit(proc_image_stamp_one, &w);
@@ -5693,6 +5816,12 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         // be unwound.
         handle_private_exec_latch(p);
         old   = p->as;
+        // The image this Proc leaves may be tainted where its own word is not
+        // (vote 120: a shared Burrow debugged through another space, or a
+        // tainted one it unmapped); the taint survives exec, so it goes on the
+        // word before the image does.
+        if (proc_image_tainted_locked(p))
+            __atomic_fetch_or(&p->proc_flags, PROC_FLAG_DEBUG_TAINTED, __ATOMIC_RELAXED);
         addrspace_record_holder(old, p);
         p->as = nas;
 

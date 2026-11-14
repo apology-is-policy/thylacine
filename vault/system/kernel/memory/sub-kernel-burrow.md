@@ -478,6 +478,15 @@ node, the child pays only its leaf, and the free refunds it all) and
 `node_charge_hand_over_adopts` (the payer lapses inside the mint, so the node
 charge makes the hand-over and the fault adopts again).
 
+**The share record (operator vote 120, 2026-11-14; DEBUG-FS-DESIGN 3.4).** An
+ANON_SHARED Burrow also carries `share_caps`, `share_guards` (the
+`PROC_IMAGE_GUARDS` bits) and `share_spaces`: the image guards of every Proc that
+maps it or ever has, from any address space, and whether a fork has mapped it
+into a second space. The fork's publication writes it and every image stamp on a
+space that maps it ORs into it, both with atomic ORs under `g_proc_table_lock`;
+the image join reads it, and `vma_remove_in` reads its taint to fold into the
+unmapping space. Nothing clears it. Its rules are [[sub-kernel-proc]]'s.
+
 ### The cross-Proc share
 
 `burrow_share_into` makes one Burrow reachable from **two** Procs — the first

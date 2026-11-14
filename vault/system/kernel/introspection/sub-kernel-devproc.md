@@ -635,6 +635,24 @@ only image files served out of the address space rather than out of the Proc.
 The walk is skipped entirely when `addrspace_ref_count == 1`, which is almost
 always, so the ordinary debug operation pays nothing for it.
 
+Since operator vote 120 (2026-11-14; DEBUG-FS-DESIGN 3.4) the image also reaches
+across address spaces: a shared anonymous Burrow a fork mapped into a second
+space is part of both images, and its share record holds every sharer's caps and
+guards ([[sub-kernel-proc]]). So cover must cover the sharers in every space,
+`NOTRACE` or `NODUMP` on any of them refuses, and a debug write through one side
+taints the other side's image. The witnesses fork a real `addrspace_clone` and
+run the publication's record write as `rfork_internal` does, each against the
+same fork over a private map: `devproc.share_join_cover` (a peer covering only
+the stripped child is refused it), `devproc.share_join_elevation` (neither side
+elevates while mapping the Burrow; unmapped, the parent does),
+`devproc.share_join_seals` (`NODUMP` taken after the fork reaches the child
+through the stamp, taken before it through the publication; `NOTRACE` after
+the fork refuses control) and `devproc.share_join_taint` (the child's taint
+reaches the parent's image but not its word, outlives the parent's unmap, and
+still refuses its elevation). A kernel test cannot reach a fork that continues
+at EL0, so the publication's call site in `rfork_internal`, and the exec and pts
+taint readers, are covered by review only.
+
 ### The register write has a privilege guard
 
 Applying an edited `regs` struct writes x0–x30, SP_EL0 and ELR_EL1 — and

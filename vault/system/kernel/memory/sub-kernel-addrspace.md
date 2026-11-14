@@ -286,7 +286,12 @@ telemetry) / `guards_ever` and `caps_ever` (2026-10-08,
 [[dec-2026-10-08-image-holder-record]]: the image's record of the Procs that have
 left it -- their `NODUMP` / `NOTRACE` / `DEBUG_TAINTED` bits and their caps,
 ORed in at each departure and never cleared; the I-39 image join weighs them,
-[[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
+[[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`; since vote 120
+`guards_ever` also takes the taint of a shared anonymous Burrow the space unmaps,
+[[sub-kernel-vma]]) / `xshare` (vote 120: the space maps a shared anonymous
+Burrow that another space maps; set by `clone_one_vma`'s shared arm on the
+unpublished child space and on the parent's at the fork's publication, read by
+the image join, never cleared) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4)
 / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
 `paid_burrows` (the record-paid Burrows whose payer record names this space --

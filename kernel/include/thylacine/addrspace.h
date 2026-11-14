@@ -150,8 +150,9 @@ struct AddrSpace {
     // here, their caps in caps_ever below. A holder's authority stays in the bytes
     // after the holder is gone -- an RFMEM child keeps the image its creator filled
     // -- so the image join weighs the record beside its live mappers. Written at
-    // every departure (addrspace_record_holder), never cleared; exec's fresh
-    // space starts without one.
+    // every departure (addrspace_record_holder), and with the taint of a shared
+    // anonymous Burrow this space unmaps (vma_remove_in, vote 120); never
+    // cleared; exec's fresh space starts without one.
     u32            guards_ever;
 
     // B-1a' audit F4: this space's identity, for the records that outlive it.
@@ -180,14 +181,21 @@ struct AddrSpace {
     // (Burrow.paid_next/prev), under g_payer_lock (burrow.c), never
     // as->lock. addrspace_destroy lapses them after the drain.
     struct Burrow *paid_burrows;
+
+    // Vote 120 (I-39; DEBUG-FS-DESIGN 3.4): this space maps a shared anonymous
+    // Burrow that a fork has mapped into another space, so the image join must
+    // read those Burrows' share records. Set by clone_one_vma on a fork's
+    // unpublished space, and on the parent's at the publication under
+    // g_proc_table_lock; read under that lock; never cleared.
+    u32            xshare;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 96,
-               "AddrSpace is 96 bytes: ref+lock (8) + pgtable_root (8) + "
+_Static_assert(sizeof(struct AddrSpace) == 104,
+               "AddrSpace is 104 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
                "page_budget + page_peak + pgtable_pages + file_pages + "
                "guards_ever (32) + id (8) + caps_ever (8) + owners + "
-               "private_rings (8) + paid_burrows (8). "
+               "private_rings (8) + paid_burrows (8) + xshare (4, padded to 8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM
