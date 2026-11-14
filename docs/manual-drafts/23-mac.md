@@ -25,9 +25,9 @@ cat /mnt/mac/snarf
 echo 'from the guest' > /mnt/mac/snarf
 ```
 
-The pasteboard is set when the file is closed, from everything written since it was opened; nothing written empties it. Text that is not valid UTF-8 is set with each invalid sequence replaced by U+FFFD. A read takes the pasteboard's text when it starts at the beginning of the file, and later reads of the same open file continue that text, even if the Mac's pasteboard changes meanwhile. The file cannot be opened for reading and writing at once; such an open fails with `permission denied`. Its size reads 0 and its mode `0600`.
+The pasteboard is set when the file is closed, to everything written since it was opened, so opening the file for writing and closing it without writing anything empties the pasteboard. Text that is not valid UTF-8 is set with each invalid sequence replaced by U+FFFD. A read takes the pasteboard's text when it starts at the beginning of the file, and later reads of the same open file continue that text, even if the Mac's pasteboard changes meanwhile. The file cannot be opened for reading and writing at once; such an open fails with `permission denied`. Its size reads 0 and its mode `0600`.
 
-Only plain text is carried. A pasteboard that holds no text, such as one holding only an image, reads as empty. Text larger than 16 MiB can be neither read nor written through `snarf`.
+Only plain text is carried. A pasteboard that holds no text, such as one holding only an image, reads as empty. Text larger than 16 MiB can be neither read nor written through `snarf`: the read, or the write that passes 16 MiB, fails with `kernel error (errno 27)`, the Linux code for a file too large.
 
 ### Use a shared folder
 
@@ -43,9 +43,18 @@ rm /mnt/mac/folders/work/drafts/new.txt
 rmdir /mnt/mac/folders/work/drafts
 ```
 
-`work` and `notes.txt` in these commands are illustrative names. Each change is made on the Mac before the command that made it returns, and programs on the Mac see it immediately. A file created from the guest belongs on the Mac to the Mac user who runs the app. `mv` within one shared folder is a rename on the Mac; between two shared folders, it fails (`kernel error (errno 18)`).
+`work` and `notes.txt` in these commands are illustrative names. Each change is made on the Mac before the command that made it returns, and programs on the Mac see it immediately. A file created from the guest belongs on the Mac to the Mac user who runs the app.
 
-Only regular files and directories can be opened. A Mac device, socket or named pipe in a shared folder is listed, but opening it fails. A Mac file that the Mac user cannot read cannot be read from the guest either.
+`mv` within one shared folder is a rename on the Mac. Between two shared folders it fails with `kernel error (errno 18)`, the Linux code for a move across file systems, and between a shared folder and the guest's own files it fails with `invalid argument`. To move a file across either boundary, copy it and then remove the original:
+
+```sh
+cp /tmp/report.txt /mnt/mac/folders/work/report.txt
+rm /tmp/report.txt
+```
+
+`/tmp/report.txt` is an illustrative name. The copy is made on the Mac by the time `cp` returns, so the original can be removed then.
+
+Only regular files and directories can be opened. A Mac device, socket or named pipe in a shared folder is listed, but opening it fails with `permission denied`. A Mac file that the Mac user cannot read cannot be read from the guest either.
 
 ### Read-only folders
 
@@ -63,20 +72,20 @@ A refused redirection prints nothing; it sets `$status` to 1 and `$errstr` to a 
 
 ### Ownership and permissions
 
-Every file under `/mnt/mac` is reported as owned by the session's user and that user's primary group, whatever its owner on the Mac:
+Every file under `/mnt/mac` is reported as owned by the session's user, whatever its owner on the Mac, and its group number is the user's own number:
 
 ```sh
 stat /mnt/mac/folders/work/notes.txt
 id
 ```
 
-The `Uid` and `Gid` that `stat` prints are the `uid` and `gid` that `id` prints. The owner bits of the mode are the Mac file's owner bits, with write removed in a read-only folder, and the group and other bits are always zero: a Mac file of mode `0644` reads `0600`, and in a read-only folder `0400`. `chmod` changes the Mac file's mode. A change of owner or group to anyone other than the session's user is refused.
+The `Uid` that `stat` prints is the `uid` that `id` prints, and the `Gid` is that same number, whatever the user's primary group. The owner bits of the mode are the Mac file's owner bits, with write removed in a read-only folder, and the group and other bits are always zero: a Mac file of mode `0644` reads `0600`, and in a read-only folder `0400`. `chmod` sets the Mac file's mode as given, and the guest goes on reading only its owner bits. A change of owner to anyone other than the session's user, or of group to any number other than the user's, fails with `permission denied`.
 
 ### Links in a shared folder
 
 A symbolic link in a shared folder is followed within `/mnt/mac`. A relative target is resolved from the directory that holds the link. An absolute target is resolved from `/mnt/mac`, so a link whose target is `/folders/work/notes.txt` names `/mnt/mac/folders/work/notes.txt`. A link that the Mac uses to reach a file outside the shared folder, such as `config -> /Users/me/.config/app`, names `/mnt/mac/Users/me/.config/app` in the guest, and a command that follows it fails as for a missing file. To make such a file available, move it into a shared folder or share its folder.
 
-The Mac app never follows a link on the Mac. If a directory that a program has entered is replaced on the Mac by a link, the next lookup in that directory fails with `too many levels of symbolic links`, and nothing outside the shared folder is read.
+The Mac app never follows a link on the Mac. If the Mac replaces a directory that a program is using with a link, nothing outside the shared folder is read through it. A working directory is kept as a name, so the next lookup beside it walks down from the root again, meets the link, and follows it within `/mnt/mac` as any link there is followed. A link to a Mac folder outside the share then names nothing, and the lookup fails with `no such file or namespace entry`.
 
 ### When the Mac app goes away
 
@@ -105,11 +114,11 @@ Login starts every session program through `newns`, which opens `/srv/mac` as th
 
 ### Ownership and the Mac user
 
-The Mac app performs every operation on the Mac as the user who runs it, and reports each file to the guest as owned by the session's user. The session's user therefore has the owner's access in Thylacine to any file the Mac user can reach in a shared folder, and the Mac's own permissions still apply to what the Mac app can do. Group and other bits are reported as zero because the Mac's groups have no meaning in the guest.
+The Mac app performs every operation on the Mac as the user who runs it, and reports each file to the guest as owned by the session's user, with that user's number as its group as well. The session's user therefore has the owner's access in Thylacine to any file the Mac user can reach in a shared folder, and the Mac's own permissions still apply to what the Mac app can do. Group and other bits are reported as zero because the Mac's groups have no meaning in the guest.
 
 ### How links resolve
 
-`/srv/mac` is posted as a remote service, the declaration Haul's posts carry, because the line's data leaves the guest. A link served by a remote session is resolved by the kernel within the mount it was reached through, which for `/mnt/mac` is the session's mount. The Mac app reports a link as a link and never resolves one on the Mac: each lookup and open on the Mac takes one name at a time from the shared folder's root and refuses to pass through a link. A link that appears on the Mac under a directory the guest has entered is therefore refused by the Mac app itself.
+`/srv/mac` is posted as a remote service, the declaration Haul's posts carry, because the line's data leaves the guest. A link served by a remote session is resolved by the kernel within the mount it was reached through, which for `/mnt/mac` is the session's mount. The Mac app reports a link as a link and never resolves one on the Mac: each lookup and open on the Mac takes one name at a time from the shared folder's root and refuses to pass through a link. A lookup the kernel makes from a directory it already holds, such as one a program took as a path handle before the Mac replaced it with a link, is therefore refused by the Mac app itself, with `too many levels of symbolic links`. A working directory holds no such reference: it is a name, resolved again from the root for each lookup.
 
 ### Errors
 

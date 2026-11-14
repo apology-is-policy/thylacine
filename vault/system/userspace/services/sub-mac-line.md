@@ -127,10 +127,19 @@ app-departure hangs no connection up at leg 4, and a newns that does not mount a
 Mac's end there is the fake app. Not yet audited (round R5).
 
 `ls-mac-folders` runs the shared folders through the guest's kernel against the app itself,
-checking every change on the Mac: the shares listed and read, a write, mkdir, mv, rm and rmdir,
-links contained beneath `/mnt/mac` (the remote post above), a link swapped in under the guest's
-cwd refused by the app, the read-only share's EROFS, ownership and modes. Against a scripted guest that runs each command as the kernel does (9P against the real app, one name per walk, open before create, a served link resolved beneath the mount; aux-gate `scendry-folders`, resid/scendry-folders-1.out), the clean app is green, all seven legs, and ten faults are red, each at its own leg: five of the guest (no `docs` listed, no write, no rename, links resolved from the guest's root, a cwd re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest -- the host uid reported, group bits kept). NOT YET RUN
-IN A GUEST.
+checking every change on the Mac: the shares listed and read, a write, mkdir, mv, rm, rmdir and a
+cp from the guest's own files, links contained beneath `/mnt/mac` (the remote post above), a
+link the Mac puts in place of a directory the guest is using, the read-only share's EROFS,
+ownership and modes. The swapped directory is met two ways. The cwd is a name (LS-4), so a read
+beside it walks from the root again, meets the link, and the kernel resolves it beneath
+`/mnt/mac` (ENOENT). `mac-line-probe beneath <dir> <name>` holds the directory as an O_PATH
+handle (walked, never opened) until a line on its stdin, then opens the name through it: that
+walk starts at the app's old directory, and the app refuses it (ELOOP). Against a scripted guest
+that runs each command as the kernel does (9P against the real app, one name per walk, open
+before create, a served link resolved beneath the mount, the cwd a name; aux-gate
+`scendry-folders`): the clean app is green, all seven legs, and twelve faults are red, each at its own leg: seven of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-5.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (run 9, 2026-11-14, 54bb63f6d) legs 1 to 4
+were green with the app; leg 5 as it then stood assumed a cwd holds a fid, and was red. The
+corrected leg is NOT YET RUN IN A GUEST.
 
 ## Seams
 

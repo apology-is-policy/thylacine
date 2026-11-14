@@ -216,8 +216,15 @@ red, each at its own check. In a guest under HVF (run 8, 2026-11-14, fce70866d) 
 all five legs, with the app in the fake's place: the app's first guest run.
 
 `ls-mac-folders` drives the shared folders through the guest's kernel against the app and
-checks each change in the Mac's folder. Against a scripted guest that runs each command as the kernel does (9P against the real app, one name per walk, open before create, a served link resolved beneath the mount; aux-gate `scendry-folders`, resid/scendry-folders-1.out), the clean app is green, all seven legs, and ten faults are red, each at its own leg: five of the guest (no `docs` listed, no write, no rename, links resolved from the guest's root, a cwd re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest -- the host uid reported, group bits kept). NOT YET RUN IN A GUEST, and not yet audited
-(round R5).
+checks each change in the Mac's folder. The app's O_NOFOLLOW_ANY is reached by a walk from a
+fid the kernel holds below a directory the Mac replaced with a link, which `mac-line-probe
+beneath` makes with an O_PATH handle; a cwd is a name, re-walked from the root, and the kernel
+meets the link itself. Against a scripted guest that runs each command as the kernel does (9P
+against the real app, one name per walk, open before create, a served link resolved beneath the
+mount, the cwd a name; aux-gate `scendry-folders`): the clean app is green, all seven legs, and twelve faults are red, each at its own leg: seven of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-5.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (run 9,
+2026-11-14, 54bb63f6d) legs 1 to 4 were green with the app; leg 5 as it then stood assumed a cwd
+holds a fid, and was red. The corrected leg is NOT YET RUN IN A GUEST, and none of it is
+audited (round R5).
 
 ## Seams
 

@@ -6,6 +6,12 @@
 //                                then set snarf to <text>
 //   mac-line-probe hold <n>      connect, then read snarf once a second for n seconds; a read
 //                                after the Mac app went away is an error, and is said
+//   mac-line-probe beneath <dir> <name>
+//                                hold <dir> as a path handle, wait for a line on stdin, then
+//                                open <name> through the handle and read it. The walk starts at
+//                                the held directory's fid, so if the Mac put a link in <dir>'s
+//                                place meanwhile, the app's own refusal answers (ELOOP); a cwd
+//                                is a name, re-walked from the root, and never reaches it
 //
 // Every result is one `mac-line-probe:` line on stdout; the status is 0 only when each step went
 // as the tree says.
@@ -24,8 +30,8 @@ use core::time::Duration;
 
 use libthyla_rs::io::Write;
 use libthyla_rs::{
-    t_close, t_fstat, t_open, t_read, t_readdir, t_write, T_OREAD, T_ORDWR, T_OTRUNC, T_OWRITE,
-    T_WALK_OPEN_FROM_ROOT,
+    t_close, t_fstat, t_open, t_read, t_readdir, t_write, T_OPATH, T_OREAD, T_ORDWR, T_OTRUNC,
+    T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
 const S_IFMT: u32 = 0o170000;
@@ -192,6 +198,37 @@ fn hold(secs: u64) -> bool {
     true
 }
 
+fn beneath(dir: &[u8], name: &[u8]) -> bool {
+    let (dir_s, name_s) = (String::from_utf8_lossy(dir), String::from_utf8_lossy(name));
+    // A navigation handle: walked, never opened, so the server still walks from its fid.
+    let h = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, dir.as_ptr(), dir.len(), T_OPATH) };
+    if h < 0 {
+        say(&alloc::format!("beneath: {} did not open: {}", dir_s, why(h)));
+        return false;
+    }
+    say(&alloc::format!("beneath: holding {}", dir_s));
+    let mut b = [0u8; 1];
+    loop {
+        let n = unsafe { t_read(0, b.as_mut_ptr(), 1) };
+        if n <= 0 || b[0] == b'\n' || b[0] == b'\r' {
+            break;
+        }
+    }
+    let fd = open_at(h, name, T_OREAD);
+    unsafe { t_close(h) };
+    if fd < 0 {
+        say(&alloc::format!("beneath: {} refused: {}", name_s, why(fd)));
+        return libthyla_rs::err::Error::from_syscall_return(fd)
+            == Err(libthyla_rs::err::Error::SymlinkLoop);
+    }
+    match read_all(fd) {
+        Ok(got) => say(&alloc::format!("beneath: {} read {} bytes: {}", name_s, got.len(), String::from_utf8_lossy(&got))),
+        Err(e) => say(&alloc::format!("beneath: {} opened, and its read failed: {}", name_s, e)),
+    }
+    unsafe { t_close(fd) };
+    false
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let args: Vec<&[u8]> = libthyla_rs::env::args().collect();
@@ -201,8 +238,9 @@ pub extern "C" fn rs_main() -> i64 {
             let n = args.get(2).and_then(|a| core::str::from_utf8(a).ok()).and_then(|s| s.parse().ok()).unwrap_or(5);
             hold(n)
         }
+        Some(b"beneath") if args.len() == 4 => beneath(args[2], args[3]),
         _ => {
-            say("usage: mac-line-probe once <text> | hold <seconds>");
+            say("usage: mac-line-probe once <text> | hold <seconds> | beneath <dir> <name>");
             false
         }
     };

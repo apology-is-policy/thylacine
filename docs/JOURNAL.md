@@ -68,13 +68,16 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   in seven legs, checking each change in the Mac's folder:
   - the shares listed, and files one and two levels down read;
   - a write;
-  - mkdir, mv, rm and rmdir;
+  - mkdir, mv, rm and rmdir, and cp from the guest's own files;
   - links contained beneath `/mnt/mac`;
-  - a link the Mac swaps in under the guest's cwd, refused by the app with ELOOP;
+  - a link the Mac swaps in for a directory the guest is using: beside the cwd, which is a name,
+    the kernel resolves it beneath `/mnt/mac` (ENOENT); from a handle `mac-line-probe beneath`
+    held across the swap, the app refuses the walk (ELOOP);
   - the read-only share's EROFS for a create, a write over a file and a remove;
   - ownership and modes.
   Leg 5 is there because the kernel walks one name at a time and resolves a link it is served
-  itself, so the app's O_NOFOLLOW_ANY is reached only by a link that appears under a walked fid.
+  itself, so the app's O_NOFOLLOW_ANY is reached only by a walk from a fid the kernel holds below
+  the change: a held handle's, never a cwd's (run 9, below).
   Without an app binary it skips (exit 77), as haul-links does without its server.
 
 ### Wrong turns, and what caught each
@@ -128,6 +131,30 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   says HELLO 35 s after its boot starts, as a guest does, and waits 120 s for the login. There
   the committed scenario fails at the same check with the same words, and the fixed one is
   green.
+- **Leg 5 assumed a cwd holds a fid** (guest run 9). It is a name: kernel/territory.c's
+  `cwd_join` joins a relative path onto `dot_path`, and the result is resolved from the root
+  (LS-4, STALK-DESIGN 4.3). So after the Mac swapped `d` for a link, `cat secret.txt` walked down
+  again, met the link, and the kernel resolved it beneath `/mnt/mac`: ENOENT, not the app's
+  ELOOP. Nothing outside the share was read. The scripted guest modelled the kernel I had in
+  mind, a cwd walked from its fid, and carried the kernel's real behaviour as a fault
+  (`rootwalk`), so the leg was red by design on a correct kernel and the no-follow mutant was
+  caught only inside the wrong model. This entry's What "shown" covers had named the premise as
+  unshown; nothing read the kernel before the fake was written, and the memory held the lesson
+  (a mock is the upstream neighbour). Fixed three ways:
+  - the scripted guest resolves a cwd by name, and against the old scenario it gives run 9's
+    failure word for word (resid/scendry-folders-3.out); the old model is the fault `fidcwd`;
+  - `mac-line-probe beneath <dir> <name>` holds the directory as an O_PATH handle across the
+    swap. The handle is walked, never opened (the app refuses a walk from an opened fid, as
+    Stratum does, kernel/stalk.c:472), so its walk starts at the app's old directory and meets
+    O_NOFOLLOW_ANY;
+  - leg 5 checks both: the held handle's ELOOP, then the cwd's ENOENT.
+- **The manual draft, checked claim by claim against the code**, had four wrong: the group a
+  file reports is the user's own number, not the primary group (tree.rs `gid: uid`; michael is
+  1000/1000, which hid it); closing a `snarf` opened for writing with nothing written empties the
+  pasteboard; opening a Mac fifo, socket or device fails with `permission denied` (EPERM, read as
+  EACCES); and `mv` between a share and the guest's own files fails with `invalid argument`
+  (OPEN-BUGS 2026-10-15 00:17Z). Leg 3 now copies a guest file in with `cp`, the manual's way
+  across that edge.
 
 ### Evidence
 
@@ -200,6 +227,13 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   (the app's record shows the session's attach `n_uname=1000`). `ls-mac-folders` failed at its
   own first wait, the wrong turn above, with no leg run, so none of its controls ran.
 - **The scripted guest, made faithful to the boot** (resid/scendry-folders-2.out): the clean app green, all seven legs, and the same ten faults red, each at its own leg; the committed scenario (fce70866d) red at the HELLO wait, as in run 8 (SCENDRY-FOLDERS DONE bad=0).
+- **Guest run 9** (11:40-11:51Z, 54bb63f6d, resid/live8-run9.out, mac released). `ls-mac-line`
+  green again, all five legs. `ls-mac-folders` legs 1 to 4 green in a real guest with the app:
+  the shares listed and read, a write, mkdir, mv, rm and rmdir checked on the Mac, and links
+  resolved beneath `/mnt/mac`, the remote post's first guest evidence. Leg 5 red, the wrong turn
+  above (`refused: no such file or namespace entry (a read beside the cwd, after the swap)`), so
+  the controls did not run.
+- **The scripted guest, made faithful to the cwd**: the clean app is green, all seven legs, and twelve faults are red, each at its own leg: seven of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-5.out, SCENDRY-FOLDERS DONE bad=0.
 
 ### Decided by the operator
 
@@ -212,18 +246,19 @@ session's mount attached as the user and read through, a program's walk with own
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
 tools/mac-app-fake.py, not the app. In run 8 a guest spoke to the app itself: `ls-mac-line` was
-green, all five legs, with the app in the fake's place. `ls-mac-folders` and the remote post are shown against the scripted guest
-only: whether the kernel walks a relative read from the cwd's fid (leg 5's premise) is a guest
-run's to show, and the `rootwalk` fault shows the leg would then read red, not green. None of it
-is audited (round R5).
+green, all five legs, with the app in the fake's place. In run 9 a guest ran `ls-mac-folders`
+legs 1 to 4 green against the app, the remote post's leg among them; leg 5's premise failed
+there. The corrected leg 5, leg 3's cp, legs 6 and 7, and every control are shown against the
+scripted guest only. None of it is audited (round R5).
 
 ### Open
 
-- Guest run 9: `ls-mac-folders` green, then the five app mutants (resid/mutbin) and the
-  `noremote` control bake, each red at its leg (resid-live8.sh, as for run 8).
+- Guest run 10: `ls-mac-folders` green with the held-handle leg and cp, then the five app mutants
+  (resid/mutbin) and the `noremote` control bake, each red at its leg (resid-live10.sh).
 - libthyla-rs names no EROFS: a refused write reads `kernel error (errno 30)`, and `$errstr`
-  `Other(30)`. Display names for 30, 27, 18 and 36, and every exhaustive match on `Error`,
-  are owed with the manual's `/mnt/mac` section.
+  `Other(30)`. Names for 30, 27, 18 and 36 wait on an operator vote (the EISDIR precedent:
+  named with signoff, docs/ERRORS.md), asked together with EXDEV for a cross-device rename and
+  `mv`'s copy fallback (OPEN-BUGS 2026-10-15 00:17Z).
 - I-d: the power key and Quit; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor

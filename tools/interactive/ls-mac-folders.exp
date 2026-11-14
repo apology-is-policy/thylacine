@@ -7,16 +7,19 @@
 #
 #   1. folders/ lists both shares, and files one and two levels down read as the Mac wrote them.
 #   2. A file the guest writes holds the guest's bytes on the Mac.
-#   3. mkdir, mv, rm and rmdir each change the Mac's folder as they say.
+#   3. mkdir, mv, rm and rmdir each change the Mac's folder as they say, and cp brings a file of
+#      the guest's own into a share.
 #   4. A link in a shared folder is a served link (DISTRO 4.6; the driver posts /srv/mac remote):
 #      a relative one resolves beside it, and an absolute one beneath /mnt/mac -- one naming
 #      /folders/work/... reads the share's file, and one naming the guest's own /tmp decoy reads
 #      nothing. Without the remote declaration both flip.
-#   5. The app follows no host link: the guest stands in a shared directory, the Mac swaps that
-#      directory for a link to a folder outside the share, and a read beside the guest's cwd is
-#      refused with ELOOP. The outside file's words never reach the guest. (The kernel walks one
-#      name at a time and resolves a link it is served itself, so only a link that appears under
-#      a walked fid reaches the app's own O_NOFOLLOW_ANY.)
+#   5. A link the Mac puts in place of a directory the guest is using: the guest stands in a
+#      shared directory, and mac-line-probe holds it as a path handle, while the Mac swaps it
+#      for a link to a folder outside the share. The handle walks from its fid, so the app's
+#      own O_NOFOLLOW_ANY refuses the next step (ELOOP). The cwd is a name (LS-4): a read beside
+#      it walks from the root again, meets the link, and the kernel resolves that beneath
+#      /mnt/mac, where the Mac's path names nothing (ENOENT). The outside file's words reach
+#      the guest by neither.
 #   6. The read-only share reads, and refuses a create, a write over a file and a remove with
 #      EROFS (errno 30); the Mac's folder is unchanged.
 #   7. Every file is the session user's (the uid `id` names), with the host file's owner bits:
@@ -133,7 +136,7 @@ proc run_status {cmd tag phase} {
     set re "[string toupper $tag] STATUS (\[0-9\]+) ERR(\[^\r\n\]*) END\[\r\n\]"
     lc_within $::lc_cmd_timeout {
         -re $re                                              { set st $expect_out(1,string); set err [string trim $expect_out(2,string)] }
-        -re {(cat|ls|mkdir|mv|rm|rmdir|tr|ut): ([^\r\n]*)[\r\n]} { lc_fail "[string trimright $expect_out(0,string)] ($phase)" }
+        -re {(cat|cp|ls|mkdir|mv|rm|rmdir|tr|ut): ([^\r\n]*)[\r\n]} { lc_fail "[string trimright $expect_out(0,string)] ($phase)" }
         -re {EXTINCTION:}                                    { lc_extinction_fail "kernel extinction during '$phase'" }
         timeout                                              { lc_fail "timeout waiting for \[$tag\]'s status ($phase)" }
         eof                                                  { lc_fail "unexpected EOF during '$phase'" }
@@ -185,7 +188,9 @@ run_ok "rm /mnt/mac/folders/work/made/moved.txt" leg3c "rm"
 on_mac [expr {![file exists $::W/made/moved.txt]}] "work/made/moved.txt is gone"
 run_ok "rmdir /mnt/mac/folders/work/made" leg3d "rmdir"
 on_mac [expr {![file exists $::W/made]}] "work/made is gone"
-lc_pass "ls-mac-folders: mkdir, mv, rm and rmdir each changed the Mac's folder as they say"
+run_ok "cp /tmp/mac-decoy-a /mnt/mac/folders/work/copied.txt" leg3e "cp from the guest's /tmp into the share"
+on_mac [expr {[read_file $::W/copied.txt] eq "guest side a\n"}] "work/copied.txt holds the guest file's line"
+lc_pass "ls-mac-folders: mkdir, mv, rm, rmdir and cp each changed the Mac's folder as they say"
 
 # ---- 4. served links, contained beneath /mnt/mac.
 read_ok /mnt/mac/folders/work/rel "REACHED BY A RELATIVE LINK" "a relative link resolves beside itself"
@@ -197,18 +202,44 @@ if {$why ne "no such file or namespace entry"} {
 }
 lc_pass "ls-mac-folders: the Mac's links resolve beneath /mnt/mac -- the share's file, never the guest's"
 
-# ---- 5. the app follows no host link, even one swapped in under the guest.
+# ---- 5. a link the Mac puts in place of a directory the guest is using.
 lc_send "cd /mnt/mac/folders/work/d"
 read_ok inside.txt "INSIDE THE DIRECTORY THE MAC SWAPS" "a read beside the cwd, before the swap"
+# The probe waits for a line on its stdin between taking the handle and the walk from it. The
+# echoed command line holds no `mac-line-probe:`; only the probe's own lines do.
+lc_send "mac-line-probe beneath /mnt/mac/folders/work/d secret.txt"
+lc_within $lc_cmd_timeout {
+    -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
+    -re {(mac-line-probe|ut): ([^\r\n]*)[\r\n]}      { lc_fail "[string trimright $expect_out(0,string)] (the probe, before the swap)" }
+    -re {EXTINCTION:}                                { lc_extinction_fail "kernel extinction at the probe's hold" }
+    timeout                                          { lc_fail "mac-line-probe beneath said nothing" }
+    eof                                              { lc_fail "unexpected EOF at the probe's hold" }
+}
+if {![string match "holding *" $said]} { lc_fail "mac-line-probe: beneath: $said (before the swap)" }
+lc_step "the probe holds work/d as a path handle"
 file rename $::W/d $::W/d-before
 exec ln -s $::O $::W/d
 lc_step "on the Mac: work/d is now a link to $::O"
+lc_send ""
+lc_within $lc_cmd_timeout {
+    -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
+    -re {EXTINCTION:}                                { lc_extinction_fail "kernel extinction at the walk from the held handle" }
+    timeout                                          { lc_fail "the probe said nothing once released, after the swap" }
+    eof                                              { lc_fail "unexpected EOF at the walk from the held handle" }
+}
+if {[string match "secret.txt read *" $said]} {
+    lc_fail "the guest read the outside file through the held handle: $said"
+}
+if {$said ne "secret.txt refused: too many levels of symbolic links"} {
+    lc_fail "the walk from the handle held across the swap gave '$said', not the app's ELOOP"
+}
+lc_step "refused: too many levels of symbolic links (a walk from the handle held across the swap)"
 set why [read_refused secret.txt "SECRET OUTSIDE THE SHARE" "a read beside the cwd, after the swap"]
-if {$why ne "too many levels of symbolic links"} {
-    lc_fail "the read through the swapped-in link failed with '$why', not the app's ELOOP"
+if {$why ne "no such file or namespace entry"} {
+    lc_fail "the read beside the cwd after the swap failed with '$why', not as a name /mnt/mac lacks"
 }
 lc_send "cd"
-lc_pass "ls-mac-folders: a link swapped in under the guest's cwd is refused (ELOOP); nothing outside the share was read"
+lc_pass "ls-mac-folders: a link the Mac swapped in is refused from a held handle (ELOOP) and resolved beneath /mnt/mac from the cwd (ENOENT); nothing outside the share was read"
 
 # ---- 6. the read-only share.
 read_ok /mnt/mac/folders/docs/readme.txt "READ ONLY WORDS" "the read-only share reads"
