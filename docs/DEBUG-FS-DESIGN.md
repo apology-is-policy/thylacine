@@ -670,6 +670,81 @@ the image, even after the aliases or the windows are gone.
   peer whose caps cover the driver's covers its orphan, exactly as it covers the
   live driver.
 
+### 3.4 The join across address spaces: shared anonymous memory (operator vote 120, 2026-11-14)
+
+> **An image also includes every shared anonymous Burrow it maps that a fork has
+> mapped into another address space. Each such Burrow keeps a record of the guards
+> of every Proc that maps it or ever has, from any space, and the join reads that
+> record.** Cover must cover every sharer in every space. `NOTRACE` or `NODUMP` on
+> any sharer refuses control or extraction. No Proc elevates while it maps such a
+> Burrow.
+
+**The defect (audit round 35 F1).** Section 3.3's join is computed over the Procs
+sharing ONE `AddrSpace`. Shared anonymous memory (`MAP_SHARED|MAP_ANONYMOUS`, vote
+117) is the first writable memory a fork shares between TWO spaces: the child's
+space maps the parent's `BURROW_TYPE_ANON_SHARED` Burrow itself, with no copy. So a
+parent holding elevation-only caps forks a child, the I-2 carve strips the child,
+and a same-owner debugger that covers only the child writes the parent's bytes
+through `/proc/<child>/mem`. The same shape defeats the seals: `NODUMP` on the
+parent does not refuse reading the child's `mem`. It also defeats the elevation
+refusal: the parent can elevate in place while it still shares the memory, which
+is the state the refusal exists to prevent. Linux never meets this, because Linux
+elevates by a setuid exec and exec drops every shared mapping. Thylacine elevates
+in place, so the mapping survives.
+
+**The record.** Each `ANON_SHARED` Burrow carries `share_caps`, `share_guards` (the
+`NODUMP`, `NOTRACE` and `DEBUG_TAINTED` bits) and `share_spaces`. All three are
+written and read only under `g_proc_table_lock`, and nothing clears them. They
+have two writers:
+
+- **The fork's publication.** `proc_image_share_fork_locked` runs in the
+  `rfork_internal` publication hold, beside the taint inheritance. It covers every
+  shared Burrow the child's new space maps. Into each it ORs the parent's whole
+  join, the parent's own word and the child's word, and it sets `share_spaces`.
+- **The stamp.** `proc_image_stamp_locked` already ORs a seal or the taint into
+  every Proc on the stamped Proc's space. It now also ORs the bits into every such
+  Burrow that space maps.
+
+The space carries `xshare`, meaning it maps a Burrow that another space maps. The
+clone sets it on the child's unpublished space and the publication sets it on the
+parent's; it is never cleared. The join walks the target's mappings only when its
+space has `xshare`. The walk holds `as->lock`, under the established
+`g_proc_table_lock -> as->lock` edge that `format_maps` and the `mem` copy already
+take. For each Burrow with `share_spaces`, the join ORs the record into its caps
+and flags and sets `shared`.
+
+**Why one snapshot at the fork is enough.** Caps grow only by elevation, and
+elevation is refused for every Proc that maps a Burrow with `share_spaces`. So once
+the publication has run, no sharer's caps grow. Before it, the publication reads
+the parent's join under the lock that the elevation paths hold. An elevation that
+raced ahead of the publication is therefore in the snapshot, and one that comes
+after is refused. A Proc that joins a sharing space later, such as an `RFMEM` peer
+or a later fork's child, carries caps bounded by a Proc already weighed (I-2). A
+seal or taint taken after the fork arrives through the stamp.
+
+**`shared` means "ever shared, while mapped".** The record cannot tell when the
+other side unmapped the Burrow or died, so the refusal is conservative. A Proc that
+needs to elevate unmaps the shared memory first, which is what Linux's setuid exec
+does implicitly. The record itself is never lifted, because the bytes a departed
+sharer wrote, or kept secrets in, are still there.
+
+**Cost.** One mapping walk per join, only for a space that forked shared memory.
+It is bounded by `PROC_VMA_MAX` and runs with interrupts off under the two locks.
+The ordinary space never sets `xshare` and pays nothing.
+
+**What this does NOT close.**
+
+- **Weft `SHARED_IN` regions** (`burrow_share_into`) are writable in two spaces
+  too, netd's and its client's, and they are not in the join. Such a region is a
+  protocol buffer that the server validates (I-37). It carries only that client's
+  traffic and confers no authority of netd's. Joining netd's caps into the
+  client's image would put every weft client out of its owner's debugger's reach
+  and gain nothing. The residue is that a `NODUMP` netd's ring bytes can be read
+  through the client's `mem`, and those bytes are the client's own traffic. The
+  exclusion awaits the operator's word (OPEN-BUGS 2026-11-14T15:50Z).
+- A COW child's *private* copies are untouched: whether a copy of a secret is
+  itself secret is still decision A.
+
 ## 4. 8a-1 — the software-checkpoint tier
 
 The first landing: a working cross-Proc inspector — stop a target at a checkpoint,
