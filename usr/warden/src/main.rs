@@ -163,6 +163,22 @@ driver "nocturned" {
     lifecycle = persistent
 }
 "#,
+    r#"
+driver "virtio-serial" {
+    abi   = 1
+    binds = ["virtio-pci:3"]
+    needs {
+        pci = "node"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
+        # Ten queue pages, the control buffers and 16 x 4 KiB each way: 176 KiB.
+        dma = "pool: 256 KiB"
+    }
+    serves    = "/srv/mac"
+    restart   = on-crash
+    lifecycle = persistent
+}
+"#,
 ];
 
 // The TEST FIXTURES: bound only when the caller passes `--with-fixtures`

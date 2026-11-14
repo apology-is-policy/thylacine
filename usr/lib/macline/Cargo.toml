@@ -1,0 +1,19 @@
+# macline -- the channel framing of the line to the Mac (version mac1, docs/MAC-RUNNER.md 4.4).
+#
+# The guest's virtio-serial driver and the Mac app both build this one source, so the
+# two ends of the line cannot read the format differently. It has no dependencies and
+# makes no system calls, so `tools/test-rust.sh` runs its tests on the host:
+# `cargo test -p macline --lib --target <host-triple>`.
+
+[package]
+name = "macline"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "macline"
+path = "src/lib.rs"
+
+[dependencies]

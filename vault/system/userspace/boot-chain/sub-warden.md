@@ -15,7 +15,7 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-09-25
+updated: 2026-11-14
 ---
 ## Trusted graphical seat bootstrap
 
@@ -100,7 +100,8 @@ one.
 
 The bind database is **two sets since #230, and the split is a safety boundary.**
 `BUILTIN_MANIFESTS` is the PRODUCTION set — real hardware (the NIC driver,
-lictor, netd), bound in every build shape. `FIXTURE_MANIFESTS` — the 5c
+lictor, netd, nocturned, and virtio-serial for the line to the Mac,
+[[sub-mac-line]]), bound in every build shape. `FIXTURE_MANIFESTS` — the 5c
 grant/narrowing proof (`menagerie-probe`) and the 5e-2 restart-ladder demo
 (`crash-probe`) — is bound ONLY when the caller passes `--with-fixtures` (joey
 does, from inside its probe ladder). The split is not cosmetic: `menagerie-probe`

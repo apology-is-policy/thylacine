@@ -1,0 +1,11 @@
+[package]
+name = "mac-line-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# A guest witness of the line to the Mac (docs/MAC-RUNNER.md 4.4): it connects to /srv/mac as
+# the calling user and reads the tree version 1 through the kernel's 9P client.
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

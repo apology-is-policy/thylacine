@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**740 owned · 36 unowned · 776 files (95% owned) · ~12012 unswept lines.**
+**745 owned · 36 unowned · 781 files (95% owned) · ~12012 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **98 files, ~50827 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **99 files, ~51041 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -78,7 +78,7 @@ Excluded as harness and counted here rather than dropped: **98 files, ~50827 lin
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 36 | 1 | 196 |
 | arch | 41 | 2 | 146 |
-| usr/lib | 130 | 1 | 72 |
+| usr/lib | 131 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 17 | 1 | 2 |
 | mm | 8 | 0 | 0 |
@@ -124,6 +124,7 @@ Excluded as harness and counted here rather than dropped: **98 files, ~50827 lin
 | usr/virtio-mmio-source | 1 | 0 | 0 |
 | usr/virtio-net-arp | 1 | 0 | 0 |
 | usr/virtio-net-loop | 1 | 0 | 0 |
+| usr/virtio-serial | 4 | 0 | 0 |
 | usr/viv | 2 | 0 | 0 |
 | usr/warden | 1 | 0 | 0 |
 

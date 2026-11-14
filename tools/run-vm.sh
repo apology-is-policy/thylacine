@@ -867,6 +867,22 @@ if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
     audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on$pci_sound_addr")
 fi
 
+# THYLACINE_MAC_LINE=<socket path>: the line to the Mac (docs/MAC-RUNNER.md 4.4). A virtio
+# console function whose one port, org.thylacine.mac, is a unix socket QEMU listens on (one
+# client at a time, taken again after a disconnect); the Mac app, or tools/mac-app-fake.py,
+# connects to it. The guest's usr/virtio-serial posts /srv/mac. Launched after every other
+# PCI function, so it moves none of their slots.
+mac_flags=()
+if [[ -n "${THYLACINE_MAC_LINE:-}" ]]; then
+    case "$THYLACINE_MAC_LINE" in
+        *,*) echo "run-vm.sh: THYLACINE_MAC_LINE cannot hold a comma, QEMU's option separator: '$THYLACINE_MAC_LINE'" >&2
+             exit 2 ;;
+    esac
+    mac_flags=(-chardev "socket,id=mac,path=$THYLACINE_MAC_LINE,server=on,wait=off"
+               -device "virtio-serial-pci,id=mac-pci0,max_ports=2,disable-legacy=on"
+               -device "virtserialport,chardev=mac,name=org.thylacine.mac,nr=1")
+fi
+
 # THYLACINE_QEMU_EXTRA: whitespace-separated arguments appended verbatim, for a
 # caller that cannot reach this script's own argv (the interactive gates spawn
 # it with a fixed command line). The diagnostic lever: e.g.
@@ -926,7 +942,7 @@ for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]
             ${net_flags[@]+"${net_flags[@]}"} ${input_flags[@]+"${input_flags[@]}"} \
             ${gpu_flags[@]+"${gpu_flags[@]}"} ${rng_flags[@]+"${rng_flags[@]}"} ${audio_flags[@]+"${audio_flags[@]}"} \
             ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
-            ${share_flags[@]+"${share_flags[@]}"} ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
+            ${share_flags[@]+"${share_flags[@]}"} ${mac_flags[@]+"${mac_flags[@]}"} ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
     if [[ "$_prev" == -device || "$_prev" == --device ]]; then
         _spec=${_arg%%,*}
         _spec=${_spec#driver=}
@@ -997,4 +1013,5 @@ exec qemu-system-aarch64 \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \
     ${share_flags[@]+"${share_flags[@]}"} \
+    ${mac_flags[@]+"${mac_flags[@]}"} \
     ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}

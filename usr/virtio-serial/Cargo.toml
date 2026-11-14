@@ -1,0 +1,33 @@
+# virtio-serial -- the line to the Mac (docs/MAC-RUNNER.md 4.4). The warden-bound driver of
+# the virtio console device (virtio-pci:3): it finds the port org.thylacine.mac, posts
+# /srv/mac, and relays each guest connection as one channel of the framing mac1.
+#
+# Build (device): `cargo build -p virtio-serial` (default features -> the driver).
+# Host tests (the control messages and the relay's rules): `cargo test -p virtio-serial
+#   --lib --no-default-features --target <host-triple>` (libthyla-rs does not build on
+#   the host).
+
+[package]
+name = "virtio-serial"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "virtio_serial"
+path = "src/lib.rs"
+
+[[bin]]
+name = "virtio-serial"
+path = "src/main.rs"
+required-features = ["driver"]
+
+[features]
+default = ["driver"]
+driver = ["dep:libdriver", "dep:libthyla-rs"]
+
+[dependencies]
+macline = { path = "../lib/macline" }
+libdriver = { path = "../lib/libdriver", optional = true }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

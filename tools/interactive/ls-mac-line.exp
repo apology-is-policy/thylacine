@@ -1,0 +1,159 @@
+#!/usr/bin/expect -f
+# ls-mac-line -- the line to the Mac (docs/MAC-RUNNER.md 4.4) end to end. The Mac app is
+# played by tools/mac-app-fake.py on the virtio console port org.thylacine.mac
+# (THYLACINE_MAC_LINE), and every leg asserts what the HOST saw, in the fake's log, beside
+# what the guest printed:
+#
+#   1. The line comes up: the fake read the driver's HELLO (maxframe 16384, the driver's) and
+#      sent its own; the driver posted /srv/mac.
+#   2. A session uses the tree: `mac-line-probe once` as michael reads snarf (the fake's text),
+#      sees O_RDWR refused and folders/ an empty directory, and writes snarf (the fake logs the
+#      bytes). Ownership is checked against a THIRD source: the probe's stat and the fake's
+#      logged n_uname are both what `id` says michael is -- two sources alone would agree on a
+#      wrong principal too.
+#   3. The app goes away while a connection is held: the driver says every channel closed, the
+#      held connection's reads fail, and a new connect fails at once.
+#   4. A new app connects: the driver sends HELLO again and a new connect works.
+#
+# Uses the --config ci image (a serial-console login).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set ::mac_sock [file join $::lc_repo build "mac-line-[pid].sock"]
+set ::mac_log [file join $::lc_repo build "mac-line-[pid].log"]
+set ::mac_text "hello from the mac"
+catch {file delete -force $::mac_sock $::mac_log}
+set ::env(THYLACINE_MAC_LINE) $::mac_sock
+
+proc fake_start {} {
+    set ::fake_pid [exec python3 [file join $::lc_repo tools mac-app-fake.py] \
+        --socket $::mac_sock --log $::mac_log --snarf $::mac_text >>& $::mac_log.err &]
+    lc_step "mac-app-fake started (pid $::fake_pid)"
+}
+proc fake_stop {} {
+    catch {exec kill $::fake_pid}
+    lc_step "mac-app-fake stopped (pid $::fake_pid)"
+}
+exit -onexit {
+    catch {exec kill $::fake_pid}
+    catch {file delete -force $::mac_sock}
+}
+
+# The fake's log since `from` lines in, as one string.
+proc fake_lines {from} {
+    if {[catch {set f [open $::mac_log r]}]} { return "" }
+    set all [split [read $f] "\n"]
+    close $f
+    return [join [lrange $all $from end] "\n"]
+}
+proc fake_count {} {
+    if {[catch {set f [open $::mac_log r]}]} { return 0 }
+    set n [llength [split [read $f] "\n"]]
+    close $f
+    return [expr {$n - 1}]
+}
+# Wait for a regex in the fake's log after line `from`; its first match, or fail.
+proc fake_wait {from re secs phase} {
+    for {set i 0} {$i < $secs * 5} {incr i} {
+        if {[regexp -line -- $re [fake_lines $from] m]} {
+            lc_step "fake saw: $m ($phase)"
+            return $m
+        }
+        after 200
+    }
+    lc_fail "the fake's log had no \[$re\] within ${secs}s ($phase); its log after line $from: [fake_lines $from]"
+}
+proc fake_never {from re phase} {
+    if {[regexp -line -- $re [fake_lines $from] m]} {
+        lc_fail "the fake's log has \[$m\] ($phase)"
+    }
+}
+# Run a probe command; its `mac-line-probe:` lines up to the final one, as text.
+proc probe {cmd final phase} {
+    global lc_cmd_timeout timeout
+    lc_send $cmd
+    set timeout $lc_cmd_timeout
+    set got ""
+    expect {
+        -re {mac-line-probe: ([^\r\n]*)[\r\n]} {
+            set line $expect_out(1,string)
+            append got "$line\n"
+            if {[regexp -- $final $line]} {
+                lc_step "probe: $line ($phase)"
+                return $got
+            }
+            exp_continue
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the probe's \[$final\] during '$phase'; it said: $got" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+fake_start
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# ---- 1. the line is up.
+fake_wait 0 {hello maxframe=16384} 30 "the driver's HELLO, with the driver's maxframe, reached the fake"
+fake_never 0 {line malformed|discarded} "nothing malformed or stale on a fresh line"
+
+# ---- 2. a session uses the tree.
+lc_send "id"
+lc_within $lc_cmd_timeout {
+    -re {uid=([0-9]+) gid=} { set me $expect_out(1,string) }
+    -re {EXTINCTION:}     { lc_extinction_fail "kernel extinction at id" }
+    timeout               { lc_fail "id printed no uid" }
+    eof                   { lc_fail "unexpected EOF at id" }
+}
+lc_step "michael is principal $me"
+set mark [fake_count]
+set out [probe "mac-line-probe once from-the-guest" {^once: } "the probe's walk of the tree"]
+if {![string match "*once: every step as the tree says*" $out]} {
+    lc_fail "the probe found the tree not as 4.4 says: $out"
+}
+if {![string match "*snarf read [string length $::mac_text] bytes: $::mac_text*" $out]} {
+    lc_fail "snarf did not read the fake's text: $out"
+}
+if {![regexp {snarf owner uid=([0-9]+) gid=([0-9]+)} $out - ouid ogid]} {
+    lc_fail "the probe printed no owner: $out"
+}
+set att [fake_wait $mark {attach n_uname=([0-9]+) uname='' aname=''} 10 "the session's attach"]
+regexp {n_uname=([0-9]+)} $att - nuname
+if {$ouid != $me || $ogid != $me || $nuname != $me} {
+    lc_fail "ownership: id says $me, the stat says $ouid:$ogid, the attach carried $nuname -- all three must agree"
+}
+lc_pass "ls-mac-line: the attach carried michael's principal ($me) and every file shows it as owner"
+fake_wait $mark {snarf set 14 bytes 'from-the-guest'} 10 "the guest's write reached the Mac"
+fake_wait $mark {close chan [0-9]+} 10 "the probe's connection closed its channel"
+lc_pass "ls-mac-line: snarf read the Mac's text and a write set it; O_RDWR refused; folders/ empty"
+
+# ---- 3. the app goes away under a held connection.
+lc_send "mac-line-probe hold 12 &"
+lc_expect "mac-line-probe: hold: connected" "a connection is held"
+lc_expect_re {mac-line-probe: hold [0-9]+: snarf read [0-9]+ bytes} "the held connection reads"
+fake_stop
+lc_expect "virtio-serial: the Mac app went away; every channel is closed" "the driver saw the app go"
+lc_expect_re {mac-line-probe: hold [0-9]+: snarf read failed: } "the held connection's read fails"
+set out [probe "mac-line-probe once nobody-there" {^(once: |connect /srv/mac failed)} "a connect with no app"]
+if {![string match "*connect /srv/mac failed*" $out]} {
+    lc_fail "a connect with no app on the line did not fail: $out"
+}
+lc_pass "ls-mac-line: with the app gone the held connection fails and a new connect is refused"
+
+# ---- 4. a new app.
+set mark [fake_count]
+fake_start
+lc_expect "virtio-serial: the Mac app is on the line" "the driver saw the new app"
+fake_wait $mark {hello maxframe=16384} 15 "the driver's HELLO on the new line"
+lc_expect "mac-line-probe: hold: done" "the held probe finished"
+set out [probe "mac-line-probe once second-line" {^once: } "the tree over the new line"]
+if {![string match "*once: every step as the tree says*" $out]} {
+    lc_fail "the tree over the new line is not as 4.4 says: $out"
+}
+fake_wait $mark {snarf set 11 bytes 'second-line'} 10 "the write over the new line"
+fake_never $mark {line malformed} "the new line stayed well-formed"
+lc_pass "ls-mac-line: a new app gets a fresh line and the tree works again"
+
+lc_quit

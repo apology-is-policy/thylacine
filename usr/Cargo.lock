@@ -1094,6 +1094,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mac-line-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "macline"
+version = "0.1.0"
+
+[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2249,6 +2260,15 @@ name = "virtio-net-probe"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",
+]
+
+[[package]]
+name = "virtio-serial"
+version = "0.1.0"
+dependencies = [
+ "libdriver",
+ "libthyla-rs",
+ "macline",
 ]
 
 [[package]]
