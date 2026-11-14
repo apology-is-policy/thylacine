@@ -6640,6 +6640,7 @@ static void sd_stderr_drain_main(void *arg) {
 // unchanged, for SD_SETTLE_QUIET parks in a row. A drainer that read its last chunk and
 // was then kept off a CPU for that long, before counting it, is the case this misses.
 // Bounded, so a daemon that keeps writing cannot hold the end of the boot.
+#define SD_SETTLE_PARK_MS 10
 #define SD_SETTLE_QUIET 3
 #define SD_SETTLE_PARKS 100
 static void sd_drain_settle(void) {
@@ -6649,7 +6650,7 @@ static void sd_drain_settle(void) {
     int quiet = 0;
     for (int i = 0; i < SD_SETTLE_PARKS && quiet < SD_SETTLE_QUIET; i++) {
         if (__atomic_load_n(&sd_drain_done, __ATOMIC_ACQUIRE)) return;
-        (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+        (void)t_torpor_wait(&pacer, 0u, (long)SD_SETTLE_PARK_MS * 1000L);
         struct pollfd pfd = { .fd = (int)sd_drain_fd, .events = POLLIN, .revents = 0 };
         int pending = t_poll(&pfd, 1, 0) > 0;
         unsigned long printed = __atomic_load_n(&sd_drain_printed, __ATOMIC_ACQUIRE);

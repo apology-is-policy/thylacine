@@ -297,7 +297,7 @@ back-pressure bug — see [[haz-unread-pipe-wedge]].
 stratumd wrote last -- why it refused the boot attach, say -- never reached the
 console: on 2026-11-12 a failed attach extincted with no cause, and finding it
 meant reading three trees. `main` now wraps `joey_main`. Once the drainer is up,
-`sd_drain_settle` parks (`REAP_PARK_MS`) until three parks in a row find the
+`sd_drain_settle` parks 10 ms at a time until three parks in a row find the
 pipe empty (a zero-timeout poll, which takes nothing from the drainer), no
 chunk between the drainer's read and its print (two counts the drainer
 advances on either side of `t_puts`), and the printed count unmoved; or until
