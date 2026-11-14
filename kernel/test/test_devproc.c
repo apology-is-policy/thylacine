@@ -3659,12 +3659,16 @@ void test_devproc_maps_shared_anon(void) {
 // acts in the window between the pin and the render, on a target mapping one
 // page at 0x10000000: a page mapped there shows (the render follows the walk),
 // a seal refuses the read, an exec-shaped swap of the space renders the new
-// space (a second render), and a target unlinked there reads as gone. Every leg
-// checks that the read dropped its pin.
+// space (a second render), and a target unlinked there reads as gone. The idle
+// leg reads the space's references in the window, where the pin must be held;
+// every leg checks that the read dropped it.
 static struct Proc *g_mw_target, *g_mw_other;
-static int          g_mw_calls, g_mw_map_rc;
+static int          g_mw_calls, g_mw_map_rc, g_mw_window_refs;
 
-static void mw_nothing(void) { g_mw_calls++; }
+static void mw_nothing(void) {
+    g_mw_calls++;
+    g_mw_window_refs = addrspace_ref_count(g_mw_target->as);
+}
 static void mw_map(void) {
     g_mw_calls++;
     struct Burrow *b = burrow_create_anon_lazy(PAGE_SIZE);
@@ -3692,6 +3696,7 @@ void test_devproc_maps_render_after_the_walk(void) {
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
     g_mw_map_rc = -9;
+    g_mw_window_refs = -1;
     for (int i = 0; i < LEGS; i++) {
         got[i] = -2;
         built[i] = first_row[i] = new_row[i] = other_row[i] = false;
@@ -3743,6 +3748,7 @@ void test_devproc_maps_render_after_the_walk(void) {
         TEST_EXPECT_EQ(refs_after[i], refs_before[i], "the read dropped its pin");
     TEST_ASSERT(got[0] > 0 && first_row[0], "control: past an idle window, the target's row");
     TEST_EXPECT_EQ(calls[0], 1, "control: one render");
+    TEST_EXPECT_EQ(g_mw_window_refs, refs_before[0] + 1, "the walk pinned the space it renders");
     TEST_EXPECT_EQ(g_mw_map_rc, 0, "the window mapped a second page");
     TEST_ASSERT(got[1] > 0 && first_row[1] && new_row[1],
                 "a page mapped after the walk shows: the render follows it");

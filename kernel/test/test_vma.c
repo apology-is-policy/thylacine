@@ -316,7 +316,9 @@ void test_vma_insert_after_checks_neighbours(void) {
     const int rz = vma_insert_after_in(as, false, z, a);
     const int ry = vma_insert_after_in(as, false, y, a);
     const int rh = vma_insert_after_in(as, false, h, NULL);
-    const int rz2 = vma_insert_after_in(as, false, z, NULL);  // z at the head
+    // z goes in again only if it was refused: a linked mapping inserted twice is
+    // an extinction, and a broken check must read as a failure here, not a crash.
+    const int rz2 = rz != 0 ? vma_insert_after_in(as, false, z, NULL) : -2;
     const int rw  = vma_insert_after_in(as, false, w, c);
     const u64 steps = g_vma_insert_steps_for_test - steps0;
 
@@ -327,7 +329,10 @@ void test_vma_insert_after_checks_neighbours(void) {
         if (v != want[i] || (v && v->prev != prev)) order = false;
     if (v) order = false;
 
-    vma_free(x); vma_free(y); vma_free(h);    // refused: never linked
+    if (rx != 0) vma_free(x);                 // refused: never linked (else the drain frees it)
+    if (ry != 0) vma_free(y);
+    if (rh != 0) vma_free(h);
+    if (rz != 0 && rz2 != 0) vma_free(z);
     vma_drain(p);
     p->state = 2;                             // PROC_STATE_ZOMBIE
     proc_free(p);
