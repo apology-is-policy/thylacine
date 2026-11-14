@@ -17,6 +17,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>       // the test step counter keys on current_thread()
 #include <thylacine/visibility.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -266,6 +267,7 @@ static void vma_insert_check(const struct AddrSpace *as, const struct Vma *v) {
 
 #ifdef KERNEL_TESTS
 u64 g_vma_insert_steps_for_test;
+struct Thread *g_vma_insert_steps_owner_for_test;
 #endif
 
 // The link half of an insert: prev is the last mapping below v (NULL: v becomes
@@ -313,7 +315,8 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     struct Vma *cur  = as->vmas;
     while (cur) {
 #ifdef KERNEL_TESTS
-        g_vma_insert_steps_for_test++;
+        if (g_vma_insert_steps_owner_for_test == current_thread())
+            g_vma_insert_steps_for_test++;
 #endif
         if (cur->magic != VMA_MAGIC) extinction("vma_insert: corrupted list entry");
         if (ranges_overlap(v->vaddr_start, v->vaddr_end,
@@ -327,9 +330,9 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     return vma_link_in(as, exempt, v, prev, cur);
 }
 
-// Only prev's two neighbours are compared, and that is exact: the list is sorted
-// and disjoint, so every mapping before prev ends before prev starts and every
-// one after prev's successor starts after it.
+// Only the cursor and its successor are compared, and that is exact: the list is
+// sorted and disjoint, so every mapping before prev ends before prev starts and
+// every one after prev's successor starts after it.
 int vma_insert_after_in(struct AddrSpace *as, bool exempt, struct Vma *v, struct Vma *prev) {
     vma_insert_check(as, v);
     if (prev && (prev->magic != VMA_MAGIC || !vma_linked_in(as, prev)))

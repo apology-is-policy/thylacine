@@ -714,7 +714,10 @@ static size_t format_maps_in(struct AddrSpace *as, bool show_code, char *buf, si
     bool   complete  = true;
     for (u32 c = 0; c < MAPS_CLASSES; c++) withheld[c] = 0;
 
-    irq_state_t vs = spin_lock_irqsave(&as->lock);
+    // No interrupt mask: this runs after the table walk, under no other lock,
+    // and no handler takes a space's lock, so a long holder (a fork's clone)
+    // costs this CPU its wait, never its tick.
+    spin_lock(&as->lock);
     for (struct Vma *v = as->vmas; v; v = v->next) {
         // The house SLUB-clobber defense every vma.c list walker runs
         // (vma_lookup / vma_insert / vma_remove_in / vma_find_gap). Not optional
@@ -731,7 +734,7 @@ static size_t format_maps_in(struct AddrSpace *as, bool show_code, char *buf, si
         }
         if (!maps_put_vma(v, buf, cap, &off)) { complete = false; break; }
     }
-    spin_unlock_irqrestore(&as->lock, vs);
+    spin_unlock(&as->lock);
 
     if (nwithheld == 0 || !complete) return off;
     // Room for the withheld rows comes from dropping whole rows off the end.
@@ -1593,9 +1596,25 @@ static inline void devproc_maps_test_window(void) {
     if (fn && __atomic_load_n(&g_maps_test_owner, __ATOMIC_RELAXED) == current_thread())
         fn();
 }
+
+// Between the render and the recheck: what lands here must still refuse the read.
+static void (*g_maps_test_rendered)(void);
+static struct Thread *g_maps_test_rendered_owner;
+
+void devproc_maps_test_set_rendered_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_maps_test_rendered_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_maps_test_rendered, fn, __ATOMIC_RELEASE);
+}
+
+static inline void devproc_maps_test_rendered(void) {
+    void (*fn)(void) = __atomic_load_n(&g_maps_test_rendered, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_maps_test_rendered_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
 #else
 static inline void devproc_ns_test_window(void) {}
 static inline void devproc_maps_test_window(void) {}
+static inline void devproc_maps_test_rendered(void) {}
 #endif
 
 // A maps read whose space an exec keeps replacing stops after this many renders.
@@ -1687,6 +1706,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
         for (u32 tries = 1; ; tries++) {
             devproc_maps_test_window();
             r.total = format_maps_in(r.as, r.show_code, content, cap);
+            devproc_maps_test_rendered();
             struct AddrSpace *rendered = r.as;
             r.recheck = true;
             r.found   = false;

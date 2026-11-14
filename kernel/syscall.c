@@ -15844,6 +15844,13 @@ static s64 viv_mmap(struct Proc *p, const u64 *args) {
         // Linux reads the fd through fget(unsigned int).
         sp = sys_get_mapping_spoor(p, (u64)(u32)a[4], &readable, &writable);
         if (!sp)                                     return -(s64)T_E_BADF;
+        // ksys_mmap_pgoff, right after fget and before do_mmap asks anything:
+        // MAP_HUGETLB through a file that is not hugetlbfs is EINVAL, and no
+        // file here is (/dev/zero included).
+        if ((u32)a[3] & (u32)VIV_MAP_HUGETLB) {
+            spoor_clunk(sp);
+            return -(s64)T_E_INVAL;
+        }
     }
     if (a[1] == 0) {
         if (sp) spoor_clunk(sp);

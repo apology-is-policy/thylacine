@@ -23,6 +23,7 @@
 struct Proc;
 struct Burrow;
 struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
+struct Thread;
 
 // VMA permission bits. Map to PTE_KERN_TEXT/RO/RW + user-bit at PTE
 // installation time (P3-Db). At v1.0 P3-Da these are policy markers
@@ -369,8 +370,10 @@ int         vma_insert_after_in(struct AddrSpace *as, bool exempt, struct Vma *v
                                 struct Vma *prev);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
 #ifdef KERNEL_TESTS
-// Every list node an insert's walk visits (vma_insert_in; the cursor form walks none).
-extern u64  g_vma_insert_steps_for_test;
+// Every list node an insert's walk visits (vma_insert_in; the cursor form walks
+// none), counted only on the owner thread, so no other Proc's insert moves it.
+extern u64            g_vma_insert_steps_for_test;
+extern struct Thread *g_vma_insert_steps_owner_for_test;
 // True iff v sits in as's list, by its links and the head -- for a Vma in as's
 // list or in none; one interior to another space's list reads linked.
 // vma_remove_in extincts on a Vma for which this is false. Caller holds as->lock.

@@ -1066,6 +1066,7 @@ enum {
     VIV_MAP_ANONYMOUS       = 0x20,
     VIV_MAP_NORESERVE       = 0x4000,
     VIV_MAP_STACK           = 0x20000,
+    VIV_MAP_HUGETLB         = 0x40000,   // through a descriptor: EINVAL (no file here is hugetlbfs)
     VIV_MAP_FIXED_NOREPLACE = 0x100000,
 };
 

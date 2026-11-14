@@ -730,12 +730,15 @@ ascending), `vma.drain_releases_all` (insert four, drain, assert
 symmetry), `vma.linked_in_tracks_the_list` (the predicate the remove guard
 asks, over a never-inserted, sole, head, interior and tail VMA, each removed
 shape, and a forged predecessor and successor), and
-`vma.insert_after_checks_neighbours` (the cursor insert: each of its two checks
-refuses an overlap and a span that belongs elsewhere, each refused span then
-fits at its own cursor, a span touching its neighbour's end fits, the list ends
-sorted with every back link right, and no insert walks --
+`vma.insert_after_checks_neighbours` (the cursor insert: the cursor check
+refuses an overlap and a span that belongs before the cursor, the successor check
+an overlap and a span that belongs PAST the successor while overlapping nothing --
+the leg a mere overlap test would pass (audit round 39 F2) -- each refused span
+then fits at its own cursor, a span touching its neighbour's end fits, the list
+ends sorted with every back link right, and no insert walks --
 `g_vma_insert_steps_for_test`, which counts every node `vma_insert_in`'s walk
-visits). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
+visits on the thread named in `g_vma_insert_steps_owner_for_test`, so no other
+Proc's insert moves a witness's count). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
 reservation answers whole / part true and past / below / empty false; with the
 middle two pages detached, across the hole false and each remnant true; and
 the decommit core over the same shape -- across the hole `T_E_NOMEM`, a

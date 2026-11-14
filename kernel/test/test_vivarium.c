@@ -163,6 +163,9 @@ static s64 viv_shell_call(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3) {
 // file never reaches) and read-only (the file arm, which refuses every Dev but
 // dev9p and devramfs). The control, one variable away: the same calls on
 // /dev/null, which Linux refuses too.
+static s64 viv_mmap_args(struct Proc *p, u64 addr, u64 len, u64 prot, u64 flags,
+                         u64 fd, u64 off);
+
 static s64 viv_mmap_call(struct Proc *p, u64 prot, u64 fd) {
     struct exception_context c;
     for (int i = 0; i < 31; i++) c.regs[i] = 0;
@@ -208,7 +211,7 @@ void test_vivarium_mmap_dev_zero_is_anonymous(void) {
     hidx_t nfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devnull.attach(""));
     hidx_t wfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, devzero.attach(""));
     hidx_t ofd = viv_opath_handle(p, &devzero);
-    s64 zrw = -1, zro = -1, nrw = 0, nro = 0, wro = 0, oro = 0;
+    s64 zrw = -1, zro = -1, nrw = 0, nro = 0, wro = 0, oro = 0, zhuge = 0;
     bool zrw_anon = false, zro_anon = false;
     if (zfd >= 0 && nfd >= 0 && wfd >= 0 && ofd >= 0) {
         zrw = viv_mmap_call(p, VIV_PROT_READ | VIV_PROT_WRITE, (u64)zfd);
@@ -217,6 +220,8 @@ void test_vivarium_mmap_dev_zero_is_anonymous(void) {
         nro = viv_mmap_call(p, VIV_PROT_READ, (u64)nfd);
         wro = viv_mmap_call(p, VIV_PROT_READ, (u64)wfd);
         oro = viv_mmap_call(p, VIV_PROT_READ, (u64)ofd);
+        zhuge = viv_mmap_args(p, 0, PAGE_SIZE, VIV_PROT_READ | VIV_PROT_WRITE,
+                              VIV_MAP_PRIVATE | VIV_MAP_HUGETLB, (u64)zfd, 0);
         zrw_anon = viv_anon_at(p, zrw, (u32)(VMA_PROT_READ | VMA_PROT_WRITE));
         zro_anon = viv_anon_at(p, zro, (u32)VMA_PROT_READ);
     }
@@ -232,6 +237,7 @@ void test_vivarium_mmap_dev_zero_is_anonymous(void) {
     // Only a descriptor a file mapping would accept is rewritten (round 32 F3).
     TEST_EXPECT_EQ(wro, -(s64)T_E_ACCES, "a write-only /dev/zero: EACCES, as Linux");
     TEST_EXPECT_EQ(oro, -(s64)T_E_BADF, "an O_PATH /dev/zero: EBADF, as Linux");
+    TEST_EXPECT_EQ(zhuge, -(s64)T_E_INVAL, "MAP_HUGETLB through /dev/zero (not hugetlbfs): EINVAL, as Linux (zrw is the control)");
 }
 
 // Both mapping cores judge the descriptor as Linux's mmap does: one naming
@@ -426,8 +432,9 @@ void test_vivarium_mmap_shared_dev_zero(void) {
 }
 
 // The phenotype judges an mmap in Linux's order -- arm64 sys_mmap's offset
-// check, fget, then do_mmap's length, window, map type and access mode -- and
-// an anonymous call reads neither fd nor offset. Each refusal is paired with a
+// check, fget, ksys_mmap_pgoff's MAP_HUGETLB test, then do_mmap's length,
+// window, map type and access mode -- and an anonymous call reads neither fd nor
+// offset. Each refusal is paired with a
 // call one step later in that order, which answers the next step's errno.
 void test_vivarium_mmap_order_is_linux(void) {
     struct Proc *p = proc_alloc();
@@ -447,8 +454,8 @@ void test_vivarium_mmap_order_is_linux(void) {
     bool empty = handle_get(p, (hidx_t)none, &probe) < 0;
     if (!empty) handle_put(&probe);
     bool ok = rfd >= 0 && wfd >= 0 && ofd >= 0 && empty;
-    s64 r[18];
-    for (int i = 0; i < 18; i++) r[i] = 0;
+    s64 r[23];
+    for (int i = 0; i < 23; i++) r[i] = 0;
     bool anon_fd = false, anon_dead = false, anon_canon = false;
     if (ok) {
         r[0]  = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV, none, 0x10);
@@ -472,6 +479,11 @@ void test_vivarium_mmap_order_is_linux(void) {
         r[15] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, PRIV, (u64)wfd, 0);
         r[16] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, PRIV, (u64)rfd, 0);
         r[17] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, R, 0, (u64)wfd, 0);
+        r[18] = viv_mmap_args(p, 0, (u64)BURROW_ATTACH_MAX + PAGE_SIZE, RW, PRIV, (u64)wfd, 0);
+        r[19] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX, RW, PRIV, (u64)wfd, 0);
+        r[20] = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV | VIV_MAP_HUGETLB, (u64)wfd, 0);
+        r[21] = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, PRIV | VIV_MAP_HUGETLB, (u64)wfd, 0);
+        r[22] = viv_mmap_args(p, 0, PAGE_SIZE, R, PRIV | VIV_MAP_HUGETLB, none, 0);
     }
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
@@ -499,6 +511,11 @@ void test_vivarium_mmap_order_is_linux(void) {
     TEST_EXPECT_EQ(r[15], -(s64)T_E_NOMEM, "a shape no arm serves, past the window: ENOMEM before EACCES (r[5])");
     TEST_EXPECT_EQ(r[16], -(s64)T_E_NOMEM, "and before declining a readable descriptor (r[7])");
     TEST_EXPECT_EQ(r[17], -(s64)T_E_NOMEM, "and before the map type (r[13])");
+    TEST_EXPECT_EQ(r[18], -(s64)T_E_ACCES, "the window is not the file arm's bound: past it, still EACCES");
+    TEST_EXPECT_EQ(r[19], -(s64)T_E_ACCES, "and a length of exactly the window fits: EACCES");
+    TEST_EXPECT_EQ(r[20], -(s64)T_E_INVAL, "MAP_HUGETLB through a file is EINVAL before the access mode (r[9])");
+    TEST_EXPECT_EQ(r[21], -(s64)T_E_INVAL, "and before the window (r[15])");
+    TEST_EXPECT_EQ(r[22], -(s64)T_E_BADF,  "but after the descriptor: EBADF");
 }
 
 // A T2 shell narrows its own words by its own Linux prototype. readlinkat's

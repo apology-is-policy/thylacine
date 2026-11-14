@@ -173,13 +173,23 @@ the reap unlinks before `proc_free` drops it) and renders it under its own lock 
 the second look checks the Proc still has that space and the code rows' verdict is
 unchanged, and when an exec replaced the space it renders the new one, up to four
 renders (`DEVPROC_MAPS_TRIES`) before it answers -1. A last owner's drain runs under
-the space's lock, so a pinned render sees the whole list or none. Before 2026-11-14
+the space's lock, so a pinned render sees the whole list or none. The render takes
+that lock with interrupts ON -- it runs under no other lock, and no handler takes a
+space's lock -- so a long clone costs the reader's CPU its wait, never its tick
+(audit round 39 F4). Before 2026-11-14
 maps took the space's lock under the table lock (OPEN-BUGS 2026-11-14T17:55:58Z); the
 mem copy still does, waiting there on any holder of a stopped target's space -- an
 RFMEM sibling's clone included. So a read
 happens wholly before or wholly after a seal, whichever axis admitted the reader,
 including against a Proc that seals itself and then loads a secret, and
-`SPAWN_PERM_SEAL`'s two bits land in one critical section. The first correction had
+`SPAWN_PERM_SEAL`'s two bits land in one critical section. That holds for the
+admission's monotone inputs (a Proc's seals only ever OR on; departed holders persist in
+`guards_ever`). The share family's part is not monotone: it joins the image only while
+the space maps shared anonymous memory, so a seal the target makes and ends between the
+two walks -- by mapping and unmapping its last shared mapping -- passes a render taken
+while sealed. What it can leak is the rows that changed in that window; the rest is
+readable after the unseal anyway, and the copy-under-the-lock readers had the same
+window between their seal test and the space's lock (audit round 39, observation). The first correction had
 made this structural by composition instead (ACQUIRE `principal_id` first, seal last);
 round 2 showed that held only for a reader admitted BECAUSE it saw the new identity --
 not for a spawn that changes no identity, nor for a `CAP_HOSTOWNER` reader. The boundary
@@ -205,8 +215,10 @@ file with the reader's ref the last one holding the Territory, and gone);
 `devproc.maps_render_after_the_walk` (maps' window, between the pin and the render:
 a page mapped there shows, so the render follows the walk; a seal refuses; an
 exec-shaped swap of the space renders the new space on a second render; an unlink
-reads as gone; every leg's pin is dropped -- the space's lifetime count is back where
-it was). Every seal
+reads as gone; and a second hook AFTER the render, before the read is admitted
+again, where a seal must still refuse -- a read that asked before it rendered would
+hand the rows out (audit round 39 F1). The idle leg reads the pin in the window;
+every leg's pins are dropped, the swap's second one on the other space too). Every seal
 test sets the bit through `proc_seal`, the
 production writer, and captures its verdicts before freeing its Procs.
 

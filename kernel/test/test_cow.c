@@ -49,6 +49,7 @@
 #include <thylacine/image.h>                // B-1a' audit F20: nothing idle for the reclaim
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>             // the step counter keys on this thread
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -459,6 +460,7 @@ void test_cow_clone_builds_in_order(void) {
         mapped++;
     }
 
+    g_vma_insert_steps_owner_for_test = current_thread();
     const u64 steps0 = g_vma_insert_steps_for_test;
     struct AddrSpace *child = addrspace_clone(parent->as, /*exempt=*/true);
     const u64 clone_steps = g_vma_insert_steps_for_test - steps0;
@@ -488,6 +490,7 @@ void test_cow_clone_builds_in_order(void) {
         }
         addrspace_unref(child);
     }
+    g_vma_insert_steps_owner_for_test = NULL;
     drop_proc_for_cow(parent);
 
     TEST_EXPECT_EQ(mapped, CLONE_ORDER_N, "the parent's mappings");

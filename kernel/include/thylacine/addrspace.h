@@ -272,8 +272,10 @@ bool addrspace_private_begin(struct AddrSpace *as);
 void addrspace_private_end(struct AddrSpace *as);
 
 
-// Kernel-only lifetime pins: no execution or process-sharing authority. Caller
-// holds a live owner or pin across pin acquisition. Unpin is NULL-safe; the last
+// Kernel-only lifetime pins: no execution or process-sharing authority. A live
+// owner or pin must exist and be unable to go across the call -- the caller's
+// own, or a linked Proc naming the space under g_proc_table_lock (exec swaps and
+// the reap unlinks under it, so its ownership holds). Unpin is NULL-safe; the last
 // total ref alone frees the descriptor/page tables, so it is never called under
 // as->lock. The last OWNER drains mappings through the ordinary exit/exec path,
 // which can sleep on file clunk; a pinned space's list is then empty, and the

@@ -3659,9 +3659,11 @@ void test_devproc_maps_shared_anon(void) {
 // acts in the window between the pin and the render, on a target mapping one
 // page at 0x10000000: a page mapped there shows (the render follows the walk),
 // a seal refuses the read, an exec-shaped swap of the space renders the new
-// space (a second render), and a target unlinked there reads as gone. The idle
-// leg reads the space's references in the window, where the pin must be held;
-// every leg checks that the read dropped it.
+// space (a second render), and a target unlinked there reads as gone. A last
+// leg seals AFTER the render, before the read is admitted again: a read that
+// asked before it rendered would hand the rows out. The idle leg reads the
+// space's references in the window, where the pin must be held; every leg checks
+// that the read dropped it, and the swap's second pin, on the other space.
 static struct Proc *g_mw_target, *g_mw_other;
 static int          g_mw_calls, g_mw_map_rc, g_mw_window_refs;
 
@@ -3687,11 +3689,12 @@ static void mw_swap(void) {
 }
 
 void test_devproc_maps_render_after_the_walk(void) {
-    static void (*const window[])(void) = { mw_nothing, mw_map, mw_seal, mw_swap, mw_unlink };
+    static void (*const window[])(void)   = { mw_nothing, mw_map, mw_seal, mw_swap, mw_unlink, NULL };
+    static void (*const rendered[])(void) = { NULL, NULL, NULL, NULL, NULL, mw_seal };
     enum { LEGS = (int)(sizeof(window) / sizeof(window[0])) };
     long got[LEGS];
     bool built[LEGS], first_row[LEGS], new_row[LEGS], other_row[LEGS];
-    int  calls[LEGS], refs_before[LEGS], refs_after[LEGS];
+    int  calls[LEGS], refs_before[LEGS], refs_after[LEGS], orefs_before[LEGS], orefs_after[LEGS];
     char buf[1024];
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
@@ -3700,7 +3703,7 @@ void test_devproc_maps_render_after_the_walk(void) {
     for (int i = 0; i < LEGS; i++) {
         got[i] = -2;
         built[i] = first_row[i] = new_row[i] = other_row[i] = false;
-        calls[i] = refs_before[i] = refs_after[i] = -1;
+        calls[i] = refs_before[i] = refs_after[i] = orefs_before[i] = orefs_after[i] = -1;
         struct Proc *tgt = proc_alloc();
         struct Proc *oth = proc_alloc();
         struct Burrow *b = burrow_create_anon_lazy(PAGE_SIZE);
@@ -3715,19 +3718,24 @@ void test_devproc_maps_render_after_the_walk(void) {
         if (b)  burrow_unref(b);
         if (ob) burrow_unref(ob);
         struct AddrSpace *own = tgt ? tgt->as : NULL;
+        struct AddrSpace *oas = oth ? oth->as : NULL;
         if (built[i]) {
             proc_test_link(tgt);
             struct Spoor *f = open_pidfile_for(tgt->pid, "maps", 0);
             g_mw_target = tgt;
             g_mw_other  = oth;
             g_mw_calls  = 0;
-            refs_before[i] = addrspace_ref_count(own);
+            refs_before[i]  = addrspace_ref_count(own);
+            orefs_before[i] = addrspace_ref_count(oas);
             devproc_maps_test_set_window_hook(window[i]);
+            devproc_maps_test_set_rendered_hook(rendered[i]);
             for (size_t k = 0; k < sizeof(buf); k++) buf[k] = 0;
             got[i] = f ? devproc.read(f, buf, (long)sizeof(buf) - 1, 0) : -3;
+            devproc_maps_test_set_rendered_hook(NULL);
             devproc_maps_test_set_window_hook(NULL);
             calls[i] = g_mw_calls;
-            refs_after[i] = addrspace_ref_count(own);
+            refs_after[i]  = addrspace_ref_count(own);
+            orefs_after[i] = addrspace_ref_count(oas);
             const size_t n = got[i] > 0 ? (size_t)got[i] : 0;
             first_row[i] = contains(buf, n, "0x10000000-0x10001000 rw-p");
             new_row[i]   = contains(buf, n, "0x10004000-0x10005000 rw-p");
@@ -3744,8 +3752,10 @@ void test_devproc_maps_render_after_the_walk(void) {
     }
 
     for (int i = 0; i < LEGS; i++) TEST_ASSERT(built[i], "each leg's target and its other space");
-    for (int i = 0; i < LEGS; i++)
+    for (int i = 0; i < LEGS; i++) {
         TEST_EXPECT_EQ(refs_after[i], refs_before[i], "the read dropped its pin");
+        TEST_EXPECT_EQ(orefs_after[i], orefs_before[i], "and any pin on the other space (the swap's second render)");
+    }
     TEST_ASSERT(got[0] > 0 && first_row[0], "control: past an idle window, the target's row");
     TEST_EXPECT_EQ(calls[0], 1, "control: one render");
     TEST_EXPECT_EQ(g_mw_window_refs, refs_before[0] + 1, "the walk pinned the space it renders");
@@ -3757,6 +3767,8 @@ void test_devproc_maps_render_after_the_walk(void) {
     TEST_ASSERT(got[3] > 0 && other_row[3] && !first_row[3],
                 "an exec-shaped swap renders the new space, not the one pinned first");
     TEST_EXPECT_EQ(got[4], -1L, "a Proc gone during the render reads as gone");
+    TEST_EXPECT_EQ(calls[5], 1, "the seal landed after the render");
+    TEST_EXPECT_EQ(got[5], (long)-T_E_ACCES, "a seal landing after the render, before the read is admitted, refuses it");
 }
 
 void test_devproc_maps_code_visible(void) {
