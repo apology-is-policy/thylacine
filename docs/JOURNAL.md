@@ -74,7 +74,9 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
     the kernel resolves it beneath `/mnt/mac` (ENOENT); from a handle `mac-line-probe beneath`
     held across the swap and released when the Mac writes `go` into a file in the share, the app
     refuses the walk (ELOOP), and its record shows the walk began at the held directory;
-  - the read-only share's EROFS for a create, a write over a file and a remove;
+  - the read-only share: the guest's own refusal, from the modes, of a create, a write over a
+    file, a remove and a rename (`permission denied`), and the app's EROFS for the owner's
+    `chmod` (vote M14);
   - ownership and modes.
   Leg 5 is there because the kernel walks one name at a time and resolves a link it is served
   itself, so the app's O_NOFOLLOW_ANY is reached only by a walk from a fid the kernel holds below
@@ -201,6 +203,31 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   The scripted guest now gives a console child a closed pipe, keeps typed lines for the shell
   while the probe holds, and polls as the probe does. Against the 9f18c7b68 scenario it gives
   run 11's words exactly, and a probe that never reads `go` (the fault `deaf`) is red at leg 5.
+- **The read-only share's refusal is the guest's, not the app's** (guest run 12). Leg 6's create
+  answered `permission denied`. The app answers a create in a read-only share with EROFS before
+  any other check (macrunner/app/src/interop/tree.rs), and its record, which logs walks, shows
+  two walks of `docs/new.txt`, each ENOENT: the refusal was the guest's own. dev9p enforces
+  rwx (kernel/dev9p.c `.perm_enforced = true`, A-3b). The kernel asks the server's modes
+  before it sends a create,
+  rename or remove (the parent's write and search bits) or an open for writing (the file's write
+  bit), and MAC-RUNNER 4.4 has the app report a read-only folder without write. So an ordinary
+  user's change never reaches the app. Only what `perm_wstat_check` passes on meets its EROFS:
+  the owner's change of a mode or of explicit times (kernel/include/thylacine/perm.h). This is
+  the fourth premise in this scenario not read from the code it rests on: the scripted guest
+  sent every operation straight to the app, and the two answers met only in a guest. The
+  operator kept both rules as built (vote M14). Leg 6 now wants `permission denied` for a
+  create, a write over a file, a remove and a rename, and the app's `kernel error (errno 30)`
+  for the owner's `chmod`, each checked on the Mac. An ordinary user cannot see the app mutants
+  ro-create and ro-open-write, because the guest refuses first, so the guest run takes two it
+  can see: ro-setattr (the app's check on setattr gone, so the chmod lands) and
+  ro-mode-keeps-write (write kept in the modes, so the create reaches the app and answers errno
+  30). Reading the kernel for the scripted guest's model found what would have been the fifth.
+  stalk searches every directory a walk crosses (kernel/stalk.c, the per-component X-search).
+  The owner-not-attacher mutant reports the Mac's uid, which leaves the session user other's
+  bits, none, so its walk is refused at the share's root: red at leg 1, where the scenario had
+  placed it at leg 7. The scripted guest now asks the server's modes as the kernel does: a
+  search of each directory walked through, read or write on an open, write and search on a
+  parent, and chmod passed on for the owner only. The fault `noperm` is the guest without them.
 
 ### Evidence
 
@@ -293,10 +320,30 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   not released by the go sent after the swap: it said 'stdin ended before go: end of file'`, the
   wrong turn above. The controls did not run.
 - **The scripted guest with the Mac's release**: the clean app is green, all seven legs, and fourteen faults are red, each at its own leg and with its own words: nine of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, and one that never reads the Mac's `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); against the 9f18c7b68 scenario it gives run 11's words; resid/scendry-folders-8.out, SCENDRY-FOLDERS DONE bad=0.
+- **Guest run 12** (16:27-16:33Z, cebf236be, resid/live12-run12.out, mac released). `ls-mac-line`
+  green, all five legs. `ls-mac-folders` legs 1 to 5 green: leg 5 in a guest for the first
+  time. The probe said `released by go in /mnt/mac/folders/work/release after 2 read(s)`, then
+  `secret.txt refused: too many levels of symbolic links`. The app's record holds `walk
+  'folders/work/d' ['secret.txt'] -> errno 40`, and the read beside the cwd said `no such file
+  or namespace entry`. Nothing outside the share was read. Leg 6 red: `a create in the read-only
+  share gave status 1, $errstr '> /MNT/MAC/FOLDERS/DOCS/NEW.TXT: OPEN FAILED: PERMISSIONDENIED'
+  -- not EROFS (errno 30)`, the wrong turn above. The controls did not run.
+- **The scripted guest with the kernel's mode checks**: the clean app is green, all seven legs, and fifteen faults are red, each at its own leg and with its own words: ten of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, one that never reads the Mac's `go`, and no mode checks, so the create reaches the app's EROFS) and five of the app's rules, built into its binary (resid/mutbin.py: the owner's chmod landing in the read-only share, write kept in its modes, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, refused at the share's root at leg 1, and group bits kept). Two of the app's rules, broken, stay green, because the guest refuses first: a read-only create and a read-only open for writing. Against the cebf236be scenario it gives run 12's words exactly, and green without the mode checks; resid/scendry-folders-9.out and -9-old.out, SCENDRY-FOLDERS DONE bad=0.
+- The app binaries rebuilt from 3276d0158 (resid/mutbin.py, resid/mutbin-3276d0158.out): the
+  clean app and seven mutants, eight distinct hashes. `check-expect-forms.py` is clean.
 
 ### Decided by the operator
 
 - M13 (2026-11-14, 06:22Z): login starts every session program through newns, as recommended.
+- M14 to M16 (2026-11-14, about 17:05Z), each as recommended; scripture 3276d0158:
+  - M14: a read-only folder keeps both rules as built. An ordinary user's change reads
+    `permission denied` from the guest, and EROFS answers what the kernel passes on
+    (dec-2026-11-14-mac-readonly-refusal).
+  - M15: the kernel answers EXDEV for a rename between two devices, `mv` copies and removes,
+    and libthyla-rs names EROFS, EXDEV, EFBIG and ENAMETOOLONG. The vote is the ERRORS.md
+    signoff (dec-2026-11-14-exdev-and-names).
+  - M16: power-off is a kernel control file only the host owner can open, written by a
+    userspace fshalt, which the power-key driver starts (dec-2026-11-14-power-off).
 
 ### What "shown" covers
 
@@ -305,24 +352,22 @@ session's mount attached as the user and read through, a program's walk with own
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
 tools/mac-app-fake.py, not the app. In run 8 a guest spoke to the app itself: `ls-mac-line` was
-green, all five legs, with the app in the fake's place. In runs 9, 10 and 11 a guest ran
+green, all five legs, with the app in the fake's place. In runs 9 to 12 a guest ran
 `ls-mac-folders` legs 1 to 4 green against the app, the remote post's leg among them, and from
-run 10 on leg 3's cp. Leg 5 has not been green in a guest: run 9's premise failed, and in runs
-10 and 11 the probe's release came through stdin, which a console child never reads. Leg 5 as
-it now stands, legs 6 and 7, and every control are shown against the scripted guest only. None
-of it is audited (round R5).
+run 10 on leg 3's cp. In run 12 leg 5 was green in a guest: the held handle's ELOOP, the app's
+record of the walk, and the cwd's ENOENT. Leg 6 as it now stands, leg 7, and every control are
+shown against the scripted guest only. None of it is audited (round R5).
 
 ### Open
 
-- Guest run 12: `ls-mac-folders` green with the Mac's release and the walk record, then the five
-  app mutants (resid/mutbin) and the `noremote` control bake, each red at its leg
-  (resid-live12.sh). If the held handle still reads ENOENT after the release, the app's record
-  says where the kernel's walk began, and that is the next hunt.
-- libthyla-rs names no EROFS: a refused write reads `kernel error (errno 30)`, and `$errstr`
-  `Other(30)`. Names for 30, 27, 18 and 36 wait on an operator vote (the EISDIR precedent:
-  named with signoff, docs/ERRORS.md), asked together with EXDEV for a cross-device rename and
-  `mv`'s copy fallback (OPEN-BUGS 2026-10-15 00:17Z).
-- I-d: the power key and Quit; then round R5.
+- Guest run 13 (resid-live13.sh): `ls-mac-folders` green with leg 6 as the guest answers it,
+  and leg 7's first run in a guest. Then the app's mutants: ro-setattr and ro-mode-keeps-write
+  red at leg 6, nofollow-dropped at 5, owner-not-attacher at 1, group-bits-kept at 7, and
+  ro-create green, as the guest refuses first; then the `noremote` control bake, red at leg 4.
+- M15 (voted): EXDEV in the kernel's rename, the ERRORS.md rows, libthyla-rs's four names and
+  `mv`'s copy fallback. The kernel's rename is an audit-trigger surface. Leg 6's `Other(30)`
+  and `kernel error (errno 30)` become the name then (OPEN-BUGS 2026-10-15 00:17Z).
+- I-d per M12 and M16: the power key, fshalt and the control file; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor
 

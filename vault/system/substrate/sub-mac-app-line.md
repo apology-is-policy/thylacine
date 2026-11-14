@@ -82,6 +82,9 @@ user, and nothing else.
   - Tunlinkat of a directory without AT_REMOVEDIR is EISDIR. Tmknod and Tlink are EPERM.
   - A read-only share answers EROFS to every change: an open for writing or with O_TRUNC, a
     create, mkdir, symlink, rename, unlink, a setattr of mode, size or times, mknod and link.
+    The guest's kernel checks the modes first (dev9p enforces rwx), and they carry no write, so
+    an ordinary user's change is refused in the guest. Only the owner's change of a mode or of
+    explicit times, and a CAP_HOSTOWNER holder's change, reach this rule (vote M14, 4.4).
 - **Ownership** (4.4): uid and gid are the attacher's. The mode's owner bits are the host file's,
   without write in a read-only share, and group and other have none. A setattr that changes uid
   or gid is EPERM, and one that names the attacher is a no-op. Mode, size and times go to the
@@ -227,11 +230,12 @@ beneath` makes with an O_PATH handle; a cwd is a name, re-walked from the root, 
 meets the link itself; the app's record names where each walk began. Against a scripted guest
 that runs each command as the kernel does (9P against the real app, one name per walk, open
 before create, a served link resolved beneath the mount, the cwd a name, a console child's
-stdin a closed pipe, the probe released by the `go` the Mac writes; aux-gate
-`scendry-folders`): the clean app is green, all seven legs, and fourteen faults are red, each at its own leg and with its own words: nine of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, and one that never reads the Mac's `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); against the 9f18c7b68 scenario it gives run 11's words; resid/scendry-folders-8.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (runs 9, 10 and 11, 2026-11-14) legs 1 to 4
-were green with the app. Leg 5 has not been green in a guest: run 9's assumed a cwd holds a fid,
-and in runs 10 and 11 the probe's release came through stdin, which a console child never
-reads. Leg 5 as it now stands is NOT YET RUN IN A GUEST, and none of it is audited (round R5).
+stdin a closed pipe, the probe released by the `go` the Mac writes, the modes checked as dev9p
+checks them; aux-gate
+`scendry-folders`): the clean app is green, all seven legs, and fifteen faults are red, each at its own leg and with its own words: ten of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, one that never reads the Mac's `go`, and no mode checks, so the create reaches the app's EROFS) and five of the app's rules, built into its binary (resid/mutbin.py: the owner's chmod landing in the read-only share, write kept in its modes, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, refused at the share's root at leg 1, and group bits kept). Two of the app's rules, broken, stay green, because the guest refuses first: a read-only create and a read-only open for writing. Against the cebf236be scenario it gives run 12's words exactly, and green without the mode checks; resid/scendry-folders-9.out and -9-old.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (runs 9 to 12, 2026-11-14) legs 1 to 4
+were green with the app, and in run 12 leg 5 too: ELOOP through the held handle, and the walk
+record. Leg 6 as it now stands, leg 7 and every control are NOT YET RUN IN A GUEST, and none
+of it is audited (round R5).
 
 ## Seams
 

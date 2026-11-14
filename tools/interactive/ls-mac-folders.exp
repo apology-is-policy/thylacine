@@ -22,8 +22,10 @@
 #      at the held directory. The cwd is a name (LS-4): a read beside it walks from the root
 #      again, meets the link, and the kernel resolves that beneath /mnt/mac, where the Mac's
 #      path names nothing (ENOENT). The outside file's words reach the guest by neither.
-#   6. The read-only share reads, and refuses a create, a write over a file and a remove with
-#      EROFS (errno 30); the Mac's folder is unchanged.
+#   6. The read-only share reads. Its modes carry no write, and the guest's kernel checks them
+#      (dev9p enforces rwx), so a create, a write over a file, a remove and a rename are refused
+#      in the guest (permission denied). The owner's mode change is passed on, and the app's own
+#      rule refuses it (EROFS, errno 30). The Mac's folder is unchanged.
 #   7. Every file is the session user's (the uid `id` names), with the host file's owner bits:
 #      0600 for a 0644 file, 0400 in the read-only share.
 #
@@ -150,6 +152,20 @@ proc run_status {cmd tag phase} {
     }
     return [list $st $err]
 }
+# Run `cmd`, whose tool is `tool`, then echo its status under `tag`: {status why}, where why is the
+# text after "<tool>: " on the tool's own error line, or empty when it printed none.
+proc tool_status {tool cmd tag phase} {
+    lc_send "$cmd; echo $tag status \$status end | tr a-z A-Z"
+    set t [string toupper $tag]
+    lc_within $::lc_cmd_timeout {
+        -re "$tool: (\[^\r\n\]*)\[\r\n\].*$t STATUS (\[0-9\]+) END\[\r\n\]" { set why $expect_out(1,string); set st $expect_out(2,string) }
+        -re "$t STATUS (\[0-9\]+) END\[\r\n\]"                            { set why ""; set st $expect_out(1,string) }
+        -re {EXTINCTION:}                                                     { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout                                                               { lc_fail "timeout waiting for \[$tag\]'s status ($phase)" }
+        eof                                                                   { lc_fail "unexpected EOF during '$phase'" }
+    }
+    return [list $st $why]
+}
 proc run_ok {cmd tag phase} {
     lassign [run_status $cmd $tag $phase] st err
     if {$st != 0} { lc_fail "status $st, \$errstr '$err' ($phase)" }
@@ -265,35 +281,45 @@ if {$why ne "no such file or namespace entry"} {
 lc_send "cd"
 lc_pass "ls-mac-folders: a link the Mac swapped in is refused from a held handle (ELOOP) and resolved beneath /mnt/mac from the cwd (ENOENT); nothing outside the share was read"
 
-# ---- 6. the read-only share.
+# ---- 6. the read-only share. Its modes carry no write, and the guest's kernel checks them before
+# it asks the app (dev9p enforces rwx), so an ordinary user's change is refused in the guest and
+# never reaches the app. The owner may change a mode, so the kernel passes that on, and the app's
+# own rule answers it (EROFS). MAC-RUNNER 4.4, vote M14.
 read_ok /mnt/mac/folders/docs/readme.txt "READ ONLY WORDS" "the read-only share reads"
+set ::mac_mode [file attributes $::R/readme.txt -permissions]
 lassign [run_status "echo should not land > /mnt/mac/folders/docs/new.txt" leg6a "a create in the read-only share"] st err
-if {$st == 0 || ![string match "*OTHER(30)*" $err]} {
-    lc_fail "a create in the read-only share gave status $st, \$errstr '$err' -- not EROFS (errno 30)"
+if {$st == 0 || ![string match "*: OPEN FAILED: PERMISSIONDENIED" $err]} {
+    lc_fail "a create in the read-only share gave status $st, \$errstr '$err' -- not permission denied (the guest's mode check)"
 }
-lc_step "the create was refused: $err"
+lc_step "the create was refused in the guest: $err"
 on_mac [expr {![file exists $::R/new.txt]}] "docs/new.txt was never made"
 # An existing file: the kernel opens it O_WRONLY|O_TRUNC rather than creating it, so this is the
 # open's check, and a miss would truncate the Mac's file.
 lassign [run_status "echo should not land > /mnt/mac/folders/docs/readme.txt" leg6b "a write over a read-only file"] st err
-if {$st == 0 || ![string match "*OTHER(30)*" $err]} {
-    lc_fail "a write over a read-only file gave status $st, \$errstr '$err' -- not EROFS (errno 30)"
+if {$st == 0 || ![string match "*: OPEN FAILED: PERMISSIONDENIED" $err]} {
+    lc_fail "a write over a read-only file gave status $st, \$errstr '$err' -- not permission denied (the guest's mode check)"
 }
-lc_step "the write was refused: $err"
+lc_step "the write was refused in the guest: $err"
 on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is unchanged"
-lc_send "rm /mnt/mac/folders/docs/readme.txt"
-lc_within $lc_cmd_timeout {
-    -re {rm: ([^\r\n]*): ([^\r\n]*)[\r\n]}  { set why $expect_out(2,string) }
-    -re {EXTINCTION:}                       { lc_extinction_fail "kernel extinction at rm in the read-only share" }
-    timeout                                 { lc_fail "rm in the read-only share printed no error" }
-    eof                                     { lc_fail "unexpected EOF at rm in the read-only share" }
+lassign [tool_status rm "rm /mnt/mac/folders/docs/readme.txt" leg6c "a remove in the read-only share"] st why
+if {$st == 0 || ![string match "*: permission denied" $why]} {
+    lc_fail "a remove in the read-only share gave status $st, '$why' -- not permission denied (the guest's mode check)"
 }
-if {$why ne "kernel error (errno 30)"} {
-    lc_fail "rm in the read-only share failed with '$why', not EROFS (errno 30)"
-}
-lc_step "the remove was refused: $why"
+lc_step "the remove was refused in the guest: $why"
 on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is still there, unchanged"
-lc_pass "ls-mac-folders: the read-only share reads and refuses a create, a write over a file and a remove with EROFS"
+lassign [tool_status mv "mv /mnt/mac/folders/docs/readme.txt /mnt/mac/folders/docs/moved.txt" leg6d "a rename in the read-only share"] st why
+if {$st == 0 || ![string match "*: permission denied" $why]} {
+    lc_fail "a rename in the read-only share gave status $st, '$why' -- not permission denied (the guest's mode check)"
+}
+lc_step "the rename was refused in the guest: $why"
+on_mac [expr {[file exists $::R/readme.txt] && ![file exists $::R/moved.txt]}] "docs/readme.txt kept its name"
+lassign [tool_status chmod "chmod 600 /mnt/mac/folders/docs/readme.txt" leg6e "the owner's mode change in the read-only share"] st why
+if {$st == 0 || ![string match "*: kernel error (errno 30)" $why]} {
+    lc_fail "the owner's mode change in the read-only share gave status $st, '$why' -- not the app's EROFS (errno 30)"
+}
+lc_step "the app refused the mode change: $why"
+on_mac [expr {[file attributes $::R/readme.txt -permissions] eq $::mac_mode}] "docs/readme.txt keeps its mode ($::mac_mode)"
+lc_pass "ls-mac-folders: the read-only share reads; the guest refuses a create, a write over a file, a remove and a rename (permission denied), and the app refuses the owner's mode change (EROFS)"
 
 # ---- 7. ownership and modes.
 lc_send "id"

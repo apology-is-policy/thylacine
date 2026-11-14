@@ -58,17 +58,25 @@ Only regular files and directories can be opened. A Mac device, socket or named 
 
 ### Read-only folders
 
-A folder shared read-only refuses every change: creating, writing, truncating, renaming or removing a file, making a directory, and changing a mode or time. A tool reports the refusal as `kernel error (errno 30)`, the Linux code for a read-only file system:
+A folder shared read-only refuses every change. Its files and directories show no write permission (see the next section), so the guest itself refuses creating, writing, truncating, renaming or removing a file and making a directory, before the Mac is asked. A tool reports `permission denied`:
 
 ```sh
 rm /mnt/mac/folders/docs/readme.txt
 ```
 
 ```text
-rm: /mnt/mac/folders/docs/readme.txt: kernel error (errno 30)
+rm: /mnt/mac/folders/docs/readme.txt: permission denied
 ```
 
-A refused redirection prints nothing; it sets `$status` to 1 and `$errstr` to a message ending in `Other(30)`. The folder on the Mac is unchanged.
+A refused redirection prints nothing; it sets `$status` to 1 and `$errstr` to a message ending in `PermissionDenied`.
+
+A file's owner may change its mode, so `chmod` is passed to the Mac, which refuses it with `kernel error (errno 30)`, the Linux code for a read-only file system:
+
+```text
+chmod: /mnt/mac/folders/docs/readme.txt: kernel error (errno 30)
+```
+
+The folder on the Mac is unchanged.
 
 ### Ownership and permissions
 

@@ -130,7 +130,8 @@ Mac's end there is the fake app. Not yet audited (round R5).
 `ls-mac-folders` runs the shared folders through the guest's kernel against the app itself,
 checking every change on the Mac: the shares listed and read, a write, mkdir, mv, rm, rmdir and a
 cp from the guest's own files, links contained beneath `/mnt/mac` (the remote post above), a
-link the Mac puts in place of a directory the guest is using, the read-only share's EROFS,
+link the Mac puts in place of a directory the guest is using, the read-only share's refusals
+(the guest's own, from the modes, and the app's EROFS for the owner's mode change),
 ownership and modes. The swapped directory is met two ways. The cwd is a name (LS-4), so a read
 beside it walks from the root again, meets the link, and the kernel resolves it beneath
 `/mnt/mac` (ENOENT). `mac-line-probe beneath <dir> <name> <signal>` holds the directory as an
@@ -140,12 +141,14 @@ pipe, so the release comes from the Mac's side, written after the swap. The walk
 app's old directory, the app refuses it (ELOOP), and the app's record names the directory the
 walk began at. Against a scripted guest
 that runs each command as the kernel does (9P against the real app, one name per walk, open
-before create, a served link resolved beneath the mount, the cwd a name; aux-gate
-`scendry-folders`): the clean app is green, all seven legs, and fourteen faults are red, each at its own leg and with its own words: nine of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, and one that never reads the Mac's `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); against the 9f18c7b68 scenario it gives run 11's words; resid/scendry-folders-8.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (runs 9, 10 and 11, 2026-11-14) legs 1 to 4 were green
-with the app, cp among them from run 10. Leg 5 has not been green in a guest: run 9's assumed
-a cwd holds a fid, and in runs 10 and 11 the probe's release came through stdin, which a
-console child never reads (run 10's probe walked before the swap; run 11's said so). Leg 5
-as it now stands is NOT YET RUN IN A GUEST.
+before create, a served link resolved beneath the mount, the cwd a name, the modes checked as
+dev9p checks them; aux-gate
+`scendry-folders`): the clean app is green, all seven legs, and fifteen faults are red, each at its own leg and with its own words: ten of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, one that never reads the Mac's `go`, and no mode checks, so the create reaches the app's EROFS) and five of the app's rules, built into its binary (resid/mutbin.py: the owner's chmod landing in the read-only share, write kept in its modes, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, refused at the share's root at leg 1, and group bits kept). Two of the app's rules, broken, stay green, because the guest refuses first: a read-only create and a read-only open for writing. Against the cebf236be scenario it gives run 12's words exactly, and green without the mode checks; resid/scendry-folders-9.out and -9-old.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (runs 9 to 12, 2026-11-14) legs 1 to 4 were green with
+the app, cp among them from run 10, and in run 12 leg 5 too: the probe, released by the
+Mac's `go`, was refused through its held handle (ELOOP), the app's record holds the walk of
+`secret.txt` from `folders/work/d`, and the read beside the cwd answered ENOENT. Run 12's leg
+6 met the guest's own mode check (permission denied) where the scenario wanted the app's
+EROFS. Leg 6 as it now stands, leg 7 and every control are NOT YET RUN IN A GUEST.
 
 ## Seams
 
