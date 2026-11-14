@@ -370,22 +370,29 @@ member space; [[sub-kernel-addrspace]]); each member space points at it
 (`family`) and counts its shared anonymous mappings (`shared_maps`,
 [[sub-kernel-vma]]). The clone gives the child's space the parent's family or a
 new one. `proc_image_share_fork_locked`, in `rfork_internal`'s publication hold,
-links the parent's space to it (under the parent's `as->lock` as well, for the
-unmap fold) -- or, when a rival fork by a peer thread gave the parent a family
+links the parent's space to it (a release store under `g_proc_table_lock` alone:
+the clone and the unmap fold read it without that lock and are sound on either
+value, since the child's family is empty until the ORs and what they add is the
+parent's own) -- or, when a rival fork by a peer thread gave the parent a family
 after this clone, moves the child onto the parent's family and returns the
 spare, which `rfork_internal` puts after the hold -- and ORs in the parent's
 whole join, the parent's own word and the child's. `proc_image_stamp_locked` ORs
 a seal or the taint into the stamped space's family. `proc_image_join_locked`
-reads the records first, through `proc_image_record_locked`: in one hold of the
-space's `as->lock` (taken only for a space with a family) it reads
-`shared_maps`, the family record and the departed-holder record, ORs the family
+reads the records first, through `proc_image_record_locked`: without any address
+space's lock (a clone holds `as->lock` across its whole copy; audit round 37
+P2-1) it reads `shared_maps` with acquire, then the family record and the
+departed-holder record, ORs the family
 in and reports the image shared while the space maps shared anonymous memory,
 then takes the sole-owner fast path. O(1): the family replaced vote 120's walk
 of the space's mappings, which audit round 36 F1 showed unbounded under the
 global lock. One snapshot at the publication suffices because caps grow only by
 elevation, which the join refuses for every member Proc whose space maps shared
 anonymous memory, and the snapshot is taken under the lock every elevation path
-holds. "Shared" means in a family, while mapping: unmapping all shared anonymous
+holds. A fork still in flight when a peer thread unmaps and elevates is bounded
+too: `proc_fork_carve` gives the child only what the parent held both before its
+clone and at the carve (audit round 37 P1-1), so a child whose image still maps
+the shared memory never carries caps the parent gained after that image was
+taken. "Shared" means in a family, while mapping: unmapping all shared anonymous
 memory lifts the elevation refusal. The family is coarser than the bytes, by
 vote: a member's restriction binds every member image that maps shared
 anonymous memory, and every such mapping in a member space counts.
@@ -397,11 +404,12 @@ maps shared anonymous memory, the family's record), and every taint reader
 asks it: the fork's inheritance (the child inherits the parent's IMAGE taint),
 the exec swap (the image's taint goes on the word before the space is left), and
 the interaction bind ([[sub-kernel-pts]]). An unmap of shared anonymous memory
-folds the family's taint into the space's `guards_ever` before `shared_maps`
-drops, in one `as->lock` hold (`vma_remove_in`, [[sub-kernel-vma]]), and the
-record read takes the same lock, so a concurrent unmap is seen whole. The lock
-edge is the established `g_proc_table_lock -> as->lock`; no caller of the join,
-the stamp or the taint query holds an `as->lock`.
+folds the family's taint into the space's `guards_ever` and then lowers
+`shared_maps` with a release store (`vma_remove_in`, [[sub-kernel-vma]]); the
+record read loads the count with acquire before `guards_ever`, so a concurrent
+unmap is seen as the mapping or the fold, never neither. No VMA operation takes
+the count through zero while the bytes stay mapped. The join, the stamp, the
+taint query and the publication take no address space's lock.
 
 `shared` is **references minus the zombies the traversal saw**, and each half of
 that earns its place. It asks whether another Proc could still *use* the image,

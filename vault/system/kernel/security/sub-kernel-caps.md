@@ -156,7 +156,12 @@ and CAP_GRANTABLE_CLEARANCE. `sys_cap_grant_imperium_core` accepts only the
 propagating flag and this subset. `proc_become_legate_locked` rejects nested
 propagating redemption. During `rfork_internal`, only the parent's scoped
 `legate_caps` can survive the elevation strip, intersected with actual parent
-caps and the requested child mask. Ordinary clearance still does not flow.
+caps and the requested child mask. The parent's caps are read twice, before the
+clone and at the carve, and the child gets their intersection
+(`proc_fork_carve`, audit round 37 P1-1): a fork in flight across a peer
+thread's unmap of shared anonymous memory and an elevation is linearized at its
+clone, so its child, whose image still maps that memory, never carries what the
+parent gained after. Ordinary clearance still does not flow.
 The scope tag is published last with release ordering. Child insertion checks
 parent teardown under the process-table lock, closing the fork/sweep gap.
 The trusted authorization and user interface are described in [[sub-imperium]].
@@ -331,7 +336,8 @@ lifecycle hold. Holding lifecycle across the whole redeem is also what makes the
 elevation check, the legate stamp and the caps OR one atom against a peer
 thread's `rfork`: publication takes the same lock, so a sharer either exists
 before the check or is published after the caps land, where the fork carve bounds
-the child instead.
+the child instead -- by the caps the parent held when its image was cloned as
+well as at the carve.
 
 ## Invariants enforced
 

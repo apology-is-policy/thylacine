@@ -38,10 +38,13 @@ mappings (votes 120 + 122; the only two places a mapping is linked or unlinked,
 and a linked VMA's Burrow never changes, so the count is exact), and before the
 count drops `vma_remove_in` folds the share family's taint into the space's
 `guards_ever`, so a taint taken through another member outlives this space's
-mapping; the image join reads the count, the family and `guards_ever` in one
-hold of the same lock, so it sees the mapping or the fold, never neither (an
-`mprotect` split shrinks the original and inserts the pieces, so the count never
-passes through zero);
+mapping, and then lowers the count with a release store; the image join reads
+the count (acquire), the family and `guards_ever` without this lock (audit round
+37 P2-1: a clone holds it across its whole copy), so it sees the mapping or the
+fold, never neither (an `mprotect` split shrinks the original and inserts the
+pieces, a merge removes a piece beside its counted survivor, so the count never
+passes through zero while the bytes stay mapped; a `MAP_FIXED` replace of the
+last shared piece is an unmap, then a map);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain_in` tears the whole list down when the address
 space's last owner drops it.

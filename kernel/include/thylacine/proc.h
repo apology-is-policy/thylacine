@@ -2995,7 +2995,10 @@ void proc_seal(struct Proc *p, u32 bits);
 // holding it. The join is therefore exact at the instant of the access, which is
 // what makes it immune to a fork racing alongside -- a child published after the
 // check cannot widen what the check admitted, because its caps are bounded by
-// the parent the check already weighed.
+// the parent the check already weighed. Bounded twice: by the parent's caps as
+// its image was cloned and at the carve (audit round 37 P1-1), so a child whose
+// image is older than the parent's last unmap never holds what the parent
+// gained after it.
 struct ProcImageJoin {
     // The union over every OTHER Proc in the table mapping this address space,
     // ZOMBIES INCLUDED: a zombie holds its reference until it is reaped, so its
@@ -3030,6 +3033,19 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out);
 // needs, or NULL: the caller puts it AFTER releasing the lock. Caller holds
 // g_proc_table_lock, and no address space's lock.
 struct ShareFamily *proc_image_share_fork_locked(struct Proc *parent, struct Proc *child);
+
+// The fork's caps carve: the child's caps, the parent's legate scope (0 for
+// none) and the elevation-only set its scope lets cross.
+struct proc_fork_carve {
+    caps_t caps;
+    caps_t flow;
+    u32    scope;
+};
+#ifdef KERNEL_TESTS
+// `caps_at_clone` is the parent's caps read before its image was cloned.
+struct proc_fork_carve proc_fork_carve(const struct Proc *parent, caps_t caps_at_clone,
+                                       caps_t caps_mask);
+#endif
 
 // Stamp PROC_FLAG_DEBUG_TAINTED across the image. Caller holds g_proc_table_lock.
 void proc_mark_debug_tainted_locked(struct Proc *p);

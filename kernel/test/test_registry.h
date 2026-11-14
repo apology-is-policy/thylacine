@@ -1048,6 +1048,8 @@ void test_devproc_share_join_fork_and_exec(void);
 void test_devproc_share_family_rival_fork(void);
 void test_devproc_share_family_counts_every_piece(void);
 void test_devproc_share_family_lifetime(void);
+void test_devproc_share_family_second_fork_adopts(void);
+void test_devproc_share_family_fork_in_flight(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_birth_hold_ctl(void);

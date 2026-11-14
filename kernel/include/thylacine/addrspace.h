@@ -185,15 +185,18 @@ struct AddrSpace {
     // Votes 120 + 122 (I-39; DEBUG-FS-DESIGN 3.4): the share family this space
     // belongs to, NULL until a fork maps its shared anonymous memory into a
     // second space (or it is such a fork's child). The clone sets it on the
-    // child's unpublished space; the publication sets the parent's under BOTH
-    // g_proc_table_lock and this lock, so a reader holding either sees it
-    // stable. Never cleared or re-pointed once published; one reference,
+    // child's unpublished space; the publication sets the parent's under
+    // g_proc_table_lock alone (a release store), so a reader holding that lock
+    // sees it stable, and the clone and the unmap fold, which do not, read it
+    // with acquire and are sound on either value (proc_image_share_fork_locked
+    // says why). Never cleared or re-pointed once published; one reference,
     // dropped at the final lifetime put.
     struct ShareFamily *family;
 
     // The shared anonymous mappings linked here, kept by vma_insert_in and
-    // vma_remove_in (the only two places a mapping is linked) under lock: the
-    // family joins this image only while it is nonzero.
+    // vma_remove_in (the only two places a mapping is linked) under lock and
+    // read by the join without it: the family joins this image only while it
+    // is nonzero.
     u32            shared_maps;
 };
 
