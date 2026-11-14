@@ -148,7 +148,9 @@ the app, cp among them from run 10, and in run 12 leg 5 too: the probe, released
 Mac's `go`, was refused through its held handle (ELOOP), the app's record holds the walk of
 `secret.txt` from `folders/work/d`, and the read beside the cwd answered ENOENT. Run 12's leg
 6 met the guest's own mode check (permission denied) where the scenario wanted the app's
-EROFS. Leg 6 as it now stands, leg 7 and every control are NOT YET RUN IN A GUEST.
+EROFS. In run 13 (cef0afa25) every leg was green, twice; five app mutants and the `noremote`
+control bake each turned it red at its own leg, and the ro-create mutant stayed green, as the
+guest refuses first. Not yet audited (round R5).
 
 ## Seams
 

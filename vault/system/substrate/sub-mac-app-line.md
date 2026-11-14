@@ -234,8 +234,9 @@ stdin a closed pipe, the probe released by the `go` the Mac writes, the modes ch
 checks them; aux-gate
 `scendry-folders`): the clean app is green, all seven legs, and fifteen faults are red, each at its own leg and with its own words: ten of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, one that never reads the Mac's `go`, and no mode checks, so the create reaches the app's EROFS) and five of the app's rules, built into its binary (resid/mutbin.py: the owner's chmod landing in the read-only share, write kept in its modes, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, refused at the share's root at leg 1, and group bits kept). Two of the app's rules, broken, stay green, because the guest refuses first: a read-only create and a read-only open for writing. Against the cebf236be scenario it gives run 12's words exactly, and green without the mode checks; resid/scendry-folders-9.out and -9-old.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (runs 9 to 12, 2026-11-14) legs 1 to 4
 were green with the app, and in run 12 leg 5 too: ELOOP through the held handle, and the walk
-record. Leg 6 as it now stands, leg 7 and every control are NOT YET RUN IN A GUEST, and none
-of it is audited (round R5).
+record. In run 13 (cef0afa25) every leg was green, twice; each of the five app mutants and the
+`noremote` control turned it red at its own leg, and ro-create stayed green, as the guest
+refuses first. None of it is audited (round R5).
 
 ## Seams
 

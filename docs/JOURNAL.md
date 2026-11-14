@@ -331,6 +331,26 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
 - **The scripted guest with the kernel's mode checks**: the clean app is green, all seven legs, and fifteen faults are red, each at its own leg and with its own words: ten of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, one that never reads the Mac's `go`, and no mode checks, so the create reaches the app's EROFS) and five of the app's rules, built into its binary (resid/mutbin.py: the owner's chmod landing in the read-only share, write kept in its modes, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, refused at the share's root at leg 1, and group bits kept). Two of the app's rules, broken, stay green, because the guest refuses first: a read-only create and a read-only open for writing. Against the cebf236be scenario it gives run 12's words exactly, and green without the mode checks; resid/scendry-folders-9.out and -9-old.out, SCENDRY-FOLDERS DONE bad=0.
 - The app binaries rebuilt from 3276d0158 (resid/mutbin.py, resid/mutbin-3276d0158.out): the
   clean app and seven mutants, eight distinct hashes. `check-expect-forms.py` is clean.
+- **Guest run 13** (17:41-18:05Z, cef0afa25, QEMU 10.0.2 with HVF, resid/live13-run13.out,
+  `RESID-LIVE13 DONE bad=0`, mac released; logs in resid/live/run13/):
+  - the gate image as built: `ls-mac-line` green, all five legs; `ls-mac-folders` green, all
+    seven legs, leg 7 in a guest for the first time. Leg 6 in the guest's words: the create
+    and the write over a file `OPEN FAILED: PERMISSIONDENIED`, `rm:
+    /mnt/mac/folders/docs/readme.txt: permission denied`, `mv: ... -> ...: permission denied`,
+    `chmod: /mnt/mac/folders/docs/readme.txt: kernel error (errno 30)`, the Mac's folder
+    unchanged. Leg 5 green again, with the walk record `walk 'folders/work/d' ['secret.txt']
+    -> errno 40`;
+  - the app's mutants, each red at the check that knows it: ro-setattr at 6 (the owner's mode
+    change answered status 0), ro-mode-keeps-write at 6 (`OPEN FAILED: OTHER(30)`),
+    nofollow-dropped at 5 (the outside file's words read through the held handle),
+    owner-not-attacher at 1 (`cat: /mnt/mac/folders/work/hello.txt: permission denied`, the
+    search check the scripted guest now models), group-bits-kept at 7 (mode 0644); and
+    ro-create green, all seven legs: the app's create check gone, the guest still refused the
+    create from the modes;
+  - the `noremote` control bake (`/srv/mac` posted with no flags), red at leg 4: the absolute
+    link naming `/folders/work/...` read ENOENT;
+  - the gate image as committed, baked again: both scenarios green a second time.
+  Every guest line is the scripted guest's prediction.
 
 ### Decided by the operator
 
@@ -352,18 +372,17 @@ session's mount attached as the user and read through, a program's walk with own
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
 tools/mac-app-fake.py, not the app. In run 8 a guest spoke to the app itself: `ls-mac-line` was
-green, all five legs, with the app in the fake's place. In runs 9 to 12 a guest ran
-`ls-mac-folders` legs 1 to 4 green against the app, the remote post's leg among them, and from
-run 10 on leg 3's cp. In run 12 leg 5 was green in a guest: the held handle's ELOOP, the app's
-record of the walk, and the cwd's ENOENT. Leg 6 as it now stands, leg 7, and every control are
-shown against the scripted guest only. None of it is audited (round R5).
+green, all five legs, with the app in the fake's place. In run 13 a guest ran every leg of
+`ls-mac-folders` green against the app, twice, and each of the five app mutants and the
+`noremote` control turned it red at its own leg; the ro-create mutant stayed green, because the
+guest refuses first. Legs 1 to 4 were green in runs 9 to 12 as well, and leg 5 in run 12. None
+of it is audited (round R5).
 
 ### Open
 
-- Guest run 13 (resid-live13.sh): `ls-mac-folders` green with leg 6 as the guest answers it,
-  and leg 7's first run in a guest. Then the app's mutants: ro-setattr and ro-mode-keeps-write
-  red at leg 6, nofollow-dropped at 5, owner-not-attacher at 1, group-bits-kept at 7, and
-  ro-create green, as the guest refuses first; then the `noremote` control bake, red at leg 4.
+- The manual's /mnt/mac section stays in docs/manual-drafts until a guest checks its `mv`
+  sentence: run 13 checked its read-only and ownership text, but nothing has run `mv` between
+  two shares or out of the guest's own files, and M15 changes both answers.
 - M15 (voted): EXDEV in the kernel's rename, the ERRORS.md rows, libthyla-rs's four names and
   `mv`'s copy fallback. The kernel's rename is an audit-trigger surface. Leg 6's `Other(30)`
   and `kernel error (errno 30)` become the name then (OPEN-BUGS 2026-10-15 00:17Z).
