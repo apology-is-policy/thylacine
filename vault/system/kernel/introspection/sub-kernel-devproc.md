@@ -161,11 +161,22 @@ its image files to nobody but itself; `status`, `sched` and `imperium` stay read
 
 **Ordering is a LOCK, not a load order.** `proc_seal` (kernel/proc.c) is the only writer
 of both seal bits and stamps them under `g_proc_table_lock`; every read above tests the
-seal under that same lock and renders there too (environ under `env->lock`, maps under
-`vma_lock`, the mem copy directly -- all leaves below it). ns alone renders after the
-lock is dropped, because a shed can hold its `ns_lock` for about a million steps, and
-so it asks its admission again under the lock once the render is done, of the Proc that
-still holds the rendered Territory (`devproc.ns_admission_after_render`). So a read
+seal under that same lock and renders there too (environ under `env->lock`, the mem
+copy directly -- leaves below it). ns and maps render after the lock is dropped -- a
+shed can hold its `ns_lock` for about a million steps, and a fork's clone holds a
+space's lock for a walk of every mapping it has -- and each asks its admission again
+under the lock once the render is done, of the Proc that still holds what was rendered
+(`devproc.ns_admission_after_render`, `devproc.maps_render_after_the_walk`). maps
+PINS the space under the table lock (`addrspace_pin`: a lifetime reference from a live
+owner -- a Proc in the table owns its space, since exec swaps it under the lock and
+the reap unlinks before `proc_free` drops it) and renders it under its own lock after;
+the second look checks the Proc still has that space and the code rows' verdict is
+unchanged, and when an exec replaced the space it renders the new one, up to four
+renders (`DEVPROC_MAPS_TRIES`) before it answers -1. A last owner's drain runs under
+the space's lock, so a pinned render sees the whole list or none. Before 2026-11-14
+maps took the space's lock under the table lock (OPEN-BUGS 2026-11-14T17:55:58Z); the
+mem copy still does, waiting there on any holder of a stopped target's space -- an
+RFMEM sibling's clone included. So a read
 happens wholly before or wholly after a seal, whichever axis admitted the reader,
 including against a Proc that seals itself and then loads a secret, and
 `SPAWN_PERM_SEAL`'s two bits land in one critical section. The first correction had
@@ -190,7 +201,12 @@ the same-principal peer, the self exemption, NODUMP-is-not-a-debug-refusal);
 regression is reported as one); `devproc.ns_admission_after_render` (ns's second look:
 a hook between the two walks seals the target, exits it through the real Territory
 release, or unlinks it, against a control hook that does nothing -- EACCES, the empty
-file with the reader's ref the last one holding the Territory, and gone). Every seal
+file with the reader's ref the last one holding the Territory, and gone);
+`devproc.maps_render_after_the_walk` (maps' window, between the pin and the render:
+a page mapped there shows, so the render follows the walk; a seal refuses; an
+exec-shaped swap of the space renders the new space on a second render; an unlink
+reads as gone; every leg's pin is dropped -- the space's lifetime count is back where
+it was). Every seal
 test sets the bit through `proc_seal`, the
 production writer, and captures its verdicts before freeing its Procs.
 
@@ -1090,7 +1106,7 @@ reader with debug authority over it (the I-39 predicate, image join included). T
 reflexive case is written out because I-39 refuses a NOTRACE Proc even to itself,
 and a Proc reading its own layout tells no one else anything.
 
-`format_maps(p, show_code, ...)` prints the table exactly as before when it may.
+`format_maps_in(as, show_code, ...)` prints the table exactly as before when it may.
 Otherwise a code row takes no buffer during the walk: it is counted by permission
 class (r, w, x and the share flag, `maps_class`) and printed after the walk as
 `0x0-0x0 <perms> 0x0 code - -`, grouped by class. Each such row is a function of

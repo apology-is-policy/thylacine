@@ -3653,6 +3653,106 @@ void test_devproc_maps_shared_anon(void) {
                 "control: the private row stays rw-p, type lazy");
 }
 
+// The maps read pins the space under g_proc_table_lock and renders it after the
+// walk, so a long holder of the space's lock never stalls the table lock; what
+// admitted the read is asked again under the lock after the render. Each leg
+// acts in the window between the pin and the render, on a target mapping one
+// page at 0x10000000: a page mapped there shows (the render follows the walk),
+// a seal refuses the read, an exec-shaped swap of the space renders the new
+// space (a second render), and a target unlinked there reads as gone. Every leg
+// checks that the read dropped its pin.
+static struct Proc *g_mw_target, *g_mw_other;
+static int          g_mw_calls, g_mw_map_rc;
+
+static void mw_nothing(void) { g_mw_calls++; }
+static void mw_map(void) {
+    g_mw_calls++;
+    struct Burrow *b = burrow_create_anon_lazy(PAGE_SIZE);
+    g_mw_map_rc = b ? burrow_map(g_mw_target, b, 0x10004000ull, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b) burrow_unref(b);
+}
+static void mw_seal(void)   { g_mw_calls++; proc_seal(g_mw_target, PROC_FLAG_NODUMP); }
+static void mw_unlink(void) { g_mw_calls++; proc_test_unlink(g_mw_target); }
+static void mw_swap(void) {
+    if (g_mw_calls++ != 0) return;              // one exec: the second render is the new space
+    irq_state_t s = proc_table_lock_acquire();
+    struct AddrSpace *as = g_mw_target->as;
+    g_mw_target->as = g_mw_other->as;
+    g_mw_other->as  = as;
+    proc_table_lock_release(s);
+}
+
+void test_devproc_maps_render_after_the_walk(void) {
+    static void (*const window[])(void) = { mw_nothing, mw_map, mw_seal, mw_swap, mw_unlink };
+    enum { LEGS = (int)(sizeof(window) / sizeof(window[0])) };
+    long got[LEGS];
+    bool built[LEGS], first_row[LEGS], new_row[LEGS], other_row[LEGS];
+    int  calls[LEGS], refs_before[LEGS], refs_after[LEGS];
+    char buf[1024];
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    g_mw_map_rc = -9;
+    for (int i = 0; i < LEGS; i++) {
+        got[i] = -2;
+        built[i] = first_row[i] = new_row[i] = other_row[i] = false;
+        calls[i] = refs_before[i] = refs_after[i] = -1;
+        struct Proc *tgt = proc_alloc();
+        struct Proc *oth = proc_alloc();
+        struct Burrow *b = burrow_create_anon_lazy(PAGE_SIZE);
+        struct Burrow *ob = burrow_create_anon_lazy(PAGE_SIZE);
+        if (tgt && oth && b && ob) {
+            tgt->principal_id = th->proc->principal_id;
+            tgt->state        = PROC_STATE_ALIVE;
+            tgt->caps         = 0;
+            built[i] = burrow_map(tgt, b, 0x10000000ull, PAGE_SIZE, VMA_PROT_RW) == 0 &&
+                       burrow_map(oth, ob, 0x10008000ull, PAGE_SIZE, VMA_PROT_RW) == 0;
+        }
+        if (b)  burrow_unref(b);
+        if (ob) burrow_unref(ob);
+        struct AddrSpace *own = tgt ? tgt->as : NULL;
+        if (built[i]) {
+            proc_test_link(tgt);
+            struct Spoor *f = open_pidfile_for(tgt->pid, "maps", 0);
+            g_mw_target = tgt;
+            g_mw_other  = oth;
+            g_mw_calls  = 0;
+            refs_before[i] = addrspace_ref_count(own);
+            devproc_maps_test_set_window_hook(window[i]);
+            for (size_t k = 0; k < sizeof(buf); k++) buf[k] = 0;
+            got[i] = f ? devproc.read(f, buf, (long)sizeof(buf) - 1, 0) : -3;
+            devproc_maps_test_set_window_hook(NULL);
+            calls[i] = g_mw_calls;
+            refs_after[i] = addrspace_ref_count(own);
+            const size_t n = got[i] > 0 ? (size_t)got[i] : 0;
+            first_row[i] = contains(buf, n, "0x10000000-0x10001000 rw-p");
+            new_row[i]   = contains(buf, n, "0x10004000-0x10005000 rw-p");
+            other_row[i] = contains(buf, n, "0x10008000-0x10009000 rw-p");
+            if (f) spoor_clunk(f);
+            if (tgt->as != own) {                   // undo the swap
+                oth->as = tgt->as;
+                tgt->as = own;
+            }
+            if (window[i] != mw_unlink) proc_test_unlink(tgt);
+        }
+        if (tgt) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
+        if (oth) { oth->state = PROC_STATE_ZOMBIE; proc_free(oth); }
+    }
+
+    for (int i = 0; i < LEGS; i++) TEST_ASSERT(built[i], "each leg's target and its other space");
+    for (int i = 0; i < LEGS; i++)
+        TEST_EXPECT_EQ(refs_after[i], refs_before[i], "the read dropped its pin");
+    TEST_ASSERT(got[0] > 0 && first_row[0], "control: past an idle window, the target's row");
+    TEST_EXPECT_EQ(calls[0], 1, "control: one render");
+    TEST_EXPECT_EQ(g_mw_map_rc, 0, "the window mapped a second page");
+    TEST_ASSERT(got[1] > 0 && first_row[1] && new_row[1],
+                "a page mapped after the walk shows: the render follows it");
+    TEST_EXPECT_EQ(got[2], (long)-T_E_ACCES, "a seal landing before the render refuses the read");
+    TEST_EXPECT_EQ(calls[3], 2, "the swap: a second render");
+    TEST_ASSERT(got[3] > 0 && other_row[3] && !first_row[3],
+                "an exec-shaped swap renders the new space, not the one pinned first");
+    TEST_EXPECT_EQ(got[4], -1L, "a Proc gone during the render reads as gone");
+}
+
 void test_devproc_maps_code_visible(void) {
     struct Proc *caller = proc_alloc();
     struct Proc *target = proc_alloc();

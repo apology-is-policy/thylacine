@@ -1007,6 +1007,7 @@ void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
 void test_devproc_maps_shared_anon(void);      // votes 117 + 119
+void test_devproc_maps_render_after_the_walk(void);
 void test_devproc_maps_code_visible(void);     // B-2b audit F2
 void test_devproc_maps_code_redacted(void);    // B-2b audit F2
 void test_devproc_maps_code_truncated(void);   // B-2b audit F2

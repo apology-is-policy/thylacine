@@ -266,15 +266,15 @@ bool addrspace_private_begin(struct AddrSpace *as);
 void addrspace_private_end(struct AddrSpace *as);
 
 
-#ifdef KERNEL_TESTS
 // Kernel-only lifetime pins: no execution or process-sharing authority. Caller
 // holds a live owner or pin across pin acquisition. Unpin is NULL-safe; the last
-// total ref alone frees the descriptor/page tables. The last OWNER drains
-// mappings through the ordinary exit/exec path, which can sleep on file clunk.
+// total ref alone frees the descriptor/page tables, so it is never called under
+// as->lock. The last OWNER drains mappings through the ordinary exit/exec path,
+// which can sleep on file clunk; a pinned space's list is then empty, and the
+// drain runs under as->lock, so a walk under it sees all of the list or none.
 // No Proc pointer is needed or permitted after its owner's lifetime ends.
 void addrspace_pin(struct AddrSpace *as);
 void addrspace_unpin(struct AddrSpace *as);
-#endif // KERNEL_TESTS
 
 // Constructor/Proc owner count, excluding kernel pins. Use for process sharing
 // and last-process device quiescence, with the existing publication/exit proof.

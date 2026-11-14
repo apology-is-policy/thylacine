@@ -1705,6 +1705,8 @@ struct test_case g_tests[] = {
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },
     { "devproc.maps_shared_anon",     test_devproc_maps_shared_anon,      false, NULL },
+    { "devproc.maps_render_after_the_walk",
+                                      test_devproc_maps_render_after_the_walk, false, NULL },
     { "devproc.maps_code_visible",    test_devproc_maps_code_visible,     false, NULL },
     { "devproc.maps_code_redacted",   test_devproc_maps_code_redacted,    false, NULL },
     { "devproc.maps_code_truncated",  test_devproc_maps_code_truncated,   false, NULL },

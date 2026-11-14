@@ -688,7 +688,7 @@ static bool maps_put_redacted(u32 cls, char *buf, size_t cap, size_t *off) {
 // walk, and that stop is the one place the aliases' positions can still show:
 // it takes more code aliases below the last row printed than the buffer holds
 // rows, and an address space that holds that many prints no code rows at all.
-static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap) {
+static size_t format_maps_in(struct AddrSpace *as, bool show_code, char *buf, size_t cap) {
     size_t off = 0, n;
     n = fmt_str(buf, cap, off, "start-end perms off type file role\n");
     if (!n) return 0;
@@ -698,7 +698,7 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
     // LINEAGE L-1: a kernel-only Proc (kproc, which the /proc walk reaches) has
     // no address space and so no mappings -- the header alone, which is exactly
     // what an empty VMA list produced before the extraction.
-    if (!p->as) return off;
+    if (!as) return off;
 
     // Every redacted row has the same length; take it from the formatter itself.
     // Asked of every read, whoever reads, so a row that outgrew the probe would
@@ -714,8 +714,8 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
     bool   complete  = true;
     for (u32 c = 0; c < MAPS_CLASSES; c++) withheld[c] = 0;
 
-    irq_state_t vs = spin_lock_irqsave(&p->as->lock);
-    for (struct Vma *v = p->as->vmas; v; v = v->next) {
+    irq_state_t vs = spin_lock_irqsave(&as->lock);
+    for (struct Vma *v = as->vmas; v; v = v->next) {
         // The house SLUB-clobber defense every vma.c list walker runs
         // (vma_lookup / vma_insert / vma_remove_in / vma_find_gap). Not optional
         // here just because this is a diagnostic read: a freed entry's
@@ -731,7 +731,7 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
         }
         if (!maps_put_vma(v, buf, cap, &off)) { complete = false; break; }
     }
-    spin_unlock_irqrestore(&p->as->lock, vs);
+    spin_unlock_irqrestore(&as->lock, vs);
 
     if (nwithheld == 0 || !complete) return off;
     // Room for the withheld rows comes from dropping whole rows off the end.
@@ -1456,7 +1456,9 @@ struct devproc_read_ctx {
     u32                 kind;
     struct Territory   *ns;         // ns: ref-held, rendered after the walk
     bool                recheck;    // ns: the second look, after the render
-    bool                same;       // ns: the Proc still holds that Territory
+    bool                same;       // ns: the Proc still holds that Territory; maps: that space
+    struct AddrSpace   *as;         // maps: pinned, rendered after the walk
+    bool                show_code;  // maps: the code rows' verdict when it was pinned
     char               *buf;
     size_t              cap;
     size_t              total;
@@ -1511,9 +1513,20 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
         break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
-    case PQS_MAPS:                             // V-4b-2; B-2b: the code rows' addresses
-        r->total = format_maps(p, devproc_maps_code_visible_locked(r->caller, p),
-                               r->buf, r->cap);
+    case PQS_MAPS:                             // V-4b-2; B-2b; rendered by devproc_read, unlocked
+        if (r->recheck) {
+            r->same = p->as == r->as &&
+                      devproc_maps_code_visible_locked(r->caller, p) == r->show_code;
+            break;
+        }
+        // A pin, not the space's lock: that is taken for the render, after the
+        // table lock drops, so a long holder of it (a fork's clone) never stalls
+        // this walk with interrupts off. A Proc in the table owns its space (an
+        // exec swaps it under this lock; the reap unlinks before proc_free drops
+        // it), so the pin is taken from a live owner.
+        r->as        = p->as;
+        r->show_code = devproc_maps_code_visible_locked(r->caller, p);
+        if (r->as) addrspace_pin(r->as);
         break;
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
@@ -1566,9 +1579,27 @@ static inline void devproc_ns_test_window(void) {
     if (fn && __atomic_load_n(&g_ns_test_owner, __ATOMIC_RELAXED) == current_thread())
         fn();
 }
+
+static void (*g_maps_test_window)(void);
+static struct Thread *g_maps_test_owner;
+
+void devproc_maps_test_set_window_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_maps_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_maps_test_window, fn, __ATOMIC_RELEASE);
+}
+
+static inline void devproc_maps_test_window(void) {
+    void (*fn)(void) = __atomic_load_n(&g_maps_test_window, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_maps_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
 #else
 static inline void devproc_ns_test_window(void) {}
+static inline void devproc_maps_test_window(void) {}
 #endif
+
+// A maps read whose space an exec keeps replacing stops after this many renders.
+#define DEVPROC_MAPS_TRIES 4u
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -1628,7 +1659,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (kind == PQS_NS && (size_t)n < cap) cap = (size_t)n;
     struct devproc_read_ctx r = {
         .pid = pid, .kind = kind, .ns = NULL, .recheck = false, .same = false,
-        .buf = content, .cap = cap, .total = 0, .windowed = false, .found = false,
+        .as = NULL, .show_code = false, .buf = content, .cap = cap, .total = 0, .windowed = false, .found = false,
         .caller = caller, .denied = false,
     };
     proc_for_each(devproc_read_cb, &r);
@@ -1649,6 +1680,30 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (!r.found) return -1;              // gone since the render
         if (r.denied) return -T_E_ACCES;
         if (!r.same) return -1;               // the Proc's Territory changed (unreachable today)
+    }
+    if (kind == PQS_MAPS) {
+        // Rendered outside the table lock as ns is, and admitted again under it
+        // after the render; a space an exec replaced meanwhile is rendered anew.
+        for (u32 tries = 1; ; tries++) {
+            devproc_maps_test_window();
+            r.total = format_maps_in(r.as, r.show_code, content, cap);
+            struct AddrSpace *rendered = r.as;
+            r.recheck = true;
+            r.found   = false;
+            r.same    = false;
+            proc_for_each(devproc_read_cb, &r);
+            addrspace_unpin(rendered);        // past the walk: the last pin frees
+            if (!r.found) return -1;          // gone since the render
+            if (r.denied) return -T_E_ACCES;
+            if (r.same) break;
+            if (tries == DEVPROC_MAPS_TRIES) return -1;
+            r.recheck = false;
+            r.found   = false;
+            r.as      = NULL;
+            proc_for_each(devproc_read_cb, &r);
+            if (!r.found) return -1;
+            if (r.denied) return -T_E_ACCES;
+        }
     }
 
     // A whole file is sliced at `off`; a window already starts there.

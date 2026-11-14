@@ -430,7 +430,11 @@ principal — not for a spawn that changes no identity, which publishes nothing 
 with, and not for a `CAP_HOSTOWNER` reader, whose admission never consulted the
 identity at all. So the ordering is no longer derived. `proc_seal` is the **only**
 writer of both bits and stamps them under `g_proc_table_lock`; every `/proc` reader
-that tests them runs under that same lock (`proc_for_each`) and renders there too. A
+that tests them runs under that same lock (`proc_for_each`) and renders there too --
+except `ns` and `maps`, which render after the lock drops (a namespace shed, or a
+fork's clone of the space, can hold the lock the render needs for a long walk) and then
+ask their admission again under the lock, refusing what they rendered if a seal landed
+meanwhile (`maps` holds its space by a lifetime pin taken under the lock). A
 read therefore happens entirely before a seal or entirely after it, whichever axis
 admitted the reader — including against a Proc that seals *itself* and then loads a
 secret. `SPAWN_PERM_SEAL`'s two bits land in one critical section, so no reader ever

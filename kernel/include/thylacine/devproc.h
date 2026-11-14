@@ -44,6 +44,8 @@ long devproc_step_result_for_test(int ev, long n);
 int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl);
 int devproc_wait_verdict_for_test(int state);
 void devproc_ns_test_set_window_hook(void (*fn)(void));
+// Run fn() before each maps render, between the walk that pinned the space and the render.
+void devproc_maps_test_set_window_hook(void (*fn)(void));
 #endif // KERNEL_TESTS
 
 #endif // THYLACINE_DEVPROC_H
