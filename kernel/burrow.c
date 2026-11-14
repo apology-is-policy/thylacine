@@ -426,8 +426,8 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     // nothing per reserved page (B-1a'; the flat array this replaced was 8 B
     // per page, uncharged, and the reason every reservation had a cap). The
     // demand-zero fault arm installs a slot on first touch, charging the
-    // nodes it needs to the mapping address space; burrow_free_internal
-    // destroys the map.
+    // nodes it needs to the mapping address space (a shared Burrow's to its
+    // payer record, vote 121); burrow_free_internal destroys the map.
     if (pagemap_init(&v->pm, page_count) != 0) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;
@@ -1083,8 +1083,8 @@ static void burrow_free_internal(struct Burrow *v) {
         // page. The record is refunded whole, to whoever pays it now (the
         // last mapping may be any sharer's). The pages are this Burrow's
         // alone (a fork shares the Burrow, never clones it), so the free is
-        // plain; the map's nodes were charged to no address space (the fault
-        // installs with none), so destroying them owes no refund.
+        // plain; the map's nodes are in the record too (vote 121), so the
+        // refund covers them and destroying them owes nothing more.
         if (!pagemap_live(&v->pm))
             extinction("burrow_free_internal(ANON_SHARED) with the pagemap already destroyed (double-free)");
         if (v->payer_record)

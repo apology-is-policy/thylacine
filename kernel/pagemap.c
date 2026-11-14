@@ -205,6 +205,11 @@ int pagemap_install_paid(struct pagemap *pm, spin_lock_t *lock, size_t idx,
             if (payer) payer->uncharge(payer->ctx, need - got);   // the part never allocated
             goto fail;
         }
+#ifdef KERNEL_TESTS
+        // The window a rival installer can build the path in: the shortfall
+        // charged and allocated, the lock dropped.
+        if (g_pagemap_install_probe_for_test) g_pagemap_install_probe_for_test(pm, idx);
+#endif
     }
 
 fail:;
@@ -281,6 +286,8 @@ void pagemap_take(struct pagemap *pm, spin_lock_t *lock, size_t idx,
 static u64 g_pagemap_walk_steps;
 
 #ifdef KERNEL_TESTS
+void (*g_pagemap_install_probe_for_test)(struct pagemap *pm, size_t idx);
+
 u64 pagemap_walk_steps(void) {
     return __atomic_load_n(&g_pagemap_walk_steps, __ATOMIC_RELAXED);
 }

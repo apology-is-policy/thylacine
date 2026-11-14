@@ -168,6 +168,10 @@ size_t pagemap_next_resident(const struct pagemap *pm, spin_lock_t *lock,
 // pagemap_next_resident since boot -- the witness of the bound above (the
 // vma_scan_steps shape).
 u64  pagemap_walk_steps(void);
+
+// Called by pagemap_install_paid in the window between allocating a path's
+// missing nodes and retaking the lock, where a rival may build the path.
+extern void (*g_pagemap_install_probe_for_test)(struct pagemap *pm, size_t idx);
 #endif // KERNEL_TESTS
 
 // Grow the map to `count` slots (more than it has), every resident page

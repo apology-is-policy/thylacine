@@ -63,6 +63,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>   // PTY-1f: fabricated member Threads
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
 
 static void pts_test_interaction_front(void);
 static void pts_test_interaction_retirement_race(void);
@@ -1497,4 +1498,80 @@ cleanup:
     }
     TEST_ASSERT(!failure, failure);
 #undef TPTI_CHECK
+}
+
+// Vote 120 (DEBUG-FS-DESIGN 3.4): the BIND gate asks the host's IMAGE for the
+// taint, not its word. Each host maps one page and a second space is cloned
+// from it, as a fork's would be, with the publication's record written as
+// rfork_internal writes it; the far side is then debugged. Over shared
+// anonymous memory the taint reaches the host only through the shared
+// Burrow's record, and the sealed host is refused; over a private map
+// (one variable away) the same steps leave it able to bind.
+struct pti_share {
+    struct Proc      *other;
+    struct AddrSpace *own, *clone;
+};
+
+static bool pti_share_fork(struct Proc *host, struct pti_share *s, bool shared) {
+    s64 va = sys_mmap_anon_core(host, PAGE_SIZE, VMA_PROT_RW, VMA_PROT_RW, shared);
+    if (va <= 0) return false;
+    s->clone = addrspace_clone(host->as, false);
+    if (!s->clone) return false;
+    s->other = proc_alloc();
+    if (!s->other) return false;
+    s->own = s->other->as;
+    s->other->as = s->clone;
+    s->other->principal_id = host->principal_id;
+    s->other->state = PROC_STATE_ALIVE;
+    irq_state_t st = proc_table_lock_acquire();
+    proc_image_share_fork_locked(host, s->other);
+    proc_mark_debug_tainted_locked(s->other);           // a debugger on the far side
+    proc_table_lock_release(st);
+    return true;
+}
+
+static void pti_share_undo(struct pti_share *s) {
+    if (s->other) {
+        if (s->clone) s->other->as = s->own;
+        s->other->state = PROC_STATE_ZOMBIE;
+        proc_free(s->other);
+    }
+    if (s->clone) addrspace_unref(s->clone);
+}
+
+void test_pts_bind_weighs_shared_taint(void) {
+    struct Proc *sh = proc_alloc(), *pv = proc_alloc(), *observer = proc_alloc();
+    TEST_ASSERT(sh && pv && observer, "fixture processes");
+    proc_test_link(sh); proc_test_link(pv); proc_test_link(observer);
+    struct pti_share ss = { 0 }, ps = { 0 };
+    bool forked = pti_share_fork(sh, &ss, true) && pti_share_fork(pv, &ps, false);
+    struct SrvConn *cs = pts_make_conn(sh), *cp = pts_make_conn(pv);
+    s64 ids = cs ? pts_mint(sh, cs, 980) : -1;
+    s64 idp = cp ? pts_mint(pv, cp, 981) : -1;
+    bool premise = forked && ids > 0 && idp > 0 &&
+        ((__atomic_load_n(&sh->proc_flags, __ATOMIC_ACQUIRE) |
+          __atomic_load_n(&pv->proc_flags, __ATOMIC_ACQUIRE)) & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+        (__atomic_load_n(&ss.other->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) &&
+        (__atomic_load_n(&ps.other->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED);
+    s64 shared_bind = 0, private_bind = -1;
+    if (premise) {
+        proc_seal(sh, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+        proc_seal(pv, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+        struct pts_interaction_call a = { .pts_id = (u64)ids, .observer_stripes = proc_stripes(observer) };
+        struct pts_interaction_call b = { .pts_id = (u64)idp, .observer_stripes = proc_stripes(observer) };
+        shared_bind  = proc_pts_interaction(sh, PTY_INTERACTION_BIND, &a);   // THE REGRESSION
+        private_bind = proc_pts_interaction(pv, PTY_INTERACTION_BIND, &b);
+    }
+    if (ids > 0) (void)pts_free(sh, (u64)ids);            // retires a live binding too
+    if (idp > 0) (void)pts_free(pv, (u64)idp);
+    pts_drop_conn(cs);
+    pts_drop_conn(cp);
+    pti_share_undo(&ps);
+    pti_share_undo(&ss);
+    pts_drop_linked(observer); pts_drop_linked(pv); pts_drop_linked(sh);
+
+    TEST_ASSERT(premise, "premise: two clean hosts, each with a debugged far side, one shared, one private");
+    TEST_EXPECT_EQ(shared_bind, (s64)-T_E_ACCES,
+                   "a sealed host whose shared memory was debugged from another space may not bind");
+    TEST_ASSERT(private_bind > 0, "control: the same over a private fork binds");
 }
