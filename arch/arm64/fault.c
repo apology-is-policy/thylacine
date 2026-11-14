@@ -823,10 +823,11 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         // under the held as->lock (no slow path), but with three differences.
         // (1) It is never COW: a fork maps this Burrow itself, so a write lands
         // in the page every sharer sees, and the COW branch above is never
-        // reached (no shared VMA carries VMA_FLAG_COW). (2) The page is paid
-        // by the Burrow's payer record, not by the faulter: the mint is
-        // charged to the payer (the creating space; after its death, the next
-        // minting faulter, which takes the residency over), and a leaf costs
+        // reached (no shared VMA carries VMA_FLAG_COW). (2) The page, and any
+        // node its slot's path lacks, is paid by the Burrow's payer record,
+        // not by the faulter: the mint is charged to the payer (the creating
+        // space; after its death, the next minting faulter, which takes the
+        // residency over), and a leaf costs
         // one page only in a space that is not the payer (step 5). (3) Sharers
         // in OTHER address spaces fault the same slot under their OWN
         // as->lock, so the install's loser branch is live here: the loser
@@ -862,10 +863,14 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
             if (g_shared_mint_probe_for_test)
                 g_shared_mint_probe_for_test(p, v, slot);
 #endif
-            // The nodes are charged to no address space (as for a FILE fill):
-            // the map outlives any one sharer, and none of them owns it.
-            int irc = pagemap_install(&v->pm, &v->lock, slot, newpg, NULL,
-                                      exempt, &resident);
+            // The nodes the slot's path lacks are charged through the record
+            // like the page (vote 121): the map outlives any one sharer, so
+            // it is the payer that holds them.
+            int irc = burrow_record_install(v, p->as, slot, newpg, exempt, &resident);
+            // That charge can make the hand-over too: the payer's space died
+            // on another CPU after the mint's charge. Adopt before any exit,
+            // as after the mint's.
+            payer_adopt_if_due(p, vma, v);
             if (irc < 0) {
                 free_pages(newpg, 0);
                 burrow_mint_refund(v, 1);

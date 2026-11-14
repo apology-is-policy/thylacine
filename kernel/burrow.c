@@ -746,13 +746,14 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // so one lock for the machine costs nothing that shows.
 //
 // The record's invariant: payer_charge_pages is the Burrow's resident page
-// count plus one page for each fill that has charged and not yet installed --
-// at most one per address space: the cluster charges slot by slot at its
-// install, the single fill and the shared demand-zero fill their one page, each
-// under the faulting space's as->lock with no sleep between the charge and the
-// install, and a shared Burrow's sharers each fault under their own -- and a
-// non-NULL payer has paid exactly payer_charge_pages. Every transition below
-// keeps both halves.
+// count, plus a shared Burrow's linked pagemap nodes (vote 121), plus what each
+// fill has charged and not yet installed -- at most one page per address space,
+// and with it the nodes its slot's path lacks: the cluster charges slot by slot
+// at its install, the single fill and the shared demand-zero fill their one
+// page, each under the faulting space's as->lock with no sleep between the
+// charge and the install, and a shared Burrow's sharers each fault under their
+// own -- and a non-NULL payer has paid exactly payer_charge_pages. Every
+// transition below keeps both halves.
 // =============================================================================
 
 static spin_lock_t g_payer_lock = SPIN_LOCK_INIT;
@@ -836,8 +837,9 @@ u32 burrow_mint_headroom(struct Burrow *v, struct AddrSpace *faulter, bool exemp
     return take;
 }
 
-u32 burrow_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
-                            u32 want) {
+// `all`: the whole of `want` or nothing (a path's nodes are no use in part).
+static u32 mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+                       u32 want, bool all) {
     if (!v || !v->payer_record || !faulter || want == 0) return 0;
     spin_lock(&g_payer_lock);
     u32 owed; bool pexempt, capfree;
@@ -845,7 +847,7 @@ u32 burrow_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
     u32 n = 0;
     for (;;) {
         u32 take = mint_take_locked(payer, owed, capfree, want);
-        if (!take) break;
+        if (!take || (all && take < want)) break;
         // The CAS loop re-decides against the cap; a refusal here means the
         // count grew past this snapshot's headroom, so look again. Each lap
         // follows a charge that landed, so the loop ends.
@@ -858,6 +860,40 @@ u32 burrow_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
     }
     spin_unlock(&g_payer_lock);
     return n;
+}
+
+u32 burrow_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+                            u32 want) {
+    return mint_charge(v, faulter, exempt, want, false);
+}
+
+// The node half of a mint (operator vote 121): the pagemap's nodes are charged
+// through the record like the pages they index, so the payer pays them, a
+// hand-over owes them, and the free refunds them with the rest. A node is
+// freed only by pagemap_destroy (no path takes a slot out of a Burrow that
+// carries a record), so nothing refunds one before the free does.
+struct record_node_payer {
+    struct Burrow    *v;
+    struct AddrSpace *faulter;
+};
+
+static bool record_node_charge(void *ctx, u32 n, bool exempt) {
+    struct record_node_payer *rp = ctx;
+    return mint_charge(rp->v, rp->faulter, exempt, n, true) == n;
+}
+
+static void record_node_uncharge(void *ctx, u32 n) {
+    struct record_node_payer *rp = ctx;
+    burrow_mint_refund(rp->v, n);
+}
+
+int burrow_record_install(struct Burrow *v, struct AddrSpace *faulter, size_t slot,
+                          struct page *pg, bool exempt, struct page **out_winner) {
+    if (!v || !v->payer_record || !faulter)
+        extinction("burrow_record_install without a payer record");
+    struct record_node_payer rp = { v, faulter };
+    struct pagemap_payer pp = { record_node_charge, record_node_uncharge, &rp };
+    return pagemap_install_paid(&v->pm, &v->lock, slot, pg, &pp, exempt, out_winner);
 }
 
 void burrow_mint_refund(struct Burrow *v, u32 pages) {

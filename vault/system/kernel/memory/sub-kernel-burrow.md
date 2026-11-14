@@ -385,7 +385,8 @@ every record that names it without taking the Burrows' locks in some order,
 and it costs nothing visible because a mint is a 9P read away. Nothing is
 acquired inside it; the charge and refund are the space counter's CAS loops.
 
-The invariant: `payer_charge_pages` is the Burrow's resident page count plus at
+The invariant: `payer_charge_pages` is the Burrow's resident page count (for
+ANON_SHARED, plus its pagemap's node pages, operator vote 121) plus at
 most one page per address space that a fill has charged and is installing
 (charge and install in one hold of the faulting space's `as->lock`, no sleep
 between -- one in flight per space; a shared anonymous Burrow, below, can have
@@ -404,6 +405,15 @@ several spaces mid-mint at once), and a non-NULL `payer` has paid exactly
   page right before installing it, never across a read (round 34 F1).
 - `burrow_mint_headroom` answers how many of `want` the same charge could
   take now, charging nothing; the cluster sizes its window with it.
+- `burrow_record_install` (ANON_SHARED's fault) installs a minted page with
+  the nodes its slot's path lacks charged through the record as well, all of
+  them or none (`pagemap_install_paid` with the record as the node payer), on
+  a mint's terms: the same payer choice, so a node charge can hand a lapsed
+  record over and the caller adopts after it too; a node a racer made
+  unnecessary is refunded like a loser's mint. No path takes a slot out of a
+  record-paid Burrow, so its nodes live until `pagemap_destroy`, and the free
+  refunds them with the record. A private image's nodes are still the
+  pool's.
 - `burrow_mint_refund` takes back mints that did not end resident, from
   the record and from whoever pays now. A hand-over charged the new payer the
   whole record, so the refund always belongs to the current payer.
@@ -447,7 +457,8 @@ the page -- so the pages go at the free and not before ([[inv-i7]]). The free
 arm refunds the record whole to whoever pays now (the last mapping may be any
 sharer's), then destroys the map with a plain page free: the pages are this
 Burrow's alone, because a fork shares the Burrow and never clones it
-([[sub-kernel-addrspace]]), and the map's nodes were charged to no space.
+([[sub-kernel-addrspace]]), and the map's nodes were charged to no space
+until operator vote 121 put them in the record.
 
 The witnesses are `kernel/test/test_shared_anon.c`, each driving the real
 paths (the phenotype's mint core, the fault arm, `addrspace_clone`, the munmap
@@ -459,8 +470,13 @@ page),
 `creator_pays_every_mint`, `unmap_keeps_the_page`, `creator_death_hands_over`,
 `install_loser_refunds` (a probe runs the rival's fault between the loser's
 charge and its install), `protect_split_keeps_payer`,
-`dontneed_keeps_contents` and `refused_mint_refunds` (a full pool before the
-page, and before the map's first node: each refusal takes the mint back).
+`dontneed_keeps_contents`, `refused_mint_refunds` (a full pool before the
+page, and before the map's first node, and a payer capped one page short of
+that node: each refusal takes the mint back), `nodes_paid_by_record` (vote
+121: across a two-level map the record and the payer's count hold every
+node, the child pays only its leaf, and the free refunds it all) and
+`node_charge_hand_over_adopts` (the payer lapses inside the mint, so the node
+charge makes the hand-over and the fault adopts again).
 
 ### The cross-Proc share
 

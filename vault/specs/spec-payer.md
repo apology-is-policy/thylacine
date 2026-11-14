@@ -40,8 +40,14 @@ split is what makes the install's loser branch live for shared memory.
 the decision it drives (charge a leaf or not) against the truth (`payer = sp`).
 Death is one step: the drain, then the lapse.
 
-Beneath the model, said so the green reads no larger: the cap, exemption,
-node pages and the pool (they bound HOW MUCH is charged, never TO WHOM); the
+Beneath the model, said so the green reads no larger: the cap, exemption and
+the pool (they bound HOW MUCH is charged, never TO WHOM). The shared map's
+node pages are charged TO the payer through the record (operator vote 121):
+each is a unit `Charge` takes before the install links it, refunded as a
+loser's is when a racer built that part of the path first, then resident
+until the free and mapped by no space -- the model's slot minted and then
+unmapped, so the record laws cover nodes without a second unit kind. A
+private image's nodes are still the pool's. Also beneath it: the
 descriptor's lifetime (the lapse after the drain and before the last lifetime
 drop is the host fixture's, `tools/host-tests/addrspace-lifetime.c`); and all
 geometry below "which slots a space maps" -- a split's carriage of the payer

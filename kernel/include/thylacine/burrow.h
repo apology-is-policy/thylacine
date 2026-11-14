@@ -277,8 +277,9 @@ struct Burrow {
     // is the payer record, read and written only under g_payer_lock
     // (burrow.c): payer is the address space charged for every resident
     // page -- NULL once it has died (lapsed) -- and payer_charge_pages is the
-    // resident count (plus a page a fill has charged and is installing under
-    // its as->lock), which a live payer has paid exactly. The payer's list of the Burrows it pays
+    // resident count (plus an ANON_SHARED map's nodes, vote 121, plus what a
+    // fill has charged and is installing under its as->lock), which a live
+    // payer has paid exactly. The payer's list of the Burrows it pays
     // for (AddrSpace.paid_burrows) is what lets its teardown lapse them, so the
     // pointer never outlives the descriptor it names.
     bool              payer_record;
@@ -810,6 +811,13 @@ u32  burrow_mint_headroom(struct Burrow *v, struct AddrSpace *faulter, bool exem
 // resident -- from the record and from whoever is the payer NOW (it paid the
 // whole record); a lapsed record refunds nobody.
 void burrow_mint_refund(struct Burrow *v, u32 pages);
+// burrow_record_install: pagemap_install into `v`'s map with the nodes the
+// path needs charged through the record, all of them or none (vote 121), on
+// the same terms as a mint -- so the charge may hand a lapsed record over to
+// `faulter` as a mint's can. Results as pagemap_install's. ANON_SHARED only
+// today: a private image's nodes are still the pool's.
+int  burrow_record_install(struct Burrow *v, struct AddrSpace *faulter, size_t slot,
+                           struct page *pg, bool exempt, struct page **out_winner);
 // burrow_payer_is: is `as` the payer of `v` right now?
 bool burrow_payer_is(struct Burrow *v, const struct AddrSpace *as);
 // burrow_payers_lapse: `as` is dying (its last owner drained it):

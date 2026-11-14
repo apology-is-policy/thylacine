@@ -456,6 +456,8 @@ void test_shared_anon_install_loser_refunds(void);
 void test_shared_anon_protect_split_keeps_payer(void);
 void test_shared_anon_dontneed_keeps_contents(void);
 void test_shared_anon_refused_mint_refunds(void);
+void test_shared_anon_nodes_paid_by_record(void);
+void test_shared_anon_node_charge_hand_over_adopts(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
 void test_demand_page_alignment_abort_is_bus_not_handled(void);

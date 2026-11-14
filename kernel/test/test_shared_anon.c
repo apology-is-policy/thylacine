@@ -513,12 +513,14 @@ void test_shared_anon_dontneed_keeps_contents(void) {
     TEST_EXPECT_EQ(pres1, 0u, "control: DONTNEED still releases a private page");
 }
 
-// The mint's two refusals after its charge refund it, so the record stays the
-// resident count (I-32): a pool with no room for the data page, and a pool with
-// room for the page but none for the map's first node (the probe parks the
-// rest after the page is allocated; a map past PAGEMAP_INLINE_MAX slots is a
-// radix whose root is a node, absent until the first install). The control is
-// the same fault once the pool has room again: it mints and charges.
+// The mint's refusals after its charge refund it, so the record stays what is
+// resident (I-32): a pool with no room for the data page; a pool with room for
+// the page but none for the map's first node (the probe parks the rest after
+// the page is allocated; a map past PAGEMAP_INLINE_MAX slots is a radix whose
+// root is a node, absent until the first install); and a payer whose cap has
+// room for the page but not for that node, which the record charges too (vote
+// 121). The control is the same fault with room again: it mints the page and
+// the root, and the payer pays both.
 #define SA_RADIX_PAGES (PAGEMAP_INLINE_MAX * 2u)
 
 static u32 g_sa_park;
@@ -540,7 +542,9 @@ void test_shared_anon_refused_mint_refunds(void) {
     const bool pfl = sa_floor(p->as);
     const u32 d0 = sa_data(p->as);
     enum fault_result r1 = FAULT_HANDLED, r2 = FAULT_HANDLED, r3 = FAULT_UNHANDLED_USER;
-    u32 rec1 = 99, d1 = 0, res2 = 99, rec2 = 99, d2 = 0, rec3 = 0, d3 = 0;
+    enum fault_result r4 = FAULT_HANDLED;
+    u32 rec1 = 99, d1 = 0, res2 = 99, rec2 = 99, d2 = 0, rec3 = 0, d3 = 0, n3 = 0;
+    u32 res4 = 99, rec4 = 99, d4 = 0;
     g_sa_park = 0;
     if (sb && !exempt) {
         // 1. No room for the data page.
@@ -558,9 +562,18 @@ void test_shared_anon_refused_mint_refunds(void) {
         res2 = burrow_lazy_resident_count(sb);
         rec2 = burrow_payer_charge_pages_for_test(sb);
         d2   = sa_data(p->as);
+        // 3. Room for the page under the payer's cap, none for the node.
+        const u32 budget0 = p->as->page_budget;
+        p->as->page_budget = p->as->page_count + 1u;
+        r4 = sa_fault(p, (u64)va, true);
+        p->as->page_budget = budget0;
+        res4 = burrow_lazy_resident_count(sb);
+        rec4 = burrow_payer_charge_pages_for_test(sb);
+        d4   = sa_data(p->as);
         // The control.
         r3   = sa_fault(p, (u64)va, true);
         rec3 = burrow_payer_charge_pages_for_test(sb);
+        n3   = pagemap_node_count(&sb->pm);
         d3   = sa_data(p->as);
     }
     sa_unfloor(p->as, pfl);
@@ -577,7 +590,147 @@ void test_shared_anon_refused_mint_refunds(void) {
     TEST_EXPECT_EQ(res2, 0u, "no page resident");
     TEST_EXPECT_EQ(rec2, 0u, "the mint taken back from the record");
     TEST_EXPECT_EQ(d2, d0, "and from the payer");
+    TEST_EXPECT_EQ(r4, FAULT_UNHANDLED_USER, "no headroom for the node: refused");
+    TEST_EXPECT_EQ(res4, 0u, "no page resident");
+    TEST_EXPECT_EQ(rec4, 0u, "the mint taken back from the record");
+    TEST_EXPECT_EQ(d4, d0, "and from the payer");
     TEST_EXPECT_EQ(r3, FAULT_HANDLED, "control: with room the same fault mints");
-    TEST_EXPECT_EQ(rec3, 1u, "control: the record holds the page");
-    TEST_EXPECT_EQ(d3, d0 + 1u, "control: the payer pays it");
+    TEST_EXPECT_EQ(n3, 1u, "control: the map's root is its one node");
+    TEST_EXPECT_EQ(rec3, 2u, "control: the record holds the page and the root");
+    TEST_EXPECT_EQ(d3, d0 + 2u, "control: the payer pays both");
+}
+
+// Vote 121: the nodes a mint's slot path lacks are charged through the record,
+// so the payer pays them whoever faults, and the free refunds them with the
+// pages. Past 512 slots the map is a two-level radix: slot 0 needs the root and
+// a leaf node, slot 512 a second leaf node, and the child's slot 1024 a third
+// -- for which the child pays only its leaf. Were the nodes charged to the
+// faulter instead, they would show in the child's count.
+#define SA_DEEP_PAGES (PAGEMAP_NODE_ENTRIES * 3u)
+
+void test_shared_anon_nodes_paid_by_record(void) {
+    struct Proc *p = proc_alloc(), *q = proc_alloc();
+    if (!p || !q) { sa_drop(q); sa_drop(p); TEST_ASSERT(false, "proc_alloc"); }
+    const u64 len  = (u64)SA_DEEP_PAGES * PAGE_SIZE;
+    const u64 span = (u64)PAGEMAP_NODE_ENTRIES * PAGE_SIZE;   // one leaf node's slots
+    s64 va = sys_mmap_anon_core(p, len, VMA_PROT_RW, VMA_PROT_RW, true);
+    u64 sva = va > 0 ? (u64)va : 0;
+    struct Burrow *sb = sva ? sa_burrow(p, sva) : NULL;
+    const bool pfl = sa_floor(p->as);
+    const u32 d0 = sa_data(p->as);
+    enum fault_result r0 = FAULT_UNHANDLED_USER, r1 = FAULT_UNHANDLED_USER,
+                      r2 = FAULT_UNHANDLED_USER;
+    u32 n0 = 0, rec0 = 0, d1 = 0, n1 = 0, rec1 = 0, d2 = 0;
+    if (sb) {
+        r0 = sa_fault(p, sva, true);                    // slot 0: root + leaf node
+        n0 = pagemap_node_count(&sb->pm);
+        rec0 = burrow_payer_charge_pages_for_test(sb);
+        d1 = sa_data(p->as);
+        r1 = sa_fault(p, sva + span, true);             // slot 512: a second leaf node
+        n1 = pagemap_node_count(&sb->pm);
+        rec1 = burrow_payer_charge_pages_for_test(sb);
+        d2 = sa_data(p->as);
+    }
+    struct AddrSpace *qown = NULL;
+    struct AddrSpace *c = r1 == FAULT_HANDLED ? sa_fork(p, q, &qown) : NULL;
+    bool cfl = false;
+    u32 c0 = 0, dpf = 0, n2 = 0, rec2 = 0, dp3 = 0, dc1 = 0, dc2 = 0, dp4 = 0;
+    s64 m1 = -1, m2 = -1;
+    if (c) {
+        cfl = sa_floor(c);
+        c0 = sa_data(c); dpf = sa_data(p->as);
+        r2 = sa_fault(q, sva + 2u * span, true);        // the child's slot 1024: a third
+        n2 = pagemap_node_count(&sb->pm);
+        rec2 = burrow_payer_charge_pages_for_test(sb);
+        dp3 = sa_data(p->as); dc1 = sa_data(c);
+        m1 = sys_munmap_range_for_proc(q, sva, len);    // the child's leaf comes back
+        dc2 = sa_data(c);
+        m2 = sys_munmap_range_for_proc(p, sva, len);    // the last mapping: the free
+        dp4 = sa_data(p->as);
+        sa_unfloor(c, cfl);
+    }
+    sa_unfork(q, qown, c);
+    sa_unfloor(p->as, pfl);
+    sa_drop(q);
+    sa_drop(p);
+
+    TEST_ASSERT(sva != 0 && sb != NULL, "a shared mint past one leaf node");
+    TEST_ASSERT(pfl, "the floor under the payer's count");
+    TEST_EXPECT_EQ(r0, FAULT_HANDLED, "slot 0 mints");
+    TEST_EXPECT_EQ(n0, 2u, "premise: slot 0's path is two nodes, the root and a leaf node");
+    TEST_EXPECT_EQ(rec0, 3u, "the record holds the page and both nodes");
+    TEST_EXPECT_EQ(d1, d0 + 3u, "the payer pays all three");
+    TEST_EXPECT_EQ(r1, FAULT_HANDLED, "slot 512 mints");
+    TEST_EXPECT_EQ(n1, 3u, "premise: slot 512 needed one more leaf node");
+    TEST_EXPECT_EQ(rec1, 5u, "the record: two pages, three nodes");
+    TEST_EXPECT_EQ(d2, d0 + 5u, "the payer pays the record");
+    TEST_ASSERT(c != NULL && cfl, "the fork, and the floor under the child");
+    TEST_EXPECT_EQ(r2, FAULT_HANDLED, "the child's mint is served");
+    TEST_EXPECT_EQ(n2, 4u, "premise: the child's slot needed a third leaf node");
+    TEST_EXPECT_EQ(rec2, 7u, "the record: three pages, four nodes");
+    TEST_EXPECT_EQ(dp3, dpf + 2u, "the payer paid the child's page and its node");
+    TEST_EXPECT_EQ(dc1, c0 + 1u, "the child paid its one leaf, no node");
+    TEST_EXPECT_EQ(m1, (s64)0, "the child's munmap");
+    TEST_EXPECT_EQ(dc2, c0, "the child's leaf refunded");
+    TEST_EXPECT_EQ(m2, (s64)0, "the payer's munmap, the last mapping");
+    TEST_EXPECT_EQ(dp4, d0, "the free refunded the pages and the nodes");
+}
+
+// The node charge can make the hand-over: the payer's space dies (the probe
+// lapses its records, as its teardown on another CPU would) after the mint's
+// charge and before the install charges the slot's first node, so that node
+// charge makes the faulter the payer. The fault adopts again before deciding
+// the leaf: the new payer's mapping is a payer mapping, no leaf is charged, and
+// its count is the record -- the page it minted and the root.
+static struct AddrSpace *g_sa_lapse_as;
+static int               g_sa_lapse_fired;
+
+static void sa_lapse_probe(struct Proc *p, struct Burrow *v, size_t slot) {
+    (void)p; (void)v; (void)slot;
+    g_shared_mint_probe_for_test = NULL;            // once
+    g_sa_lapse_fired++;
+    burrow_payers_lapse(g_sa_lapse_as);
+}
+
+void test_shared_anon_node_charge_hand_over_adopts(void) {
+    struct Proc *p = proc_alloc(), *q = proc_alloc();
+    if (!p || !q) { sa_drop(q); sa_drop(p); TEST_ASSERT(false, "proc_alloc"); }
+    s64 va = sys_mmap_anon_core(p, (u64)SA_RADIX_PAGES * PAGE_SIZE, VMA_PROT_RW, VMA_PROT_RW, true);
+    u64 sva = va > 0 ? (u64)va : 0;
+    struct Burrow *sb = sva ? sa_burrow(p, sva) : NULL;
+    struct AddrSpace *qown = NULL;
+    struct AddrSpace *c = sb ? sa_fork(p, q, &qown) : NULL;
+    bool cfl = false, handed = false, flagged = false;
+    u32 c0 = 0, nodes = 0, rec = 0, dc = 0;
+    enum fault_result r = FAULT_UNHANDLED_USER;
+    g_sa_lapse_fired = 0;
+    if (c) {
+        cfl = sa_floor(c);
+        c0 = sa_data(c);
+        struct Vma *cv = vma_lookup(q, sva);
+        g_sa_lapse_as = p->as;
+        g_shared_mint_probe_for_test = sa_lapse_probe;
+        r = sa_fault(q, sva, true);                     // mint to the payer, the lapse, the node
+        g_shared_mint_probe_for_test = NULL;
+        g_sa_lapse_as = NULL;
+        handed  = burrow_payer_for_test(sb) == c;
+        nodes   = pagemap_node_count(&sb->pm);
+        rec     = burrow_payer_charge_pages_for_test(sb);
+        flagged = cv && (cv->flags & VMA_FLAG_PAYER);
+        dc = sa_data(c);
+        sa_unfloor(c, cfl);
+    }
+    sa_unfork(q, qown, c);
+    sa_drop(q);
+    sa_drop(p);
+
+    TEST_ASSERT(sva != 0 && sb != NULL, "a shared mint past the inline size");
+    TEST_ASSERT(c != NULL && cfl, "the fork, and the floor under the child");
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the child's mint is served");
+    TEST_EXPECT_EQ(g_sa_lapse_fired, 1, "the payer lapsed inside the mint");
+    TEST_ASSERT(handed, "the node charge made the child the payer");
+    TEST_EXPECT_EQ(nodes, 1u, "premise: the slot's path was the root alone");
+    TEST_EXPECT_EQ(rec, 2u, "the record: the page and the root");
+    TEST_ASSERT(flagged, "the new payer's mapping became a payer mapping");
+    TEST_EXPECT_EQ(dc, c0 + 2u, "the new payer pays the record, and no leaf");
 }

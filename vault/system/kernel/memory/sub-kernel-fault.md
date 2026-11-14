@@ -282,7 +282,7 @@ now.
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
 | file-backed | sparse per-slot pages in the pagemap, demand-read | the arm that sleeps; its nodes are uncharged (`as = NULL`); each LEAF it installs is charged to the holder (`addrspace_charge_file`; the round-2 close) |
 | lazy-anonymous | allocate + zero + install-once under the lock; the map's nodes charged and allocated by the install outside `v->lock` | no backing read, so no slow path |
-| **shared anonymous** | allocate + zero + install-once like lazy-anonymous, but the mint is charged to the Burrow's payer record and the nodes to no space (`as = NULL`) | never COW; the install's loser branch is live (sharers in other spaces fault the slot under their own locks); a leaf is charged one page unless the mapping is the payer's (below) |
+| **shared anonymous** | allocate + zero + install-once like lazy-anonymous, but the mint, and the nodes its slot's path lacks, are charged to the Burrow's payer record (`burrow_record_install`, vote 121) | never COW; the install's loser branch is live (sharers in other spaces fault the slot under their own locks); a leaf is charged one page unless the mapping is the payer's (below) |
 
 **The install attribute widened from a bool to a MAIR index for HOSTMEM (V-2).**
 Every arm used to hand `mmu_install_user_pte` a `device_memory` bool — a two-way
@@ -573,9 +573,12 @@ sees. Its page is paid by the Burrow's payer record, not the faulter: the miss
 runs `burrow_mint_charge(v, p->as, exempt, 1)` BEFORE allocating (a cap hit
 allocates nothing), then `payer_adopt_if_due` (a hand-over this charge made is
 adopted before anything can bail, the FILE fill's order), then the zeroed
-page from the requesting account's pool, then `pagemap_install` with no
-address space for the nodes -- the map outlives any one sharer and none of
-them owns it. And the install's loser branch is live: a sharer in ANOTHER
+page from the requesting account's pool, then `burrow_record_install`, which
+charges the nodes the slot's path lacks through the record as well (operator
+vote 121) -- the map outlives any one sharer, so its payer holds them -- and
+then `payer_adopt_if_due` once more, before any exit: that node charge can
+make the hand-over too, if the payer's space died on another CPU after the
+mint's charge. And the install's loser branch is live: a sharer in ANOTHER
 space can fault the same slot under its own `as->lock`, so rc 1 frees our
 page and `burrow_mint_refund`s the mint to whoever pays now; a refused node
 install frees and refunds the same way. A hit reads the slot under `v->lock`,
@@ -592,8 +595,13 @@ The refund at an uninstall is `vma_uninstall_range_in`'s
 fires between the charge and the install: `shared_anon.install_loser_refunds`
 runs the rival space's whole fault there, so the loser path is driven, not
 assumed; `shared_anon.refused_mint_refunds` parks the pool before the page and,
-through the same probe, before the map's first node, so both refunds after the
-charge are driven too ([[sub-kernel-burrow]] lists the set; the law is [[spec-payer]]).
+through the same probe, before the map's first node, then caps the payer one
+page short of the node, so every refund after the charge is driven too;
+`shared_anon.nodes_paid_by_record` reads the record and both counts across a
+two-level map (the child pays only its leaf), and
+`shared_anon.node_charge_hand_over_adopts` lapses the payer through the probe
+so the node charge makes the hand-over ([[sub-kernel-burrow]] lists the set;
+the law is [[spec-payer]]).
 
 ## The permission a fault is checked against can now change (B-1a, 2026-09-23)
 

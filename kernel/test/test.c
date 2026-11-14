@@ -998,6 +998,8 @@ struct test_case g_tests[] = {
     { "shared_anon.protect_split_keeps_payer", test_shared_anon_protect_split_keeps_payer, false, NULL },
     { "shared_anon.dontneed_keeps_contents", test_shared_anon_dontneed_keeps_contents, false, NULL },
     { "shared_anon.refused_mint_refunds", test_shared_anon_refused_mint_refunds, false, NULL },
+    { "shared_anon.nodes_paid_by_record", test_shared_anon_nodes_paid_by_record, false, NULL },
+    { "shared_anon.node_charge_hand_over_adopts", test_shared_anon_node_charge_hand_over_adopts, false, NULL },
     { "demand_page.idle_image_reclaimed_under_pressure",
                                        test_demand_page_idle_image_reclaimed_under_pressure,
                                                                            false, NULL },
