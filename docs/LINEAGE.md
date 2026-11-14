@@ -1399,6 +1399,54 @@ lost-VFORK-wake.
 > witness it. The action-to-site obligations are in
 > `specs/SPEC-TO-CODE.md::cow.tla`.
 
+#### As designed for shared anonymous memory — the one writable share (operator votes 117 + 119, 2026-11-14)
+
+Copy-on-write is the answer for memory a process owns. Linux has a second kind
+that the same fork must NOT copy: `MAP_SHARED|MAP_ANONYMOUS`, and a shared map
+of `/dev/zero`, give one zero-filled object that parent and child both write
+(`shmem_zero_setup`). Plan 9 has the same shape in `segattach` with
+`SG_SHARED`, a segment `rfork` shares instead of copying. Until this chunk the
+tree shared nothing writable across fork: `clone_one_vma` shares a FILE Burrow
+and an eager one only when the ceiling is read-only (2.9), and refuses the
+whole fork for memory another Proc owns.
+
+**A type, not a flag.** The shared Burrow is `BURROW_TYPE_ANON_SHARED`. Its
+backing is the lazy one's — the sparse pagemap, a page zero-filled at its
+first touch — but what it admits is different, which is the reason
+`BURROW_TYPE_CODE` (I-42) is a type too. Every test the tree has written for
+private lazy memory is a test of `type == BURROW_TYPE_ANON_LAZY`: the clone
+(`vma_is_cow`), the break and its slot swap, the release a detach or a
+decommit runs, the extension of a neighbour. As a flag on a lazy Burrow, each
+of those would admit shared memory into private semantics until somebody
+remembered to add the flag's test, and the first one forgotten frees a page
+another process still maps. As a type, each refuses it until somebody decides
+it should not.
+
+**The fork.** `clone_one_vma` maps the parent's Burrow into the child at the
+same addresses, with the parent's ceiling and nothing else: no
+`VMA_FLAG_COW` (so no break or take-in-place can ever reach a page of it, and
+the parent's leaves stay writable), no payer flag, and no charge. Writes are
+then every sharer's, as the object's semantics require; I-44's "a break leaves
+every other sharer's view unchanged" is a statement about COW Burrows, which
+this never is. It is never executable, so I-12 holds; and an unmap never
+releases a slot of it, because another space may still read the page, so its
+pages live until the last mapping in any space goes (I-7).
+
+**Who pays (vote 119).** The page outlives the mapping that faulted it, which
+is the case vote 118's payer record was built for (a private image's pages,
+mapped by a parent and every child it forks). The record is generalized
+from FILE to the new type: the creating address space pays every page that any
+sharer's fault creates, under its cap; its own leaves are free; every other
+sharer pays its leaves, one page each; the free refunds the record; the payer's
+death lapses it, and the next space to create a page takes the whole residency
+over. Two faulters in two address spaces can now race to fill one anonymous
+slot, each under its own `as->lock` — the first time that is possible — and the
+loser refunds its charge to whoever pays at that moment. The law is
+`specs/payer.tla` (model-first, under this surface's re-enablement and the page
+accounting's): six invariants, seven buggy cfgs, one of them
+(`payer_buggy_unmap_releases`) a release with every book kept exact, which only
+`NoFreedLeaf` catches.
+
 ### 5.5 Stage 4 — reaping (`wait4`)
 
 Creating a process is only half a process model; a parent that cannot reap

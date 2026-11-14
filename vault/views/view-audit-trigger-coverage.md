@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**248 declared surfaces · 241 covered by a hard-audit dossier · 7 soft-owned · 0 unowned · 0 unparsed · 27 cited path(s) that do not resolve.**
+**249 declared surfaces · 242 covered by a hard-audit dossier · 7 soft-owned · 0 unowned · 0 unparsed · 28 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -51,6 +51,7 @@ changed on main? — is the next increment, tracked as task #169.
 | **HALCYON-INSTRUMENT I-8c-3a: the `motion` verb -- a fifth member of t… | `lib/halcyon` | no such file in the tree |
 | **HALCYON-SCALE: the display scale -- the EDID-derived percent the com… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |
 | **HAUL: the npxf secure channel -- a second implementation of a hand-r… | `lib/bin` | no such file in the tree |
+| **Shared anonymous memory: the record-paid lazy Burrow a fork shares (… | `kernel/test/test_shared_anon.c` | no such file in the tree |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | B-3g G12-b: Pouch's utimensat sets times over SYS_WSTAT's time bits; c… | `arch/aarch64/syscall_arch.h` | no such file in the tree |
 | B-3h file locks: `SYS_FILE_LOCK` (137) naming its owner (the open file… | `specs/locks.tla` | no such file in the tree |
