@@ -2624,6 +2624,7 @@ struct test_case g_tests[] = {
     { "9p_client.loom_fsync_e2e",      test_9p_client_loom_fsync_e2e,      false, NULL },
     { "9p_client.loom_rights_deny",    test_9p_client_loom_rights_deny,    false, NULL },
     { "9p_client.loom_fsync_read_only", test_9p_client_loom_fsync_read_only, false, NULL },
+    { "9p_client.loom_readdir_names",  test_9p_client_loom_readdir_names,  false, NULL },
     { "9p_client.loom_quiesce_abandons_inflight",
                                        test_9p_client_loom_quiesce_abandons_inflight,
                                                                            false, NULL },

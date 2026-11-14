@@ -1827,6 +1827,7 @@ void test_9p_client_pump_ready_eof_is_dead(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_fsync_read_only(void);
+void test_9p_client_loom_readdir_names(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
 void test_9p_client_loom_multishot_stream(void);
 void test_9p_client_loom_multishot_backpressure(void);

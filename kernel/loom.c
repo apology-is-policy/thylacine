@@ -2028,6 +2028,12 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (!dr) return 0;
         u32 got = dr->readdir_count;
         if (got > op->op_count) got = op->op_count;
+        // SYS_READDIR's name walk: a name that is not one path component fails
+        // the op, and nothing reaches the buffer.
+        u64 last = 0;
+        if (got != 0 && dr->readdir_data &&
+            p9_dirent_run_check(dr->readdir_data, (long)got, &last) < 0)
+            return -(s32)T_E_IO;
         if (got != 0 && dr->readdir_data && op->buf_kva)
             loom_bufcopy(op->buf_kva, dr->readdir_data, got);
         return loom_count_result(got);
@@ -2619,6 +2625,12 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
                 err = -(s32)T_E_INVAL; goto fail;                            // s64 bound
             }
         }
+    }
+    // Two handles on two devices are EXDEV, as the sync rename answers it
+    // (spoor_rename_in_dirs, vote M15), whichever is not dev9p's: asked before
+    // the gate below, which would answer a first handle of another Dev EINVAL.
+    if (has_second && (sp->dev != sp2->dev || sp->devno != sp2->devno)) {
+        err = -(s32)T_E_XDEV; goto fail;
     }
     if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
     if (has_second) {

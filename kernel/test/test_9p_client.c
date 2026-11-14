@@ -2611,6 +2611,89 @@ static int loom_readdir_responder(void *ctx, const u8 *req, size_t req_len,
     return canonical_responder(ctx, req, req_len, resp, cap);
 }
 
+// One Rreaddir dirent named g_lrd_name (cookie 1); every other reply delegates
+// to canonical_responder.
+static const u8 *g_lrd_name;
+static size_t g_lrd_name_len;
+static int loom_readdir_name_responder(void *ctx, const u8 *req, size_t req_len,
+                                       u8 *resp, size_t cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0 && type == P9_TREADDIR) {
+        size_t ent = 24 + g_lrd_name_len;
+        size_t total = P9_HDR_LEN + 4 + ent;
+        if (cap < total) return -1;
+        for (size_t i = 0; i < total; i++) resp[i] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[4] = P9_RREADDIR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)ent;                       // count
+        u8 *d = resp + 11;
+        d[5]  = 0x42;                            // qid.path
+        d[13] = 1;                               // the entry's cookie
+        d[22] = (u8)g_lrd_name_len;
+        for (size_t i = 0; i < g_lrd_name_len; i++) d[24 + i] = g_lrd_name[i];
+        return (int)total;
+    }
+    return canonical_responder(ctx, req, req_len, resp, cap);
+}
+
+// F7 (M15 round 2): Loom's READDIR asks each complete dirent's name what
+// SYS_READDIR asks (p9_dirent_run_check): one path component. "ab" is copied
+// into the buffer; "a/b" fails the op with EIO and nothing reaches the buffer.
+void test_9p_client_loom_readdir_names(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_readdir_name_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (named-dirent responder)");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'}; const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    for (int i = 0; i < 256; i++) bkva[i] = 0;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    static const u8 good[] = {'a','b'};
+    g_lrd_name = good; g_lrd_name_len = sizeof(good);
+    cl_stage_rw(l, 0, LOOM_OP_READDIR, /*handle=*/0, /*offset=*/0, /*count=*/64,
+                /*bidx=*/0, /*buf_off=*/0, 0xD11D000000000001ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)26, "a one-component name: its 26 bytes");
+    TEST_ASSERT(bkva[22] == 2 && bkva[24] == 'a' && bkva[25] == 'b', "copied into the buffer");
+
+    static const u8 bad[] = {'a','/','b'};
+    g_lrd_name = bad; g_lrd_name_len = sizeof(bad);
+    cl_stage_rw(l, 1, LOOM_OP_READDIR, 0, 0, 64, 0, /*buf_off=*/128, 0xD11D000000000002ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "second SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_IO),
+                   "a name holding '/' -> -EIO");
+    bool untouched = true;
+    for (int i = 128; i < 128 + 27; i++)
+        if (bkva[i] != 0) { untouched = false; break; }
+    TEST_ASSERT(untouched, "and nothing reaches the buffer");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "both ops reaped");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
 // READDIR end-to-end: an Rreaddir dirent stream is copied INTO the registered
 // buffer (the READ pattern with op_offset = dir read offset); result = byte
 // count. Uses the custom responder so the stream is non-empty.
@@ -7161,8 +7244,9 @@ void test_9p_client_async_share_leaves_sync_tags(void) {
 // A 9P renameat or link names two fids of ONE session, so Loom's RENAMEAT and
 // LINK with their second handle on another session, or on another Dev, are two
 // devices: EXDEV, as the sync rename answers (vote M15), inline, with nothing on
-// the wire. The controls are the same ops with the second handle on the first
-// session.
+// the wire -- and so are the same ops with the FIRST handle on another Dev
+// (F8). The controls are the same ops with both handles on one session, and the
+// other Dev's directory paired with itself (one device, not dev9p: EINVAL).
 void test_9p_client_loom_two_sessions_exdev(void) {
     loom_ga_reset();
     loom_ga_dir(0755u, 0x1234u, 0x5678u);
@@ -7201,6 +7285,24 @@ void test_9p_client_loom_two_sessions_exdev(void) {
                 "LINK naming another session's file -> -EXDEV, nothing on the wire");
     loom_dm_leg(l, LOOM_OP_RENAMEAT, 6, 0, 3, 0, /*second handle=*/3, -(s32)T_E_XDEV,
                 "RENAMEAT into a directory of another Dev -> -EXDEV, nothing on the wire");
+
+    struct Loom *l2 = loom_create(8, 16, false);
+    TEST_ASSERT(l2 != NULL, "a ring whose first handle is the other Dev's");
+    loom_install_test_handle(l2, 0, rd,   RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l2, 1, root, RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l2, 2, rd,   RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b2; u8 *bkva2;
+    loom_install_test_buf(l2, 0, PAGE_SIZE, &b2, &bkva2);
+    for (u32 i = 0; i < 6; i++) bkva2[i] = (u8)nm[i];
+    loom_dm_leg(l2, LOOM_OP_RENAMEAT, 6, 0, 3, 0, /*second handle=*/1, -(s32)T_E_XDEV,
+                "RENAMEAT from another Dev's directory into this session's -> -EXDEV");
+    loom_dm_leg(l2, LOOM_OP_LINK, 3, 0, 0, 0, /*second handle=*/1, -(s32)T_E_XDEV,
+                "LINK in another Dev's directory naming this session's file -> -EXDEV");
+    loom_dm_leg(l2, LOOM_OP_RENAMEAT, 6, 0, 3, 0, /*second handle=*/2, -(s32)T_E_INVAL,
+                "RENAMEAT within the other Dev's directory -> -EINVAL (Loom drives dev9p)");
+    TEST_EXPECT_EQ((u64)l2->async_inflight, (u64)0, "nothing in flight on that ring");
+    burrow_unref(b2);
+    loom_unref(l2);
 
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
     burrow_unref(b);

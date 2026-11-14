@@ -26,6 +26,7 @@
 // a single store on most paths.
 
 #include <thylacine/9p_wire.h>
+#include <thylacine/errno.h>
 #include <thylacine/types.h>
 #include <thylacine/visibility.h>
 
@@ -1405,4 +1406,28 @@ int p9_parse_rweftio(const u8 *in, size_t len, u16 *tag, u32 *count) {
     o += (size_t)rc;
     if (o != len) return -1;
     return 0;
+}
+
+// =============================================================================
+// Dirent runs (an Rreaddir's payload): qid[13] offset[8] type[1] name[s].
+// =============================================================================
+
+long p9_dirent_run_check(const u8 *buf, long len, u64 *last_cookie) {
+    long pos = 0;
+    while (pos + 24 <= len) {
+        u32 nlen = (u32)buf[pos + 22] | ((u32)buf[pos + 23] << 8);
+        long entry = 24 + (long)nlen;
+        if (pos + entry > len)                       break;       // truncated trailing entry
+        if (nlen == 0)                               return -T_E_IO;
+        for (u32 k = 0; k < nlen; k++) {
+            u8 nb = buf[pos + 24 + k];
+            if (nb == '/' || nb == '\0')            return -T_E_IO;
+        }
+        u64 cookie = 0;
+        for (int i = 0; i < 8; i++)
+            cookie |= (u64)buf[pos + 13 + i] << (8 * i);
+        *last_cookie = cookie;
+        pos += entry;
+    }
+    return pos;
 }

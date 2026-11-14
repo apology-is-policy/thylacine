@@ -300,6 +300,15 @@ int p9_unpack_str(const u8 *in, size_t remaining,
 int p9_peek_header(const u8 *in, size_t len,
                    u32 *size, u8 *type, u16 *tag);
 
+// The complete 9P2000.L dirents (qid[13] offset[8] type[1] name[s]) at the head
+// of buf[0..len): their byte length, the last one's cookie in *last_cookie
+// (untouched when there is none), or -T_E_IO when a name is not one path
+// component -- empty, or holding a '/' or a NUL (Linux's verify_dirent_name). A
+// truncated trailing entry is not counted and its name not asked. SYS_READDIR
+// and Loom's READDIR both ask it, so a server cannot steer a walker that joins
+// a listed name to the path it lists out of that tree (I-28, I-14).
+long p9_dirent_run_check(const u8 *buf, long len, u64 *last_cookie);
+
 // =============================================================================
 // High-level Tmsg builders. Each returns the total Tmsg length (including
 // the 7-byte header), or -1 on overflow / arg violation. Caller passes a

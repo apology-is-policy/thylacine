@@ -5223,35 +5223,16 @@ s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
     if (got < 0)                                    return (s64)got;
     if (got == 0)                                   return 0;      // EOD
 
-    // Walk the returned dirents (bounded by `got`) to find the last complete
-    // entry's offset cookie. The minimum entry is 24 bytes (qid+offset+type+
-    // name_len) + a 0-length name. A run with no complete entry is a malformed
-    // stream (also prevents a userspace re-read spin on a non-advancing
-    // offset).
-    long pos = 0;
+    // The returned dirents (bounded by `got`): every complete entry's name one
+    // path component, or the run is malformed -- a server that sent another
+    // would steer a walker joining it to the path it lists (rm -r, cp -r, mv
+    // across devices) out of that tree (I-28, I-14) -- and the last one's offset
+    // cookie. A run with no complete entry is malformed too (it also prevents a
+    // userspace re-read spin on a non-advancing offset).
     u64 last_cookie = 0;
-    bool advanced = false;
-    while (pos + 24 <= got) {
-        u64 cookie = 0;
-        for (int i = 0; i < 8; i++)
-            cookie |= (u64)scratch[pos + 13 + i] << (8 * i);
-        u32 nlen = (u32)scratch[pos + 22] | ((u32)scratch[pos + 23] << 8);
-        long entry = 24 + (long)nlen;
-        if (pos + entry > got)                       break;       // truncated trailing entry
-        // A name is one path component: never empty, never holding a '/' or a
-        // NUL (Linux's verify_dirent_name). A server that sent one would steer
-        // a walker joining it to the path it lists (rm -r, cp -r, mv across
-        // devices) out of that tree, so the run is malformed (I-28, I-14).
-        if (nlen == 0)                               return -T_E_IO;
-        for (u32 k = 0; k < nlen; k++) {
-            u8 nb = scratch[pos + 24 + k];
-            if (nb == '/' || nb == '\0')            return -T_E_IO;
-        }
-        last_cookie = cookie;
-        advanced = true;
-        pos += entry;
-    }
-    if (!advanced)                                  return -T_E_IO;   // malformed run
+    long whole = p9_dirent_run_check(scratch, got, &last_cookie);
+    if (whole < 0)                                  return (s64)whole;
+    if (whole == 0)                                 return -T_E_IO;   // malformed run
 
     // Defense-in-depth (#955): a non-empty run whose last cookie == the cookie
     // we resumed from means the cursor did not advance -- a paginating reader
