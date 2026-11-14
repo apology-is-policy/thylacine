@@ -518,11 +518,13 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //
 //   perms  4 chars: r/w/x from vma->prot, then p|s. `s` iff VMA_FLAG_SHARED_IN
 //          -- the backing Burrow is ANOTHER Proc's memory mapped cross-Proc
-//          (a netd flow ring / a tapestryd weave), which is exactly Linux's
-//          MAP_SHARED sense (writes propagate). A FILE Burrow is read-only and
+//          (a netd flow ring / a tapestryd weave) -- or the Burrow is
+//          ANON_SHARED, the memory a fork shares: exactly Linux's MAP_SHARED
+//          sense (writes propagate). A FILE Burrow is read-only and
 //          shared by the Image cache, but writes cannot propagate through it,
 //          so it is `p` -- matching Linux's MAP_PRIVATE file mapping.
-//   type   the backing: anon | lazy | file | mmio | dma | none. `none` is a
+//   type   the backing: anon | lazy | file | mmio | dma | code | hostmem |
+//          shared | none. `none` is a
 //          guard VMA (vma_alloc_guard is the only producer of a NULL burrow).
 //   file   `<devno>:<qid.path>` for a FILE Burrow, else "-". These are the
 //          cache-key SCALARS the Burrow sampled at create -- deliberately NOT
