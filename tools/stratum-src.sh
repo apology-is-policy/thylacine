@@ -28,10 +28,11 @@ stratum_src_dir() {
 stratum_build_dir_fits() {   # BUILD_DIR SOURCE_DIR
     local dir="$1" src="$2" cached was now
     [[ -f "$dir/CMakeCache.txt" ]] || return 0
-    cached="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dir/CMakeCache.txt")"
+    # No command here may fail its assignment: build.sh runs under set -e, and a tree
+    # that is gone is the case this exists for. A cache that cannot be read is kept,
+    # for CMake to report.
+    cached="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dir/CMakeCache.txt" 2>/dev/null)" || cached=""
     [[ -n "$cached" ]] || return 0
-    # A cd that fails must not fail the assignment: build.sh runs under set -e, and a
-    # tree that is gone is the case this exists for.
     was="$(cd "$cached" 2>/dev/null && pwd -P)" || was=""
     now="$(cd "$src" 2>/dev/null && pwd -P)" || now=""
     # A source that is not there is the caller's to report; nothing is dropped for it.

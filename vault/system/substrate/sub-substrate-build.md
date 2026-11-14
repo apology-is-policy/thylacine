@@ -172,8 +172,10 @@ since CMake refuses to configure it and the directory is only a cache; trees
 are compared by their real paths, and nothing is dropped for a source that is
 not there. A tree that is gone counts as another: build.sh runs under
 `set -euo pipefail`, so a failed `cd` into it is caught, never left to end the
-build without a word. `test-stratum-src.sh` runs both rules against made-up
-checkouts, each call as build.sh makes it, under errexit.
+build without a word, and a cache that cannot be read is kept for CMake to
+report. `test-stratum-src.sh` runs both rules against made-up checkouts, and
+each call of the build-dir rule as build.sh makes it, under errexit, seen to
+return.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a

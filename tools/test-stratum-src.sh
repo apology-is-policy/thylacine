@@ -39,11 +39,14 @@ echo "== stratum_build_dir_fits"
 cache() { mkdir -p "$1"; printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "$2" > "$1/CMakeCache.txt"; : > "$1/object.o"; }
 # build.sh runs under set -euo pipefail and calls the helper as a plain statement, where
 # any failing command ends the whole build without a word; every case calls it so. Never
-# inside an if or a ||: errexit is ignored there, in subshells too.
+# inside an if or a ||: errexit is ignored there, in subshells too. The call must also be
+# seen to return: an exit 0 in the helper would end build.sh with a success.
 fits() {
-    ( set -euo pipefail; stratum_build_dir_fits "$@" )
+    : > "$W/returned"
+    ( set -euo pipefail; stratum_build_dir_fits "$@"; echo returned > "$W/returned" )
     local rc=$?
-    [[ "$rc" == 0 ]] || bad "the call for ${1##*/} ended the shell under set -e (rc $rc), as it would end build.sh"
+    [[ "$rc" == 0 && "$(cat "$W/returned")" == returned ]] ||
+        bad "the call for ${1##*/} ended the shell (rc $rc) instead of returning, as it would end build.sh"
     return 0
 }
 src_new="$W/new/projects/stratum"; src_old="$W/old/projects/stratum/v2"
@@ -67,6 +70,11 @@ assert_eq "$([[ -f "$W/b-nosrc/object.o" ]] && echo kept || echo dropped)" kept 
 mkdir -p "$W/b-noname"; printf 'CMAKE_BUILD_TYPE:STRING=Release\n' > "$W/b-noname/CMakeCache.txt"; : > "$W/b-noname/object.o"
 fits "$W/b-noname" "$src_new" 2>/dev/null
 assert_eq "$([[ -f "$W/b-noname/object.o" ]] && echo kept || echo dropped)" kept "a cache that names no source tree is left alone"
+if [[ "$(id -u)" != 0 ]]; then
+    cache "$W/b-unread" "$W/a-tree-that-is-gone"; chmod 000 "$W/b-unread/CMakeCache.txt"
+    fits "$W/b-unread" "$src_new" 2>/dev/null
+    assert_eq "$([[ -f "$W/b-unread/object.o" ]] && echo kept || echo dropped)" kept "a cache that cannot be read is left alone, for CMake to report"
+fi
 mkdir -p "$W/b-plain"; : > "$W/b-plain/object.o"
 fits "$W/b-plain" "$src_new" 2>/dev/null
 assert_eq "$([[ -f "$W/b-plain/object.o" ]] && echo kept || echo dropped)" kept "a dir that is no CMake build dir is left alone"
