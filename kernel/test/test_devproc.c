@@ -5523,6 +5523,10 @@ void test_devproc_share_family_rival_fork(void) {
             proc_test_link(p); proc_test_link(ca); proc_test_link(cb);
             linked = true;
             premise = fa && fb && fa != fb && !p->as->family && live_two == base + 2u;
+        }
+        // Without the two families the reads below have nothing to read: the
+        // test fails at its premise instead of dereferencing a missing one.
+        if (premise) {
             irq_state_t st = proc_table_lock_acquire();
             spare_a = proc_image_share_fork_locked(p, ca);
             // Read before the rival runs: nobody yet has given the family
