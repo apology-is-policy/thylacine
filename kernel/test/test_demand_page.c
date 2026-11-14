@@ -2530,6 +2530,21 @@ static struct Burrow *v124_private_image(struct AddrSpace *payer) {
     return v;
 }
 
+// The faulting space's own page tables are charged under the same cap (B-1a'
+// F1), so a fill whose headroom is set to its pages finds its tables built: an
+// anonymous page faulted in beside the image, under the same L3 table.
+static bool v124_build_tables(struct Proc *p) {
+    struct Burrow *a = burrow_create_anon_lazy(ONE_PAGE);
+    if (!a) return false;
+    const u64 va = USER_VA + (u64)V124_PAGES * ONE_PAGE;
+    int mrc = burrow_map(p, a, va, ONE_PAGE, VMA_PROT_RW);
+    burrow_unref(a);                      // the mapping holds it now, if it took
+    if (mrc != 0) return false;
+    struct fault_info fi;
+    make_fi(&fi, va, /*is_write=*/true, /*is_instr=*/false);
+    return userland_demand_page(p, &fi) == FAULT_HANDLED;
+}
+
 void test_demand_page_file_private_single_fill_pays_its_node(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -2539,9 +2554,10 @@ void test_demand_page_file_private_single_fill_pays_its_node(void) {
     if (!v) { drop_proc(p); TEST_ASSERT(false, "a 33-page private image"); }
     int mrc = burrow_map(p, v, USER_VA, V124_PAGES * ONE_PAGE, VMA_PROT_READ);
     burrow_unref(v);                      // the mapping holds it now
+    const bool tables = v124_build_tables(p);
     const bool floored = v118_floor(p->as);
     const u32 budget0 = p->as->page_budget;
-    const u32 d0 = v118_data(p->as);
+    const u32 d0 = v118_data(p->as), t0 = p->as->pgtable_pages;
 
     p->as->page_budget = p->as->page_count + 1u;     // room for the page alone
     int calls0 = g_rev_read_calls;
@@ -2556,6 +2572,7 @@ void test_demand_page_file_private_single_fill_pays_its_node(void) {
     int reads2 = g_rev_read_calls - calls0;
     u32 res2 = burrow_image_resident_count(v), rec2 = burrow_payer_charge_pages_for_test(v);
     u32 nodes2 = pagemap_node_count(&v->pm), d2 = v118_data(p->as);
+    const u32 t2 = p->as->pgtable_pages;
     p->as->page_budget = budget0;
 
     int drc = v118_detach(p, 0, V124_PAGES);          // the last mapping: the free
@@ -2566,6 +2583,8 @@ void test_demand_page_file_private_single_fill_pays_its_node(void) {
 
     TEST_ASSERT(floored, "the floor under the payer's count");
     TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_ASSERT(tables, "premise: the space's tables are built beside the image");
+    TEST_EXPECT_EQ(t2, t0, "premise: the fills built no table, so the headroom is the fill's");
     TEST_EXPECT_EQ(reads1, 1, "premise: the single fill (one read, one slot)");
     TEST_EXPECT_EQ(r1, FAULT_UNHANDLED_USER,
                    "room for the page but not its node: the fault is refused");
@@ -2699,9 +2718,10 @@ void test_demand_page_file_private_single_fill_loser_refunds(void) {
     if (!v) { drop_proc(p); TEST_ASSERT(false, "a 33-page private image"); }
     int mrc = burrow_map(p, v, USER_VA, V124_PAGES * ONE_PAGE, VMA_PROT_READ);
     burrow_unref(v);                      // the mapping holds it now
+    const bool tables = v124_build_tables(p);
     const bool floored = v118_floor(p->as);
     const u32 budget0 = p->as->page_budget;
-    const u32 d0 = v118_data(p->as);
+    const u32 d0 = v118_data(p->as), t0 = p->as->pgtable_pages;
 
     // Under 33 pages of headroom the last slot's window is itself: the single
     // fill. Four pages: the fill's, and the racer's page and node.
@@ -2719,6 +2739,7 @@ void test_demand_page_file_private_single_fill_loser_refunds(void) {
     const bool racer_won = v124_slot_is(v, V124_PAGES - 1u, g_v124_racer_pg);
     u32 res = burrow_image_resident_count(v), rec = burrow_payer_charge_pages_for_test(v);
     u32 nodes = pagemap_node_count(&v->pm), d1 = v118_data(p->as);
+    const u32 t1 = p->as->pgtable_pages;
 
     int drc = v118_detach(p, 0, V124_PAGES);          // the last mapping: the free
     u32 d2 = v118_data(p->as);
@@ -2728,6 +2749,8 @@ void test_demand_page_file_private_single_fill_loser_refunds(void) {
 
     TEST_ASSERT(floored, "the floor under the payer's count");
     TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_ASSERT(tables, "premise: the space's tables are built beside the image");
+    TEST_EXPECT_EQ(t1, t0, "premise: the fill built no table, so the headroom is the fill's");
     TEST_EXPECT_EQ(reads, 1, "premise: the single fill (one read, one slot)");
     TEST_EXPECT_EQ(racer_rc, 0, "premise: the racer installed the slot inside the fill's window");
     TEST_ASSERT(racer_won, "premise: the racer's page is resident, so the fill lost its install");
