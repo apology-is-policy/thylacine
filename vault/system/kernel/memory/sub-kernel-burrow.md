@@ -405,15 +405,16 @@ several spaces mid-mint at once), and a non-NULL `payer` has paid exactly
   page right before installing it, never across a read (round 34 F1).
 - `burrow_mint_headroom` answers how many of `want` the same charge could
   take now, charging nothing; the cluster sizes its window with it.
-- `burrow_record_install` (ANON_SHARED's fault) installs a minted page with
+- `burrow_record_install` (the ANON_SHARED fault, vote 121, and a private
+  image's FILE fills, vote 124) installs a minted page with
   the nodes its slot's path lacks charged through the record as well, all of
   them or none (`pagemap_install_paid` with the record as the node payer), on
   a mint's terms: the same payer choice, so a node charge can hand a lapsed
   record over and the caller adopts after it too; a node a racer made
   unnecessary is refunded like a loser's mint. No path takes a slot out of a
   record-paid Burrow, so its nodes live until `pagemap_destroy`, and the free
-  refunds them with the record. A private image's nodes are still the
-  pool's.
+  refunds them with the record. A private image is never cached, so the
+  image-cache strip never takes its slots either.
 - `burrow_mint_refund` takes back mints that did not end resident, from
   the record and from whoever pays now. A hand-over charged the new payer the
   whole record, so the refund always belongs to the current payer.

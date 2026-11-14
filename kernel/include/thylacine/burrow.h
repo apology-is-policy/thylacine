@@ -814,8 +814,8 @@ void burrow_mint_refund(struct Burrow *v, u32 pages);
 // burrow_record_install: pagemap_install into `v`'s map with the nodes the
 // path needs charged through the record, all of them or none (vote 121), on
 // the same terms as a mint -- so the charge may hand a lapsed record over to
-// `faulter` as a mint's can. Results as pagemap_install's. ANON_SHARED only
-// today: a private image's nodes are still the pool's.
+// `faulter` as a mint's can. Results as pagemap_install's. Every Burrow with a
+// record: ANON_SHARED (vote 121) and a private FILE image (vote 124).
 int  burrow_record_install(struct Burrow *v, struct AddrSpace *faulter, size_t slot,
                            struct page *pg, bool exempt, struct page **out_winner);
 // burrow_payer_is: is `as` the payer of `v` right now?

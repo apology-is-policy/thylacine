@@ -47,7 +47,8 @@ each is a unit `Charge` takes before the install links it, refunded as a
 loser's is when a racer built that part of the path first, then resident
 until the free and mapped by no space -- the model's slot minted and then
 unmapped, so the record laws cover nodes without a second unit kind. A
-private image's nodes are still the pool's. Also beneath it: the
+private image's nodes are charged the same way (operator vote 124), so the
+abstraction covers both classes unchanged. Also beneath it: the
 descriptor's lifetime (the lapse after the drain and before the last lifetime
 drop is the host fixture's, `tools/host-tests/addrspace-lifetime.c`); and all
 geometry below "which slots a space maps" -- a split's carriage of the payer
