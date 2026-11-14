@@ -145,6 +145,17 @@ interval tree would be more machinery than the problem has.
 The sortedness buys three things beyond insertion order. `vma_lookup` can stop
 early: once a node starts above the target, no later node can contain it.
 `vma_insert_in` finds its slot and detects overlap in the same single pass.
+`vma_insert_after_in` is the same insert for a caller that already knows the
+slot -- right after a cursor mapping in the list, or at the head for NULL: it
+compares only the cursor and its successor, which is exact because every
+mapping before the cursor ends before it starts and every one after the
+successor starts after it, and refuses with -1 when the span does not fit
+there. Both share one link half (`vma_link_in`: the I-32 VMA charge, the link,
+the shared-map count, the merge bias), so the cap and the count cannot drift
+between them. The fork builds its child through the cursor form, in the
+parent's order, which makes a clone linear in the parent's mappings
+([[sub-kernel-addrspace]] Performance); before it each child mapping was a walk
+from the head, quadratic in the region count.
 `vma_find_gap` is a single forward sweep carrying a candidate base that jumps
 past each blocking VMA — first-fit, lowest gap, one pass.
 
@@ -706,7 +717,7 @@ fails. All three were sabotage-measured.
 
 ## Tests
 
-`kernel/test/test_vma.c` — eleven unit tests exercising this file directly: the four `vma_find_gap` tests (`vma.find_gap_smoke`, `_no_fit`, `_constraints`, `_straddle`), and
+`kernel/test/test_vma.c` — twelve unit tests exercising this file directly: the four `vma_find_gap` tests (`vma.find_gap_smoke`, `_no_fit`, `_constraints`, `_straddle`), and
 `vma.alloc_free_smoke` (alloc/free; the `vma_total_allocated`/`_freed` counters
 advance), `vma.alloc_constraints` (the rejections — zero-length, reversed,
 unaligned, `WRITE|EXEC`, null Burrow — each return NULL),
@@ -716,9 +727,15 @@ overlaps return -1; an adjacent range touching at a boundary is accepted — the
 half-open semantic), `vma.insert_sorted_invariant` (insert in mixed order, walk
 ascending), `vma.drain_releases_all` (insert four, drain, assert
 `burrow_mapping_count` returns to baseline — the `vma_alloc` <-> `burrow_map`
-symmetry), and `vma.linked_in_tracks_the_list` (the predicate the remove guard
+symmetry), `vma.linked_in_tracks_the_list` (the predicate the remove guard
 asks, over a never-inserted, sole, head, interior and tail VMA, each removed
-shape, and a forged predecessor and successor). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
+shape, and a forged predecessor and successor), and
+`vma.insert_after_checks_neighbours` (the cursor insert: each of its two checks
+refuses an overlap and a span that belongs elsewhere, each refused span then
+fits at its own cursor, a span touching its neighbour's end fits, the list ends
+sorted with every back link right, and no insert walks --
+`g_vma_insert_steps_for_test`, which counts every node `vma_insert_in`'s walk
+visits). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
 reservation answers whole / part true and past / below / empty false; with the
 middle two pages detached, across the hole false and each remnant true; and
 the decommit core over the same shape -- across the hole `T_E_NOMEM`, a

@@ -464,11 +464,18 @@ and the I-32 axes bound far below.
 
 `alloc`/`ref`/`unref` are O(1) plus a page-table create/destroy. The clone
 is **three walks of the parent's VMA list** under one lock hold — two full
-passes plus the per-VMA build — so its cost is linear in region count, and
-it runs with interrupts off. A `fork` in an address space with tens of
-thousands of regions is therefore a long interrupts-off hold; nothing
-bounds it today beyond `PROC_VMA_MAX`, and that is recorded as a seam
-rather than measured.
+passes plus the per-VMA build — and the build inserts each child mapping
+after the last one built (`vma_insert_after_in` through a tail cursor), so
+the whole clone is linear in region count (plus the resident pages each
+Burrow clone shares). It was not linear before 2026-11-14: each child
+mapping was a `vma_insert_in` walk from the head of the child's list, so a
+clone of N regions visited about N^2/2 nodes -- some 2x10^9 at
+`PROC_VMA_MAX` (65536), an estimate never measured -- while every thread
+asking for the parent's lock waited (audit round 37 P2-1; OPEN-BUGS
+2026-11-14T17:55:58Z). `cow.clone_builds_in_order` pins the build at zero
+walk steps. A `fork` in an address space with tens of thousands of regions
+is still a long hold of the parent's lock, linear now, bounded only by
+`PROC_VMA_MAX`; that is recorded as a seam rather than measured.
 
 The counter CAS loops are uncontended in the common case. The COW lock is
 held for a single compare; contention exists only between concurrent
@@ -518,9 +525,14 @@ What a change must re-establish:
 
 ## Seams
 
-- **The clone's unbounded walk.** Three passes under one interrupts-off
-  hold, linear in VMA count. The [[lock-vma]] discipline requires
-  consumers to bound their own walks, and this one does not.
+- **The clone's unbounded walk.** Three passes under one hold of the
+  parent's lock, linear in VMA count (the build was quadratic until the
+  tail cursor, 2026-11-14). The [[lock-vma]] discipline requires consumers
+  to bound their own walks, and this one does not. Two /proc readers still
+  wait on a space's lock while holding `g_proc_table_lock` with interrupts
+  off (`format_maps`, the mem copy), so a long clone stalls them and every
+  CPU behind the table lock -- OPEN-BUGS 2026-11-14T17:55:58Z, the half
+  this change does not close.
 - **A per-page hashed lock array** for [[lock-cow]], recorded and
   deliberately not taken now: contention is only between concurrent
   breaks, each holding the lock for a single compare.
@@ -596,7 +608,11 @@ the last drop frees), `addrspace.kproc_has_none` (kproc's `as` stays NULL),
 closed on a kernel-only Proc), `addrspace.proc_alloc_in_shares` (an
 `RFPROC|RFMEM` child shares the parent's space), and
 `addrspace.share_drains_at_last_ref` (the VMA drain runs at the last unref, not
-the first death — the L-3 fix). The COW break's two arms are pinned by
+the first death — the L-3 fix). `cow.clone_builds_in_order` (`test_cow.c`):
+a parent of 64 alternating lazy and guard mappings clones to a child whose
+list is the parent's, in order, with every back link right, and the clone's
+inserts walk no node; the control is an ordinary insert above the child's
+mappings, whose walk visits every one of them. The COW break's two arms are pinned by
 [[spec-cow]]'s buggy cfgs and exercised at runtime through the fork path.
 
 B-1a (`kernel/test/test_protect.c`, [[sub-kernel-protect-witness]]):

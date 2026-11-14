@@ -362,8 +362,15 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
 // `exempt` is the I-32 policy verdict for whoever the address space is being
 // built FOR. Passing it in rather than a Proc keeps this layer free of identity.
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
+// vma_insert_in for a caller that knows where v goes: right after prev, a
+// mapping in as's list (NULL: at the head). O(1); -1 when v does not fit there,
+// as for an overlap. The fork builds the child in ascending order through it.
+int         vma_insert_after_in(struct AddrSpace *as, bool exempt, struct Vma *v,
+                                struct Vma *prev);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
 #ifdef KERNEL_TESTS
+// Every list node an insert's walk visits (vma_insert_in; the cursor form walks none).
+extern u64  g_vma_insert_steps_for_test;
 // True iff v sits in as's list, by its links and the head -- for a Vma in as's
 // list or in none; one interior to another space's list reads linked.
 // vma_remove_in extincts on a Vma for which this is false. Caller holds as->lock.

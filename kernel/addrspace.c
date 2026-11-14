@@ -299,8 +299,11 @@ static bool vma_is_cow(const struct Vma *v) {
 // Build the child's counterpart of one parent VMA. Returns false on any failure;
 // the caller then discards the whole partially-built child, so nothing here needs
 // to unwind anything except what it allocated and has not yet handed over.
+// *tail is the child's last mapping: the parent's list is walked in ascending
+// order, so each counterpart goes after it, and the build is linear in the
+// parent's mappings rather than an insert walk from the head for each.
 static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
-                          const struct Vma *src_vma) {
+                          const struct Vma *src_vma, struct Vma **tail) {
     // Private kernel ring pages can submit operations, so a child must never
     // inherit them, even as read-only aliases or after protect/split. Ordinary
     // registered user-buffer VMAs are NOT tagged and retain their existing
@@ -312,7 +315,8 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     if (!src_vma->burrow) {
         struct Vma *g = vma_alloc_guard(src_vma->vaddr_start, src_vma->vaddr_end);
         if (!g) return false;
-        if (vma_insert_in(dst, exempt, g) != 0) { vma_free(g); return false; }
+        if (vma_insert_after_in(dst, exempt, g, *tail) != 0) { vma_free(g); return false; }
+        *tail = g;
         return true;
     }
 
@@ -406,11 +410,12 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     // The child's mapping inherits the parent's CEILING (vma_alloc set it to the
     // current prot, which may be lower after a protect), plus the COW routing.
     nv->flags = flags | (src_vma->flags & VMA_FLAG_MAX_MASK);
-    if (vma_insert_in(dst, exempt, nv) != 0) {
+    if (vma_insert_after_in(dst, exempt, nv, *tail) != 0) {
         vma_free(nv);                   // symmetric: releases the mapping ref
         if (minted) { src_vma->burrow->clone_cursor = NULL; burrow_unref(minted); }
         return false;
     }
+    *tail = nv;
 
     if (minted) {
         // The child maps these pages too, so it counts them too (the Linux RSS
@@ -484,8 +489,9 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
 
     // PHASE 2 -- build the child. The only phase that can fail.
     bool ok = true;
+    struct Vma *tail = NULL;
     for (struct Vma *v = src->vmas; v && ok; v = v->next)
-        ok = clone_one_vma(dst, exempt, v);
+        ok = clone_one_vma(dst, exempt, v, &tail);
 
     // B-1a: retire the per-Burrow dedupe cursors clone_one_vma parked, on every
     // outcome, while src->lock still excludes the next clone of this space. A
