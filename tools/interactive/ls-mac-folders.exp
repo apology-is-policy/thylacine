@@ -147,8 +147,10 @@ proc run_ok {cmd tag phase} {
 }
 
 lc_boot
-app_wait {hello maxframe=16384} 30 "the driver's HELLO reached the app before the login"
+# lc_boot returns once the VM is started, a minute before the driver runs. The driver holds its
+# READY until the app's HELLO came, so by the login the line is up, and the HELLO is in the log.
 lc_login michael correct-horse-battery-staple-v1
+app_wait {hello maxframe=16384} 30 "the driver's HELLO reached the app before the login"
 lc_send "echo guest side a > /tmp/mac-decoy-a"
 # lc_send consumes nothing, so the login's own `ut: ...` lines are still unread, and the tool-error
 # arms below would take the first of them. Read past them to a marker first.

@@ -212,7 +212,8 @@ flag, `.` and `..` in listings, and the lock table's owner and carve.
 
 `ls-mac-line` with `THYLACINE_MAC_APP` set runs the app in the fake's place. Against the scripted
 guest (aux-gate `scendry-mac`), the app gave the fake's verdicts: 2 runs green, and 11 faults
-red, each at its own check.
+red, each at its own check. In a guest under HVF (run 8, 2026-11-14, fce70866d) it was green,
+all five legs, with the app in the fake's place: the app's first guest run.
 
 `ls-mac-folders` drives the shared folders through the guest's kernel against the app and
 checks each change in the Mac's folder. Against a scripted guest that runs each command as the kernel does (9P against the real app, one name per walk, open before create, a served link resolved beneath the mount; aux-gate `scendry-folders`, resid/scendry-folders-1.out), the clean app is green, all seven legs, and ten faults are red, each at its own leg: five of the guest (no `docs` listed, no write, no rename, links resolved from the guest's root, a cwd re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest -- the host uid reported, group bits kept). NOT YET RUN IN A GUEST, and not yet audited

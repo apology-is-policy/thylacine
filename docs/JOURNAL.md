@@ -120,6 +120,14 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   resolved from the guest's root turn it red in the scripted guest. A guest run is owed.
 - **sub-mac-line's Seams still said the app's end was "Not yet built"** after I-c landed. Found
   writing this docs pass; it now names [[sub-mac-app-line]].
+- **`ls-mac-folders` waited for the driver's HELLO before the login, with a 30 s limit** (guest run
+  8). The real `lc_boot` returns when the VM starts, and the driver said HELLO 33 s later (the
+  app's record: connected, then `hello` 33 s on). The scripted guest's `lc_boot` sent HELLO at
+  once, so it could not show this. Fixed with `ls-mac-line`'s order: the wait comes after the
+  login, since the driver holds its READY until the app's HELLO came. The scripted guest now
+  says HELLO 35 s after its boot starts, as a guest does, and waits 120 s for the login. There
+  the committed scenario fails at the same check with the same words, and the fixed one is
+  green.
 
 ### Evidence
 
@@ -187,6 +195,11 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
     and nofollow-dropped at 5, where the outside file's words reached the guest.
   `check-expect-forms.py` reads the new file (a planted `expect -timeout` block was found at
   its line; the restored file is clean). The driver's guest build checks.
+- **Guest run 8** (11:20-11:25Z, fce70866d, resid/live8-run8.out, mac released). `ls-mac-line`
+  with THE APP in the fake's place was green, all five legs: the app's first run against a guest
+  (the app's record shows the session's attach `n_uname=1000`). `ls-mac-folders` failed at its
+  own first wait, the wrong turn above, with no leg run, so none of its controls ran.
+- **The scripted guest, made faithful to the boot** (resid/scendry-folders-2.out): the clean app green, all seven legs, and the same ten faults red, each at its own leg; the committed scenario (fce70866d) red at the HELLO wait, as in run 8 (SCENDRY-FOLDERS DONE bad=0).
 
 ### Decided by the operator
 
@@ -198,17 +211,16 @@ In a guest (run 7, twice green): every leg of `ls-mac-line` -- the line's HELLO 
 session's mount attached as the user and read through, a program's walk with ownership checked
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
-tools/mac-app-fake.py, not the app. The app's line and server (I-c) are shown on the host only:
-against real directories, and against the scripted guest with the fake's verdicts. No guest has
-spoken to the app. `ls-mac-folders` and the remote post are shown against the scripted guest
+tools/mac-app-fake.py, not the app. In run 8 a guest spoke to the app itself: `ls-mac-line` was
+green, all five legs, with the app in the fake's place. `ls-mac-folders` and the remote post are shown against the scripted guest
 only: whether the kernel walks a relative read from the cwd's fid (leg 5's premise) is a guest
 run's to show, and the `rootwalk` fault shows the leg would then read red, not green. None of it
 is audited (round R5).
 
 ### Open
 
-- Guest run 8: `ls-mac-line` with the app in the fake's place, `ls-mac-folders`, and the five app
-  mutants (resid/mutbin) each red at its leg.
+- Guest run 9: `ls-mac-folders` green, then the five app mutants (resid/mutbin) and the
+  `noremote` control bake, each red at its leg (resid-live8.sh, as for run 8).
 - libthyla-rs names no EROFS: a refused write reads `kernel error (errno 30)`, and `$errstr`
   `Other(30)`. Display names for 30, 27, 18 and 36, and every exhaustive match on `Error`,
   are owed with the manual's `/mnt/mac` section.
