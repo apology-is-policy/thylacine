@@ -800,6 +800,8 @@ static struct Spoor *make_open_client_and_root(void) {
     // test that failed between setting one and restoring it left it set.
     g_ga_mode = 0100644u;
     g_ga_fail_ecode = 0;
+    g_unlinkat_fail_ecode = 0;
+    g_renameat_fail_ecode = 0;
     lock_wire_reset();
     if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                             dev9p_responder, NULL) != 0) return NULL;
@@ -1726,6 +1728,9 @@ static u8 g_recv_buf_b[8192];
 static u8 g_loopback_resp_b[8192];
 
 static struct Spoor *open_session_b(void) {
+    // A red test returned before its close: its session is still up.
+    if (g_client_b.magic == P9_CLIENT_MAGIC) p9_client_destroy(&g_client_b);
+    if (g_loopback_b.magic == P9_LOOPBACK_MAGIC) p9_loopback_destroy(&g_loopback_b);
     if (p9_loopback_init(&g_loopback_b, g_loopback_resp_b, sizeof(g_loopback_resp_b),
                          dev9p_responder, NULL) != 0) return NULL;
     if (p9_client_init(&g_client_b, /*root_fid=*/0, 8192, p9_loopback_ops_for(&g_loopback_b),
@@ -1757,17 +1762,20 @@ void test_dev9p_rename_two_sessions(void) {
                 "one Dev, two instances");
 
     g_renameat_fail_ecode = 39;
-    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(root, "old", other, "new"), (u64)(s64)(-T_E_XDEV),
-                   "a rename from one session's directory into another's -> EXDEV");
-    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(other, "old", root, "new"), (u64)(s64)(-T_E_XDEV),
-                   "and the other way -> EXDEV");
-    TEST_EXPECT_EQ((u64)g_renameat_fail_ecode, (u64)39, "no Trenameat reached either server");
-    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(root, "old", root, "new"), (u64)(s64)(-39),
-                   "the control: a rename within one session reaches its server");
-
-    g_renameat_fail_ecode = 0;
+    s64 a_to_b = dev9p.rename(root, "old", other, "new");
+    s64 b_to_a = dev9p.rename(other, "old", root, "new");
+    u32 armed = g_renameat_fail_ecode;
+    s64 a_to_a = dev9p.rename(root, "old", root, "new");
+    g_renameat_fail_ecode = 0;       // fixture hygiene, before any assert
     close_session_b(other);
     teardown(root);
+
+    TEST_EXPECT_EQ((u64)a_to_b, (u64)(s64)(-T_E_XDEV),
+                   "a rename from one session's directory into another's -> EXDEV");
+    TEST_EXPECT_EQ((u64)b_to_a, (u64)(s64)(-T_E_XDEV), "and the other way -> EXDEV");
+    TEST_EXPECT_EQ((u64)armed, (u64)39, "no Trenameat reached either server");
+    TEST_EXPECT_EQ((u64)a_to_a, (u64)(s64)(-39),
+                   "the control: a rename within one session reaches its server");
 }
 
 // The syscall's rename mechanics (SYS_RENAME and the phenotype renameat share
@@ -1790,25 +1798,30 @@ void test_dev9p_rename_in_dirs_two_devs(void) {
     larder_attr_invalidate(&g_client_b.larder, other->qid.path);
     g_ga_fail_ecode = 2;
     g_renameat_fail_ecode = 39;
-    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, rd, root, "a", "b"), (u64)(s64)(-T_E_XDEV),
-                   "ramfs -> dev9p: EXDEV, before ramfs's missing slot");
-    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, root, rd, "a", "b"), (u64)(s64)(-T_E_XDEV),
-                   "dev9p -> ramfs: EXDEV, before any Dev op");
-    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, root, other, "a", "b"), (u64)(s64)(-T_E_XDEV),
-                   "one dev9p session -> another: EXDEV, before the permission stats");
-    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, other, root, "a", "b"), (u64)(s64)(-T_E_XDEV),
-                   "and the other way");
-    TEST_EXPECT_EQ((u64)g_renameat_fail_ecode, (u64)39, "no Trenameat reached a server");
-    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, rd, rd, "a", "b"), (u64)(s64)(-T_E_OPNOTSUPP),
-                   "the control within ramfs: the missing slot -> OPNOTSUPP");
-    TEST_EXPECT_EQ((u64)spoor_rename_in_dirs(p, root, root, "a", "b"), (u64)(s64)(-T_E_IO),
-                   "the control within one session: the permission stat ran, and its armed failure reads EIO");
-
-    g_ga_fail_ecode = 0;
+    s64 rd_to_9p = spoor_rename_in_dirs(p, rd, root, "a", "b");
+    s64 p9_to_rd = spoor_rename_in_dirs(p, root, rd, "a", "b");
+    s64 a_to_b   = spoor_rename_in_dirs(p, root, other, "a", "b");
+    s64 b_to_a   = spoor_rename_in_dirs(p, other, root, "a", "b");
+    u32 armed    = g_renameat_fail_ecode;
+    s64 rd_to_rd = spoor_rename_in_dirs(p, rd, rd, "a", "b");
+    s64 a_to_a   = spoor_rename_in_dirs(p, root, root, "a", "b");
+    g_ga_fail_ecode = 0;             // fixture hygiene, before any assert
     g_renameat_fail_ecode = 0;
     spoor_clunk(rd);
     close_session_b(other);
     teardown(root);
+
+    TEST_EXPECT_EQ((u64)rd_to_9p, (u64)(s64)(-T_E_XDEV),
+                   "ramfs -> dev9p: EXDEV, before ramfs's missing slot");
+    TEST_EXPECT_EQ((u64)p9_to_rd, (u64)(s64)(-T_E_XDEV), "dev9p -> ramfs: EXDEV, before any Dev op");
+    TEST_EXPECT_EQ((u64)a_to_b, (u64)(s64)(-T_E_XDEV),
+                   "one dev9p session -> another: EXDEV, before the permission stats");
+    TEST_EXPECT_EQ((u64)b_to_a, (u64)(s64)(-T_E_XDEV), "and the other way");
+    TEST_EXPECT_EQ((u64)armed, (u64)39, "no Trenameat reached a server");
+    TEST_EXPECT_EQ((u64)rd_to_rd, (u64)(s64)(-T_E_OPNOTSUPP),
+                   "the control within ramfs: the missing slot -> OPNOTSUPP");
+    TEST_EXPECT_EQ((u64)a_to_a, (u64)(s64)(-T_E_IO),
+                   "the control within one session: the permission stat ran, and its armed failure reads EIO");
 }
 
 // dev9p.unlink routes through p9_client_unlinkat -> Tunlinkat; the responder
