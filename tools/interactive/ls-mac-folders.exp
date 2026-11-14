@@ -2,10 +2,11 @@
 # ls-mac-folders -- the shared folders of the line to the Mac (docs/MAC-RUNNER.md 4.4), through the
 # guest's kernel, against the Mac app itself: THYLACINE_MAC_APP, else macrunner/app's debug build.
 # Without one this SKIPs (exit 77): an absent app is neither a regression nor coverage. The app
-# shares three host folders this scenario makes, `work` and `inbox` read-write and `docs`
-# read-only, and every change the guest makes is checked ON THE MAC, in the folder itself:
+# shares four host folders this scenario makes: `work` and `inbox` read-write, `docs` read-only,
+# and `nested`, which is work/sub shared again. Every change the guest makes is checked ON THE
+# MAC, in the folder itself:
 #
-#   1. folders/ lists the three shares, and files one and two levels down read as the Mac wrote them.
+#   1. folders/ lists the four shares, and files one and two levels down read as the Mac wrote them.
 #   2. A file the guest writes holds the guest's bytes on the Mac.
 #   3. mkdir, mv, rm and rmdir each change the Mac's folder as they say, and cp brings a file of
 #      the guest's own into a share.
@@ -30,13 +31,25 @@
 #      0600 for a 0644 file, 0400 in the read-only share.
 #   8. A move across devices (vote M15): the guest's /tmp is its home's 9P session and /mnt/mac
 #      another, so the kernel answers a rename between them EXDEV before it asks either, and
-#      between two shares the app answers it. mv then copies, keeping times and mode, and removes
-#      the source: a guest file into a share, a file between two shares (its time kept), a tree out
-#      of a share into the guest. Out of the read-only share the copy is made and the source cannot
-#      be removed: mv says so, fails, and leaves both, as POSIX mv does.
+#      between two shares the app answers it. mv then copies under a new name beside the
+#      destination, keeping times and mode, syncs the copy, renames it over the destination, syncs
+#      that directory, and only then removes the source (votes M19, M20; the app's record shows
+#      the order): a guest file into a share, a file between two shares (its time and its 0400
+#      mode kept), a tree out of a share into the guest. Out of the read-only share the copy is
+#      made and the source cannot be removed: mv says so, fails, and leaves both, as POSIX mv
+#      does. No temporary name is left.
 #   9. rm -r removes a link in a tree, never what it names: work/rmtree holds a link to the
-#      directory work/keep, and the tree goes while work/keep and its file stay on the Mac. A
+#      directory work/keep, and the tree goes while work/keep and its file stay on the Mac; the
+#      app's record shows each entry opened from rmtree's own handle (vote M21). A
 #      plain rm of a link to a directory removes the link: a link is not a directory.
+#  10. What must not happen leaves everything as it was. work/sub/inner.txt and
+#      nested/inner.txt are one file: mv and cp refuse it as the same file (one host file has
+#      one identity whichever share reaches it), and it keeps its words. /srv/mac reads as a
+#      regular file until it is opened, and mv refuses it as special once it has. A move whose
+#      copy fails leaves the source and the destination as they were and removes only its own
+#      copy: an unreadable file over an existing one (vote M19), and a read-only tree holding an
+#      unreadable file, whose copy keeps the owner's 0700 until the whole copy is done (round 2
+#      F11), so it can be removed.
 #
 # Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
 # it, and the guest's output is upper-cased, so the echoed command line can never match it.
@@ -57,7 +70,7 @@ set ::W $::work/work
 set ::R $::work/docs
 set ::I $::work/inbox
 set ::O $::work/outside
-file mkdir $::W/sub $::W/d $::W/tree/deeper $::W/keep $::W/rmtree $::R $::I $::O
+file mkdir $::W/sub $::W/d $::W/tree/deeper $::W/keep $::W/rmtree $::W/locked $::R $::I $::O
 proc write_file {path text} {
     set fh [open $path w]
     puts -nonewline $fh $text
@@ -82,8 +95,16 @@ write_file $::W/tree/deeper/b.txt "tree file b one deeper\n"
 write_file $::W/old.txt          "an old file the mac wrote\n"
 set ::old_time 1000000000
 file mtime $::W/old.txt $::old_time
+file attributes $::W/old.txt -permissions 00400
 write_file $::W/keep/kept.txt     "kept beside the tree\n"
 write_file $::W/rmtree/gone.txt   "removed with the tree\n"
+write_file $::W/unreadable.txt    "the guest may not read this\n"
+file attributes $::W/unreadable.txt -permissions 00200
+write_file $::I/over.txt          "inbox over words\n"
+write_file $::W/locked/ok.txt     "ok in a locked tree\n"
+write_file $::W/locked/unreadable.txt "unreadable in a locked tree\n"
+file attributes $::W/locked/unreadable.txt -permissions 00200
+file attributes $::W/locked -permissions 00500
 # `file link` insists the target exist, and these targets are the guest's to resolve.
 exec ln -s sub/linked.txt                 $::W/rel
 exec ln -s /folders/work/sub/anchored.txt $::W/inshare
@@ -96,11 +117,13 @@ set ::mac_log [file join $::lc_repo build "mac-folders-[pid].log"]
 catch {file delete -force $::mac_sock $::mac_log}
 set ::env(THYLACINE_MAC_LINE) $::mac_sock
 set ::app_pid [exec $app --mac-line $::mac_sock --line-log $::mac_log --snarf-memory "folders" \
-    --share work=$::W --share docs=$::R:ro --share inbox=$::I >>& $::mac_log.err &]
-lc_step "thylacine-mac started (pid $::app_pid): work=$::W, inbox=$::I, docs=$::R read-only"
+    --share work=$::W --share docs=$::R:ro --share inbox=$::I --share nested=$::W/sub >>& $::mac_log.err &]
+lc_step "thylacine-mac started (pid $::app_pid): work=$::W, inbox=$::I, docs=$::R read-only, nested=$::W/sub (work/sub again)"
 exit -onexit {
     catch {exec kill $::app_pid}
     catch {file delete -force $::mac_sock}
+    # work/locked is 0500, and a failed run can leave a read-only copy: open them, or they stay.
+    catch {exec chmod -R u+rwx $::work}
     catch {file delete -force $::work}
 }
 
@@ -124,6 +147,16 @@ proc app_wait {re secs phase} {
 proc app_walks {name} {
     set got [regexp -all -inline -line -- "walk \[^\n\]*'[string map {. \\.} $name]'\[^\n\]*" [app_log]]
     return [expr {[llength $got] ? [join $got "; "] : "none"}]
+}
+# The number of the first or last line of the app's record matching `re`, or -1: what came first.
+proc log_line {re which} {
+    set got [lsearch -all -regexp [split [app_log] "\n"] $re]
+    if {![llength $got]} { return -1 }
+    return [expr {$which eq "first" ? [lindex $got 0] : [lindex $got end]}]
+}
+# Whether a temporary name of mv's is left in the Mac folder `dir`.
+proc mv_left {dir} {
+    return [llength [glob -nocomplain -directory $dir .mv-*]]
 }
 # A fact about the Mac's folder. Each is read after the guest printed the status of the command
 # that changed it, and the guest's command returns only once the app has answered.
@@ -205,15 +238,15 @@ lc_expect "FOLDERS-SETUP-DONE" "the guest's decoy, and past the login's lines"
 # ---- 1. the shares, and reads one and two levels down.
 lc_send "ls /mnt/mac/folders | tr a-z A-Z"
 lc_within $lc_cmd_timeout {
-    -re {DOCS[\r\n]+INBOX[\r\n]+WORK[\r\n]} { lc_step "folders/ lists docs, inbox and work" }
+    -re {DOCS[\r\n]+INBOX[\r\n]+NESTED[\r\n]+WORK[\r\n]} { lc_step "folders/ lists docs, inbox, nested and work" }
     -re {(ls|tr|ut): ([^\r\n]*)[\r\n]}      { lc_fail "[string trimright $expect_out(0,string)] (ls /mnt/mac/folders)" }
     -re {EXTINCTION:}                       { lc_extinction_fail "kernel extinction at ls /mnt/mac/folders" }
-    timeout                                 { lc_fail "ls /mnt/mac/folders did not list DOCS, INBOX, WORK" }
+    timeout                                 { lc_fail "ls /mnt/mac/folders did not list DOCS, INBOX, NESTED, WORK" }
     eof                                     { lc_fail "unexpected EOF at ls /mnt/mac/folders" }
 }
 read_ok /mnt/mac/folders/work/hello.txt "HELLO FROM A MAC FOLDER" "a file in a share"
 read_ok /mnt/mac/folders/work/sub/inner.txt "INNER FILE TWO DEEP" "a file two levels down"
-lc_pass "ls-mac-folders: folders/ lists the three shares, and the Mac's files read one and two levels down"
+lc_pass "ls-mac-folders: folders/ lists the four shares, and the Mac's files read one and two levels down"
 
 # ---- 2. a write lands on the Mac.
 run_ok "echo written by the guest > /mnt/mac/folders/work/new.txt" leg2 "the guest writes new.txt"
@@ -401,6 +434,15 @@ on_mac [expr {$t eq $::old_time}] "inbox/across.txt keeps the source's time ($t,
 set ino none
 if {[file exists $::I/across.txt]} { file stat $::I/across.txt post; set ino $post(ino) }
 on_mac [expr {$ino ne "none" && $ino != $::old_ino}] "inbox/across.txt is a copy (inode $ino; the source's was $::old_ino), the app having refused the rename between two shares"
+set m -1
+if {[file exists $::I/across.txt]} { scan [file attributes $::I/across.txt -permissions] %o m }
+on_mac [expr {$m == 0400}] "inbox/across.txt keeps the source's mode ([format %04o $m], wanted 0400)"
+# Vote M20, from the app's record: the copy is synced under its temporary name, then inbox, after
+# the rename, and only then is the source walked to for its removal (its last walk).
+set fl [log_line {fsync 'folders/inbox/\.mv-[0-9]+-[0-9]+' -> ok} first]
+set dl [log_line {fsync 'folders/inbox' -> ok} last]
+set rl [log_line {walk 'folders/work' \['old\.txt'\]} last]
+on_mac [expr {$fl >= 0 && $dl > $fl && $rl > $dl}] "the app synced the copy (record line $fl), then inbox (line $dl), before the source's last walk (line $rl)"
 lassign [tool_status mv "mv /mnt/mac/folders/work/tree /tmp/mac-tree" leg8c "a tree moved out of a share into the guest"] st why
 if {$st != 0 || $why ne ""} {
     lc_fail "a tree moved out of a share gave status $st, '$why' -- not a quiet copy and remove"
@@ -418,7 +460,8 @@ if {$st == 0 || $why ne "cannot remove '/mnt/mac/folders/docs/readme.txt': permi
 lc_step "status $st: $why"
 on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is still there, unchanged"
 read_ok /tmp/mac-readme.txt "READ ONLY WORDS" "the copy stays in the guest"
-lc_pass "ls-mac-folders: a move across devices copies, then removes: a guest file into a share, a file between two shares with its time, a tree into the guest; out of the read-only share the copy stays and the source cannot be removed"
+on_mac [expr {![mv_left $::W] && ![mv_left $::I]}] "no .mv- name is left in work or inbox"
+lc_pass "ls-mac-folders: a move across devices copies, syncs, renames, then removes: a guest file into a share, a file between two shares with its time and mode, a tree into the guest; out of the read-only share the copy stays and the source cannot be removed"
 
 # ---- 9. rm -r removes a link in a tree, never what it names. work/rmtree holds `link -> ../keep`;
 # a removal that followed it would empty work/keep through it.
@@ -428,6 +471,10 @@ if {$st != 0 || $why ne ""} {
 }
 on_mac [expr {![file exists $::W/rmtree]}] "work/rmtree is gone"
 on_mac [expr {[read_file $::W/keep/kept.txt] eq "kept beside the tree\n"}] "work/keep/kept.txt, in the directory the link named, is still there"
+# Vote M21, from the app's record: rm opened work/rmtree once, from work's handle, and each entry
+# from rmtree's own; a walk by path comes down to rmtree again for each entry.
+set n [llength [lsearch -all -regexp [split [app_log] "\n"] {walk .*\['rmtree'\]}]]
+on_mac [expr {$n == 1}] "rm walked to rmtree once and to its entries from its handle (walks naming rmtree: $n)"
 lassign [tool_status rm "rm /mnt/mac/folders/work/dirlink" leg9b "rm of a link to a directory"] st why
 if {$st != 0 || $why ne ""} {
     lc_fail "rm of a link to a directory gave status $st, '$why' -- not the link removed"
@@ -435,5 +482,51 @@ if {$st != 0 || $why ne ""} {
 on_mac [catch {file lstat $::W/dirlink dl}] "work/dirlink, the link, is gone"
 on_mac [expr {[read_file $::W/keep/kept.txt] eq "kept beside the tree\n"}] "work/keep/kept.txt, in the directory it named, is still there"
 lc_pass "ls-mac-folders: rm -r removes a link in a tree, never the directory it names; rm removes a link to a directory itself"
+
+# ---- 10. what must not happen leaves everything as it was. `nested` is work/sub shared again, so
+# the two names below are one host file: the app gives it one identity whichever share reaches it,
+# and mv and cp refuse it as the same file (the rename between two shares is the app's EXDEV, so
+# mv examines both). A truncating cp would empty it.
+set ::same "'/mnt/mac/folders/work/sub/inner.txt' and '/mnt/mac/folders/nested/inner.txt' are the same file"
+lassign [tool_status mv "mv /mnt/mac/folders/work/sub/inner.txt /mnt/mac/folders/nested/inner.txt" leg10a "a file moved onto itself through two shares"] st why
+if {$st == 0 || $why ne $::same} {
+    lc_fail "a file moved onto itself through two shares gave status $st, '$why' -- not refused as the same file"
+}
+lc_step "status $st: $why"
+on_mac [expr {[read_file $::W/sub/inner.txt] eq "inner file two deep\n"}] "work/sub/inner.txt keeps its words"
+lassign [tool_status cp "cp /mnt/mac/folders/work/sub/inner.txt /mnt/mac/folders/nested/inner.txt" leg10b "a file copied onto itself through two shares"] st why
+if {$st == 0 || $why ne $::same} {
+    lc_fail "a file copied onto itself through two shares gave status $st, '$why' -- not refused as the same file"
+}
+lc_step "status $st: $why"
+on_mac [expr {[read_file $::W/sub/inner.txt] eq "inner file two deep\n"}] "work/sub/inner.txt keeps its words, not truncated"
+# /srv/mac is a regular file until it is opened; the open attaches a session, whose root is a
+# directory, and mv refuses what the open handle says.
+lassign [tool_status mv "mv /srv/mac /mnt/mac/folders/work/srvcopy" leg10c "a service moved into a share"] st why
+if {$st == 0 || $why ne "cannot copy special file '/srv/mac'"} {
+    lc_fail "a service moved into a share gave status $st, '$why' -- not refused as a special file"
+}
+lc_step "status $st: $why"
+on_mac [expr {![file exists $::W/srvcopy]}] "work/srvcopy was never made"
+# A copy that fails: the destination exists and must survive it (vote M19: mv never removes it
+# first), and the source stays.
+lassign [tool_status mv "mv /mnt/mac/folders/work/unreadable.txt /mnt/mac/folders/inbox/over.txt" leg10d "an unreadable file moved over an existing one"] st why
+if {$st == 0 || $why ne "cannot open '/mnt/mac/folders/work/unreadable.txt' for reading: permission denied"} {
+    lc_fail "an unreadable file moved over an existing one gave status $st, '$why' -- not a copy refused at its open"
+}
+lc_step "status $st: $why"
+on_mac [expr {[read_file $::I/over.txt] eq "inbox over words\n"}] "inbox/over.txt, the destination, holds its own words"
+on_mac [file exists $::W/unreadable.txt] "work/unreadable.txt, the source, is still there"
+# A read-only tree whose copy fails part way: the copy's directory stays the owner's 0700 until a
+# whole copy is finished, so mv can remove it (round 2 F11).
+lassign [tool_status mv "mv /mnt/mac/folders/work/locked /mnt/mac/folders/inbox/locked" leg10e "a read-only tree holding an unreadable file moved between shares"] st why
+if {$st == 0 || $why ne "cannot open '/mnt/mac/folders/work/locked/unreadable.txt' for reading: permission denied"} {
+    lc_fail "a read-only tree holding an unreadable file gave status $st, '$why' -- not a copy refused at that file's open"
+}
+lc_step "status $st: $why"
+on_mac [expr {![file exists $::I/locked]}] "inbox/locked was never made"
+on_mac [expr {[read_file $::W/locked/ok.txt] eq "ok in a locked tree\n" && [file exists $::W/locked/unreadable.txt]}] "work/locked keeps both its files"
+on_mac [expr {![mv_left $::W] && ![mv_left $::I]}] "no .mv- name is left in work or inbox"
+lc_pass "ls-mac-folders: mv and cp refuse one file through two shares, mv refuses a service, and a failed move leaves the source and the destination as they were and nothing of its own"
 
 lc_quit
