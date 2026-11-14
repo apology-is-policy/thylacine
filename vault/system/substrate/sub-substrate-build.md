@@ -170,7 +170,10 @@ file drops a Stratum build directory (`build/host-stratum`,
 `build/pouch/stratumd-cmake`) whose `CMakeCache.txt` names another source tree,
 since CMake refuses to configure it and the directory is only a cache; trees
 are compared by their real paths, and nothing is dropped for a source that is
-not there. `test-stratum-src.sh` runs both rules against made-up checkouts.
+not there. A tree that is gone counts as another: build.sh runs under
+`set -euo pipefail`, so a failed `cd` into it is caught, never left to end the
+build without a word. `test-stratum-src.sh` runs both rules against made-up
+checkouts, each call as build.sh makes it, under errexit.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a

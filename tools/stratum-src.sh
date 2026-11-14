@@ -30,8 +30,10 @@ stratum_build_dir_fits() {   # BUILD_DIR SOURCE_DIR
     [[ -f "$dir/CMakeCache.txt" ]] || return 0
     cached="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dir/CMakeCache.txt")"
     [[ -n "$cached" ]] || return 0
-    was="$(cd "$cached" 2>/dev/null && pwd -P)"
-    now="$(cd "$src" 2>/dev/null && pwd -P)"
+    # A cd that fails must not fail the assignment: build.sh runs under set -e, and a
+    # tree that is gone is the case this exists for.
+    was="$(cd "$cached" 2>/dev/null && pwd -P)" || was=""
+    now="$(cd "$src" 2>/dev/null && pwd -P)" || now=""
     # A source that is not there is the caller's to report; nothing is dropped for it.
     [[ -n "$now" && "$was" != "$now" ]] || return 0
     echo "==> stratum: $dir was configured from $cached, not $src -- dropping it for a fresh configure" >&2

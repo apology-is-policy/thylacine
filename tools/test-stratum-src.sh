@@ -37,25 +37,38 @@ assert_eq "$(where both)" "$W/both/projects/stratum"   "the root wins over a v2/
 
 echo "== stratum_build_dir_fits"
 cache() { mkdir -p "$1"; printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "$2" > "$1/CMakeCache.txt"; : > "$1/object.o"; }
+# build.sh runs under set -euo pipefail and calls the helper as a plain statement, where
+# any failing command ends the whole build without a word; every case calls it so. Never
+# inside an if or a ||: errexit is ignored there, in subshells too.
+fits() {
+    ( set -euo pipefail; stratum_build_dir_fits "$@" )
+    local rc=$?
+    [[ "$rc" == 0 ]] || bad "the call for ${1##*/} ended the shell under set -e (rc $rc), as it would end build.sh"
+    return 0
+}
 src_new="$W/new/projects/stratum"; src_old="$W/old/projects/stratum/v2"
 cache "$W/b-same" "$src_new"
-stratum_build_dir_fits "$W/b-same" "$src_new" 2>/dev/null
+fits "$W/b-same" "$src_new" 2>/dev/null
 assert_eq "$([[ -f "$W/b-same/object.o" ]] && echo kept || echo dropped)" kept "a build dir configured from this tree is kept"
 ln -s "$src_new" "$W/link-to-new"
-stratum_build_dir_fits "$W/b-same" "$W/link-to-new" 2>/dev/null
+fits "$W/b-same" "$W/link-to-new" 2>/dev/null
 assert_eq "$([[ -f "$W/b-same/object.o" ]] && echo kept || echo dropped)" kept "the same tree under another name is the same tree"
 cache "$W/b-other" "$src_old"
-said="$(stratum_build_dir_fits "$W/b-other" "$src_new" 2>&1)"
+fits "$W/b-other" "$src_new" 2> "$W/said"
+said="$(cat "$W/said")"
 assert_eq "$([[ -e "$W/b-other" ]] && echo kept || echo dropped)" dropped "a build dir configured from another tree is dropped"
 assert_eq "$([[ "$said" == *"was configured from $src_old"* ]] && echo said || echo silent)" said "and the drop is said aloud"
 cache "$W/b-gone" "$W/a-tree-that-is-gone"
-stratum_build_dir_fits "$W/b-gone" "$src_new" 2>/dev/null
+fits "$W/b-gone" "$src_new" 2>/dev/null
 assert_eq "$([[ -e "$W/b-gone" ]] && echo kept || echo dropped)" dropped "a build dir whose tree is gone is dropped"
 cache "$W/b-nosrc" "$src_old"
-stratum_build_dir_fits "$W/b-nosrc" "$W/no-such-source" 2>/dev/null
+fits "$W/b-nosrc" "$W/no-such-source" 2>/dev/null
 assert_eq "$([[ -f "$W/b-nosrc/object.o" ]] && echo kept || echo dropped)" kept "nothing is dropped for a source that is not there"
+mkdir -p "$W/b-noname"; printf 'CMAKE_BUILD_TYPE:STRING=Release\n' > "$W/b-noname/CMakeCache.txt"; : > "$W/b-noname/object.o"
+fits "$W/b-noname" "$src_new" 2>/dev/null
+assert_eq "$([[ -f "$W/b-noname/object.o" ]] && echo kept || echo dropped)" kept "a cache that names no source tree is left alone"
 mkdir -p "$W/b-plain"; : > "$W/b-plain/object.o"
-stratum_build_dir_fits "$W/b-plain" "$src_new" 2>/dev/null
+fits "$W/b-plain" "$src_new" 2>/dev/null
 assert_eq "$([[ -f "$W/b-plain/object.o" ]] && echo kept || echo dropped)" kept "a dir that is no CMake build dir is left alone"
 
 echo "== $pass passed, $fail failed"

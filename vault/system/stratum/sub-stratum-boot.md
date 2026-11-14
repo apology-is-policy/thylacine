@@ -298,13 +298,13 @@ stratumd wrote last -- why it refused the boot attach, say -- never reached the
 console: on 2026-11-12 a failed attach extincted with no cause, and finding it
 meant reading three trees. `main` now wraps `joey_main`. Once the drainer is up,
 `sd_drain_settle` parks 10 ms at a time until three parks in a row find the
-pipe empty (a zero-timeout poll, which takes nothing from the drainer), no
-chunk between the drainer's read and its print (two counts the drainer
-advances on either side of `t_puts`), and the printed count unmoved; or until
-the drainer has read the end of the pipe. It gives up after 100 parks, so a
-daemon that keeps writing holds the end of the boot for about a second. The
-case it misses is a drainer kept off every CPU for three parks between its read
-and its count.
+pipe empty (a zero-timeout poll, which takes nothing from the drainer), every
+chunk the drainer has woken for also handled, and the count handled unmoved; or
+until the drainer has read the end of the pipe. The drainer waits in a poll and
+counts a chunk as woken before the read that takes its bytes out of the pipe,
+so a chunk is always in one place the settle looks: still in the pipe, or woken
+and not yet handled. It gives up after 100 parks, so a daemon that keeps writing
+holds the end of the boot for about a second.
 
 **The attach opts into loose cache mode, and the premise is written down.**
 `T_ATTACH_9P_LOOSE` on the SYSTEM mount asserts: this pool's block device
@@ -465,15 +465,17 @@ line. dap-probe leaves one orphan on purpose, its abandoned debuggee
 ## Data structures
 
 The spawn is one `t_sys_spawn_args`: flat NUL-separated argv (14 strings,
-173 bytes) plus an fd list installing one pipe write-end as fds 0, 1 and 2.
+177 bytes) plus an fd list installing one pipe write-end as fds 0, 1 and 2.
 
 ## Concurrency
 
 Sequential until the drainer thread is spawned. The drainer then runs for
 the daemon's lifetime, forwarding to the console; it exits when stratumd
-does. It advances its two counts and sets its end flag with release atomics;
-joey's exit path reads them with acquire loads (`sd_drain_settle`), and only
-polls the pipe, never reads it.
+does. It advances its two counts and sets its end flag with release atomics,
+with a full fence between the woken count and its read; joey's exit path reads
+them with acquire loads (`sd_drain_settle`), and only polls the pipe, never
+reads it. A poll of the drainer's that fails is only a wait cut short: it still
+reads, so the pipe is never left unread.
 
 ## Invariants enforced
 
@@ -545,8 +547,10 @@ event-driven; no timing constant appears in this path.
   it here.
 - The readiness read must keep draining, and the drainer must keep owning
   the pipe. A reader that stops reading wedges the FS.
-- joey ends only by returning from `joey_main`. An exit that skips `main`'s
-  wrapper loses stratumd's last words again.
+- joey's own code ends joey only by returning from `joey_main`. A fault, a
+  kill, or a stack-canary failure (libt's `__stack_chk_fail` calls SYS_EXITS
+  directly) skips `main`'s wrapper, and stratumd's last words are lost then;
+  an exit added that skips it loses them again.
 - A blocking reap (`wait_pid_for`) must not be reintroduced on the daemon path.
 
 ## Seams

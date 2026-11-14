@@ -6608,13 +6608,14 @@ static long walk_open_in_bin(const char *name, size_t name_len, unsigned long om
 // first over-budget print). This drainer thread owns the pipe's read end for
 // the daemon's lifetime, forwarding every chunk to the console so stratumd
 // output is never back-pressured and post-startup diagnostics stay visible
-// in the boot log. Blocks in t_read (death-interruptible, #811); EOF means
-// stratumd exited, so the thread exits with it.
+// in the boot log. Waits in t_poll, then reads (both death-interruptible,
+// #811); EOF means stratumd exited, so the thread exits with it.
 static unsigned char sd_drain_stack[16384] __attribute__((aligned(16)));
-// What sd_drain_settle reads to tell that the drainer has caught up. The counts are
-// the drainer's to write; sd_drain_up and sd_drain_fd are joey's main thread's.
-static unsigned long sd_drain_taken;
-static unsigned long sd_drain_printed;
+// What sd_drain_settle reads to tell that the drainer has caught up. The counts and
+// the end flag are the drainer's to write; sd_drain_up and sd_drain_fd are joey's
+// main thread's.
+static unsigned long sd_drain_woken;
+static unsigned long sd_drain_handled;
 static int sd_drain_done;
 static int sd_drain_up;
 static long sd_drain_fd = -1;
@@ -6622,12 +6623,19 @@ static long sd_drain_fd = -1;
 static void sd_stderr_drain_main(void *arg) {
     long fd = (long)arg;
     for (;;) {
+        // A chunk is counted as woken before its bytes leave the pipe, so wherever
+        // sd_drain_settle looks it finds the chunk: in the pipe, or woken and not yet
+        // handled. The poll is only a wait; a poll that fails still reads, so the pipe
+        // is never left unread.
+        struct pollfd pfd = { .fd = (int)fd, .events = POLLIN, .revents = 0 };
+        (void)t_poll(&pfd, 1, -1);
+        __atomic_fetch_add(&sd_drain_woken, 1UL, __ATOMIC_RELEASE);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
         unsigned char b[256];
         long n = t_read(fd, b, sizeof(b));
+        if (n > 0) (void)t_puts((const char *)b, (size_t)n);
+        __atomic_fetch_add(&sd_drain_handled, 1UL, __ATOMIC_RELEASE);
         if (n <= 0) break;
-        __atomic_fetch_add(&sd_drain_taken, (unsigned long)n, __ATOMIC_RELEASE);
-        (void)t_puts((const char *)b, (size_t)n);
-        __atomic_fetch_add(&sd_drain_printed, (unsigned long)n, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&sd_drain_done, 1, __ATOMIC_RELEASE);
     t_thread_exit();
@@ -6636,27 +6644,26 @@ static void sd_stderr_drain_main(void *arg) {
 // joey's exit ends the drainer with it, so what stratumd wrote last -- why it refused
 // the boot attach, say -- would never reach the console. Before joey returns, wait
 // until the drainer has caught up: the pipe empty (a poll, which takes nothing from
-// it), no chunk between the drainer's read and its print, and the count printed
-// unchanged, for SD_SETTLE_QUIET parks in a row. A drainer that read its last chunk and
-// was then kept off a CPU for that long, before counting it, is the case this misses.
-// Bounded, so a daemon that keeps writing cannot hold the end of the boot.
+// it), every chunk woken also handled, and the count handled unchanged, for
+// SD_SETTLE_QUIET parks in a row. Bounded, so a daemon that keeps writing cannot hold
+// the end of the boot.
 #define SD_SETTLE_PARK_MS 10
 #define SD_SETTLE_QUIET 3
 #define SD_SETTLE_PARKS 100
 static void sd_drain_settle(void) {
     if (!sd_drain_up) return;
     unsigned pacer = 0;
-    unsigned long seen = __atomic_load_n(&sd_drain_printed, __ATOMIC_ACQUIRE);
+    unsigned long seen = __atomic_load_n(&sd_drain_handled, __ATOMIC_ACQUIRE);
     int quiet = 0;
     for (int i = 0; i < SD_SETTLE_PARKS && quiet < SD_SETTLE_QUIET; i++) {
         if (__atomic_load_n(&sd_drain_done, __ATOMIC_ACQUIRE)) return;
         (void)t_torpor_wait(&pacer, 0u, (long)SD_SETTLE_PARK_MS * 1000L);
         struct pollfd pfd = { .fd = (int)sd_drain_fd, .events = POLLIN, .revents = 0 };
         int pending = t_poll(&pfd, 1, 0) > 0;
-        unsigned long printed = __atomic_load_n(&sd_drain_printed, __ATOMIC_ACQUIRE);
-        unsigned long taken = __atomic_load_n(&sd_drain_taken, __ATOMIC_ACQUIRE);
-        quiet = (!pending && taken == printed && printed == seen) ? quiet + 1 : 0;
-        seen = printed;
+        unsigned long handled = __atomic_load_n(&sd_drain_handled, __ATOMIC_ACQUIRE);
+        unsigned long woken = __atomic_load_n(&sd_drain_woken, __ATOMIC_ACQUIRE);
+        quiet = (!pending && woken == handled && handled == seen) ? quiet + 1 : 0;
+        seen = handled;
     }
 }
 
@@ -8434,7 +8441,11 @@ static int joey_main(void) {
         }
 
         if (sd_srv_fd < 0) {
-            t_putstr("joey: stratumd-boot /srv/stratum-fs: stratumd died before signaling readiness (FATAL at 16c)\n");
+            if (sd_ready) {
+                t_putstr("joey: stratumd-boot /srv/stratum-fs: stratumd signalled readiness but the service did not open (FATAL at 16c)\n");
+            } else {
+                t_putstr("joey: stratumd-boot /srv/stratum-fs: stratumd died before signaling readiness (FATAL at 16c)\n");
+            }
             // Bounded-drain stratumd's stderr so any final diagnostic
             // msg lands in the boot log. No t_wait_pid here: stratumd
             // is a long-running daemon (16c+) and never zombifies, so
