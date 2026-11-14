@@ -7001,19 +7001,25 @@ void test_dev9p_cached_open_loose_fsync(void) {
     g_ga_gen = 0x77;
     g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
     g_wga_lerror_ecode = T_E_NOENT;
-    TEST_EXPECT_EQ((s64)dev9p.fsync(co, 0), (s64)-T_E_STALE,
-                   "fsync when the name is gone: ESTALE");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 0ull, "and no Tfsync");
-    TEST_EXPECT_EQ((s64)dev9p.fsync(co, 0), 0ll, "fsync when it resolves");
-    TEST_ASSERT(cp->co_kfid != P9_NOFID, "binds");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 1ull, "and sends one Tfsync");
-    TEST_EXPECT_EQ((u64)g_tfsync_fid, (u64)cp->co_kfid, "on that fid");
-    spoor_clunk(co);
+    s64 gone = (s64)dev9p.fsync(co, 0);
+    u32 gone_seen = g_tfsync_seen, unasked = g_wga_lerror_ecode;
+    g_wga_lerror_ecode = 0;
+    s64 back = (s64)dev9p.fsync(co, 0);
+    u32 kfid = cp->co_kfid, back_seen = g_tfsync_seen, back_fid = g_tfsync_fid;
+    spoor_clunk(co);                 // fixture hygiene, before any assert
     (void)p9_client_reader_pump_ready(&g_client);
     lock_wire_reset();
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
+
+    TEST_EXPECT_EQ(gone, (s64)-T_E_STALE, "fsync when the name is gone: ESTALE");
+    TEST_EXPECT_EQ((u64)unasked, 0ull, "the walk that found it gone was asked");
+    TEST_EXPECT_EQ((u64)gone_seen, 0ull, "and no Tfsync");
+    TEST_EXPECT_EQ(back, 0ll, "fsync when it resolves");
+    TEST_ASSERT(kfid != P9_NOFID, "binds");
+    TEST_EXPECT_EQ((u64)back_seen, 1ull, "and sends one Tfsync");
+    TEST_EXPECT_EQ((u64)back_fid, (u64)kfid, "on that fid");
 }
 
 // SYS_FSYNC's gate (vote M22): either right reaches the Dev, as POSIX fsync

@@ -2635,11 +2635,11 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
     if (has_second) {
         struct p9_client *cl2; u32 f2;
-        // sp is a dev9p Spoor (above): a second that is not is another device.
+        // The device check above leaves only this session's handles here (a
+        // dev9p devno is one session's). These two stay as its backstop: a 9P
+        // renameat or link names two fids of ONE fid namespace, so another
+        // session's fid on this wire would name some other file of this server.
         if (dev9p_client_fid(sp2, &cl2, &f2) != 0) { err = -(s32)T_E_XDEV;  goto fail; }
-        // A 9P renameat/link names two fids in ONE fid namespace, so a pair from
-        // two sessions is two servers: EXDEV, as the sync rename answers it
-        // (vote M15), and nothing reaches the wire.
         if (cl2 != cl)                             { err = -(s32)T_E_XDEV;  goto fail; }
         fid2 = f2;
     }
