@@ -2061,6 +2061,14 @@ static struct Dev g_rev_private_dev = {
 #define V118_PAGES 128u                   // two read-ahead clusters
 static u32 v118_data(struct AddrSpace *as) { return as->page_count - as->pgtable_pages; }
 
+// A fresh space's data count is 0, and a refund past 0 clamps there, so a
+// baseline of 0 cannot show an over-refund. These pages lift it off the floor.
+#define V118_FLOOR 4u
+static bool v118_floor(struct AddrSpace *as) { return addrspace_charge_pages(as, V118_FLOOR, false); }
+static void v118_unfloor(struct AddrSpace *as, bool floored) {
+    if (floored) addrspace_uncharge_pages(as, V118_FLOOR);
+}
+
 static struct Burrow *v118_private_image(struct AddrSpace *payer) {
     struct Spoor *s = spoor_alloc(&g_rev_private_dev);
     if (!s) return NULL;
@@ -2102,6 +2110,7 @@ void test_demand_page_file_private_charges_its_payer(void) {
     struct Vma *vma = vma_lookup(p, USER_VA);
     bool flagged   = vma && (vma->flags & VMA_FLAG_FILE_PAYER);
     burrow_unref(v);                      // the mapping holds it now
+    const bool floored = v118_floor(p->as);
     const u32 d0 = v118_data(p->as);
     const u32 f0 = p->as->file_pages;
 
@@ -2114,9 +2123,11 @@ void test_demand_page_file_private_charges_its_payer(void) {
     u32 d3 = v118_data(p->as), rec3 = burrow_file_charge_pages_for_test(v);
     int drc2 = v118_detach(p, 1, V118_PAGES - 1);      // the last mapping: the free
     u32 d4 = v118_data(p->as);
+    v118_unfloor(p->as, floored);
     drop_proc(p);
     (void)image_cache_evict_idle_for_test();
 
+    TEST_ASSERT(floored, "the floor under the payer's count");
     TEST_ASSERT(payer_set, "the private arm records the mapper's space as the payer");
     TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
     TEST_ASSERT(flagged, "a fresh mapping into the payer's space is a payer mapping");
@@ -2150,6 +2161,7 @@ void test_demand_page_file_private_single_fill_charges(void) {
     bool payer_set = burrow_file_payer_for_test(v) == p->as;
     int  mrc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
     burrow_unref(v);
+    const bool floored = v118_floor(p->as);
     const u32 d0 = v118_data(p->as), f0 = p->as->file_pages;
     int calls0 = g_rev_read_calls;
     enum fault_result r0 = v118_fault(p, 0);
@@ -2158,9 +2170,11 @@ void test_demand_page_file_private_single_fill_charges(void) {
     u32 d1 = v118_data(p->as), f1 = p->as->file_pages;
     int drc = v118_detach(p, 0, 1);
     u32 d2 = v118_data(p->as);
+    v118_unfloor(p->as, floored);
     drop_proc(p);
     (void)image_cache_evict_idle_for_test();
 
+    TEST_ASSERT(floored, "the floor under the payer's count");
     TEST_ASSERT(payer_set, "the private arm records the mapper's space as the payer");
     TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
     TEST_EXPECT_EQ(r0, FAULT_HANDLED, "the page faults in");
