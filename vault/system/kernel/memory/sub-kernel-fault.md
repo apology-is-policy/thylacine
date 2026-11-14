@@ -525,7 +525,7 @@ across the read. The single fill charges its one page in `file_install_locked`,
 after the geometry checks and before `pagemap_install`, and refunds it when the
 slot went to a sibling or the node allocation failed. The cluster SIZES its
 window before the read by the payer's headroom, charging nothing
-(`burrow_file_mint_headroom`): a window cut short restarts at the faulting slot,
+(`burrow_mint_headroom`): a window cut short restarts at the faulting slot,
 one cut to a page takes the single fill, and with no headroom at all the fault
 answers `FAULT_UNHANDLED_USER`, as a refused leaf does. Its install then goes
 slot by slot (`file_cluster_install_slot`): the faulting slot first, so a payer
@@ -536,11 +536,11 @@ whole window before the read, resident slots included, and held it across the
 9P sleep, so the payer's own concurrent allocations were refused, and its Proc
 killed, while true usage fit (audit round 34 F1).
 
-The leaf rule moved with it. A payer mapping (`VMA_FLAG_FILE_PAYER`,
+The leaf rule moved with it. A payer mapping (`VMA_FLAG_PAYER`,
 [[sub-kernel-vma]]) installs its leaves uncharged, because the mint paid: in
 the resident-hit path (`file_charge`) and in both install tails
 (`leaf_charge`). Every other holder's leaves are charged exactly as above.
-Each path runs `file_payer_adopt_if_due` before it decides a leaf, and the
+Each path runs `payer_adopt_if_due` before it decides a leaf, and the
 fills run it right after the charge that may have made a hand-over, before
 anything can bail. A space that has just become the payer by minting into a
 lapsed record (its payer died) turns its unflagged mappings of the image into

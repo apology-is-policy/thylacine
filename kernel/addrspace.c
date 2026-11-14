@@ -224,7 +224,7 @@ void addrspace_destroy(struct AddrSpace *as) {
     // were freed (refunding a count that dies here anyway); what is left
     // survives in another space's mapping, and its record lapses now, before
     // a pin could let the descriptor outlive every owner.
-    burrow_file_payers_lapse(as);
+    burrow_payers_lapse(as);
     addrspace_lifetime_put(as);
 }
 

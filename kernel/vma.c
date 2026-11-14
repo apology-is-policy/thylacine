@@ -504,7 +504,7 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
     // mapping ref on `nb` across the detach.
     struct Vma *nv = vma_alloc(vaddr, end, prot, nb, nb_offset);
     if (!nv)                              return -(int)T_E_NOMEM;
-    vma_file_payer_mark_fresh(as, nv);
+    vma_payer_mark_fresh(as, nv);
 
     struct Burrow *dead = NULL;
     int rc = vma_detach_range_in(as, exempt, payer, vaddr, length, 1, &dead);
@@ -581,27 +581,27 @@ long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
         long n = mmu_uninstall_user_range(as, a, b);
         if (n <= 0) continue;
         if (v->burrow && v->burrow->type == BURROW_TYPE_FILE &&
-            !(v->flags & VMA_FLAG_FILE_PAYER))
+            !(v->flags & VMA_FLAG_PAYER))
             addrspace_uncharge_file(as, (u32)n);
         total += n;
     }
     return total;
 }
 
-void vma_file_payer_mark_fresh(struct AddrSpace *as, struct Vma *v) {
+void vma_payer_mark_fresh(struct AddrSpace *as, struct Vma *v) {
     struct Burrow *b = v ? v->burrow : NULL;
-    if (b && b->type == BURROW_TYPE_FILE && b->file_private &&
-        burrow_file_payer_is(b, as))
-        v->flags |= VMA_FLAG_FILE_PAYER;
+    if (b && b->type == BURROW_TYPE_FILE && b->payer_record &&
+        burrow_payer_is(b, as))
+        v->flags |= VMA_FLAG_PAYER;
 }
 
-void vma_file_payer_adopt_in(struct AddrSpace *as, struct Burrow *b) {
+void vma_payer_adopt_in(struct AddrSpace *as, struct Burrow *b) {
     for (struct Vma *v = as->vmas; v; v = v->next) {
-        if (v->burrow != b || (v->flags & VMA_FLAG_FILE_PAYER)) continue;
+        if (v->burrow != b || (v->flags & VMA_FLAG_PAYER)) continue;
         // Unflagged, so the uninstall refunds each leaf it clears; the space
         // re-faults them as payer leaves, which the mint has paid for.
         (void)vma_uninstall_range_in(as, v->vaddr_start, v->vaddr_end);
-        v->flags |= VMA_FLAG_FILE_PAYER;
+        v->flags |= VMA_FLAG_PAYER;
     }
 }
 

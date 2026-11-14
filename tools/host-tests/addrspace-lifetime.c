@@ -65,7 +65,7 @@ static unsigned lapsed_at;
 // External, as burrow.h declares it. The records name the space, so they lapse
 // while its last owner still holds the descriptor; the cases check the order
 // against the drain, after their own drain checks.
-void burrow_file_payers_lapse(struct AddrSpace *as) {
+void burrow_payers_lapse(struct AddrSpace *as) {
     CHECK(as != freed, "the payer records lapse before the last lifetime drop");
     lapses++; lapsed_at = ++stamp;
 }

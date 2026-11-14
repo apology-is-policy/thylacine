@@ -299,15 +299,15 @@ and its charge stay, as Linux keeps a PROT_NONE mapping's contents;
 
 ### A payer mapping pays no leaf (2026-11-13; operator vote 118)
 
-`VMA_FLAG_FILE_PAYER` marks a mapping of a private image ([[sub-kernel-image]])
+`VMA_FLAG_PAYER` marks a mapping of a private image ([[sub-kernel-image]])
 in the space that pays for its pages ([[sub-kernel-burrow]]). Its leaves are
 installed uncharged ([[sub-kernel-fault]]), and `vma_uninstall_range_in`
 refunds none of them. Only two places set it:
 
-- `vma_file_payer_mark_fresh` flags a just-allocated mapping, which holds no
+- `vma_payer_mark_fresh` flags a just-allocated mapping, which holds no
   leaf, when its Burrow's payer is the space being mapped into. `burrow_map_in`
   and `vma_replace_range_in` call it after `vma_alloc`.
-- `vma_file_payer_adopt_in`, under `as->lock`, runs when a space has become
+- `vma_payer_adopt_in`, under `as->lock`, runs when a space has become
   the payer by a hand-over. It uninstalls every leaf of each of the space's
   unflagged mappings of the Burrow, each refunded because the mapping is still
   unflagged, and then flags them.

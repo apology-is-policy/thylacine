@@ -421,10 +421,10 @@ struct file_fault_req {
 // charged leaves uninstalled and refunded -- before any leaf of theirs is
 // decided. A no-op for a cached image, a payer mapping, or a non-payer.
 // Caller holds p->as->lock.
-static void file_payer_adopt_if_due(struct Proc *p, struct Vma *vma, struct Burrow *v) {
-    if (v->file_private && !(vma->flags & VMA_FLAG_FILE_PAYER) &&
-        burrow_file_payer_is(v, p->as))
-        vma_file_payer_adopt_in(p->as, v);
+static void payer_adopt_if_due(struct Proc *p, struct Vma *vma, struct Burrow *v) {
+    if (v->payer_record && !(vma->flags & VMA_FLAG_PAYER) &&
+        burrow_payer_is(v, p->as))
+        vma_payer_adopt_in(p->as, v);
 }
 
 // Locked core. Caller validated p and holds p->vma_lock across the whole
@@ -594,8 +594,8 @@ static enum fault_result demand_page_locked(struct Proc *p,
             mair_idx = MAIR_IDX_NORMAL_WB;
             // The mapping is this space's (audit F8) -- unless it is a payer
             // mapping of a private image, whose mint paid (vote 118).
-            file_payer_adopt_if_due(p, vma, v);
-            file_charge = !(vma->flags & VMA_FLAG_FILE_PAYER);
+            payer_adopt_if_due(p, vma, v);
+            file_charge = !(vma->flags & VMA_FLAG_PAYER);
             break;                      // -> step-5 PTE install (R+X for text)
         }
         // A miss sleeps (the read, and the pin's last unref), and nothing past
@@ -958,26 +958,26 @@ static enum fault_result file_install_locked(struct Proc *p,
     // payer's (vote 118): charged before the slot can take it, and refunded
     // if it does not end resident.
     u32 minted = 0;
-    if (v->file_private) {
-        minted = burrow_file_mint_charge(v, p->as, proc_resource_exempt(p), 1);
+    if (v->payer_record) {
+        minted = burrow_mint_charge(v, p->as, proc_resource_exempt(p), 1);
         if (!minted) {
             free_pages(newpg, 0);
             return FAULT_UNHANDLED_USER; // the payer has no headroom: refused as a leaf is
         }
         // A hand-over this charge made: adopt before anything below can bail.
-        file_payer_adopt_if_due(p, vma, v);
+        payer_adopt_if_due(p, vma, v);
     }
     struct page *resident = NULL;
     int irc = pagemap_install(&v->pm, &v->lock, freq->slot, newpg, NULL,
                               proc_resource_exempt(p), &resident);
     if (irc < 0) {
         free_pages(newpg, 0);
-        burrow_file_mint_refund(v, minted);
+        burrow_mint_refund(v, minted);
         return FAULT_UNHANDLED_USER;     // node OOM, or an impossible shape change; bail safe
     }
     if (irc == 1) {
         free_pages(newpg, 0);            // a sibling faulter won: discard the loser's freshly-read page
-        burrow_file_mint_refund(v, minted);
+        burrow_mint_refund(v, minted);
     } else {
         resident = newpg;                // we win -- the Burrow owns newpg now
     }
@@ -997,7 +997,7 @@ static enum fault_result file_install_locked(struct Proc *p,
     // charge installs nothing; a leaf a sibling already installed (rc 1) was
     // paid for by the sibling, so this charge goes back. A payer mapping of a
     // private image pays no leaf: its mint did (vote 118).
-    bool leaf_charge = !(vma->flags & VMA_FLAG_FILE_PAYER);
+    bool leaf_charge = !(vma->flags & VMA_FLAG_PAYER);
     if (leaf_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
     int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
@@ -1140,13 +1140,13 @@ out:
 static struct page *file_cluster_install_slot(struct Proc *p, struct Burrow *v, size_t s,
                                               struct page **pg, bool *spent) {
     bool exempt = proc_resource_exempt(p);
-    if (v->file_private) {
+    if (v->payer_record) {
         // A resident slot mints nothing, so it is charged nothing.
         spin_lock(&v->lock);
         struct page *have = pagemap_get(&v->pm, s);
         spin_unlock(&v->lock);
         if (have) return have;
-        if (!burrow_file_mint_charge(v, p->as, exempt, 1)) { *spent = true; return NULL; }
+        if (!burrow_mint_charge(v, p->as, exempt, 1)) { *spent = true; return NULL; }
     }
     struct page *winner = NULL;
     int irc = pagemap_install(&v->pm, &v->lock, s, *pg, NULL, exempt, &winner);
@@ -1155,7 +1155,7 @@ static struct page *file_cluster_install_slot(struct Proc *p, struct Burrow *v, 
         *pg = NULL;                      // adopted: the caller must not free it
         return winner;
     }
-    if (v->file_private) burrow_file_mint_refund(v, 1);   // not minted after all
+    if (v->payer_record) burrow_mint_refund(v, 1);   // not minted after all
     return irc < 0 ? NULL : winner;      // irc 1: a sibling won; *pg stays a loser
 }
 
@@ -1197,7 +1197,7 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     struct page *fault_pg = file_cluster_install_slot(p, v, freq->slot, &clpages[fi0], &spent);
     // A hand-over this fault made turns its mappings into payer mappings
     // before any leaf of theirs is decided -- even if the fault fails below.
-    file_payer_adopt_if_due(p, vma, v);
+    payer_adopt_if_due(p, vma, v);
     if (!fault_pg) return FAULT_UNHANDLED_USER;     // refused, lost to an OOM, or no headroom
     for (size_t i = 0; i < ncluster && !spent; i++) {
         if (i == fi0) continue;
@@ -1214,7 +1214,7 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     // (a cached image's read-ahead pages are the system cache's until a fault
     // maps them; a private image's were charged to its payer as they were
     // minted, vote 118); see the single-page tail, payer mappings included.
-    bool leaf_charge = !(vma->flags & VMA_FLAG_FILE_PAYER);
+    bool leaf_charge = !(vma->flags & VMA_FLAG_PAYER);
     if (leaf_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
     int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
@@ -1267,8 +1267,8 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     // charge is held across the read below. A window cut short restarts at the
     // faulting slot and keeps what the payer could take; with no headroom at
     // all the fault is refused, as a refused leaf is.
-    if (v->file_private) {
-        u32 room = burrow_file_mint_headroom(v, p->as, proc_resource_exempt(p), (u32)ncluster);
+    if (v->payer_record) {
+        u32 room = burrow_mint_headroom(v, p->as, proc_resource_exempt(p), (u32)ncluster);
         if (!room) return FAULT_UNHANDLED_USER;
         if (room < ncluster) {
             cstart = freq->slot;

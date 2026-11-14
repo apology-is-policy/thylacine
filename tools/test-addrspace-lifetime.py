@@ -14,7 +14,7 @@ spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host
 # Destroy's tail: the last owner's drain, the lapse of the payer records that
 # name the space, then its lifetime reference.
 DRAIN='    vma_drain_in(as);\n'
-LAPSE='    burrow_file_payers_lapse(as);\n'
+LAPSE='    burrow_payers_lapse(as);\n'
 LAPSE_PUT=LAPSE+'    addrspace_lifetime_put(as);\n}'
 QUIESCE='int reset = addrspace_quiesce_mapped_devices(as);'
 MUTANTS=[

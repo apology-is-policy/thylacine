@@ -235,7 +235,7 @@ Install(sp) ==
 
 (***************************************************************************)
 (* Hit(sp, s) -- a fault on a resident page: the leaf alone. A payer whose *)
-(* mappings are not yet payer mappings adopts first (file_payer_adopt_if_due).*)
+(* mappings are not yet payer mappings adopts first (payer_adopt_if_due).*)
 (***************************************************************************)
 Hit(sp, s) ==
     /\ Idle(sp) /\ s \in maps[sp] /\ s \in resident /\ s \notin leaf[sp]

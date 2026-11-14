@@ -724,51 +724,51 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 //
 // One global leaf lock rather than v->lock: the record names an ADDRESS SPACE,
 // and the space's teardown must reach every record that names it (its
-// file_paid list) without holding the Burrows' own locks in some order. Taken
+// paid_burrows list) without holding the Burrows' own locks in some order. Taken
 // with nothing acquired inside it -- the charge and refund are lock-free CAS
 // loops on the space's counter -- so it nests under as->lock or v->lock and
 // never the other way round. A mint is a 9P read away, so one lock for the
 // machine costs nothing that shows.
 //
-// The record's invariant: file_charge_pages is the Burrow's resident page
+// The record's invariant: payer_charge_pages is the Burrow's resident page
 // count plus the one page a fill may have charged and not yet installed (the
 // cluster charges slot by slot at its install, the single fill its one page,
 // each under the faulting space's as->lock with no sleep between the charge
-// and the install), and a non-NULL file_payer has paid exactly
-// file_charge_pages. Every transition below keeps both halves.
+// and the install), and a non-NULL payer has paid exactly
+// payer_charge_pages. Every transition below keeps both halves.
 // =============================================================================
 
-static spin_lock_t g_file_payer_lock = SPIN_LOCK_INIT;
+static spin_lock_t g_payer_lock = SPIN_LOCK_INIT;
 
-static void file_paid_link_locked(struct Burrow *v, struct AddrSpace *as, bool exempt) {
-    v->file_payer        = as;
-    v->file_payer_exempt = exempt;
-    v->file_paid_prev    = NULL;
-    v->file_paid_next    = as->file_paid;
-    if (as->file_paid) as->file_paid->file_paid_prev = v;
-    as->file_paid        = v;
+static void paid_link_locked(struct Burrow *v, struct AddrSpace *as, bool exempt) {
+    v->payer        = as;
+    v->payer_exempt = exempt;
+    v->paid_prev    = NULL;
+    v->paid_next    = as->paid_burrows;
+    if (as->paid_burrows) as->paid_burrows->paid_prev = v;
+    as->paid_burrows = v;
 }
 
-static void file_paid_unlink_locked(struct Burrow *v) {
-    struct AddrSpace *as = v->file_payer;
-    if (v->file_paid_prev) v->file_paid_prev->file_paid_next = v->file_paid_next;
-    else                   as->file_paid = v->file_paid_next;
-    if (v->file_paid_next) v->file_paid_next->file_paid_prev = v->file_paid_prev;
-    v->file_paid_next    = NULL;
-    v->file_paid_prev    = NULL;
-    v->file_payer        = NULL;
-    v->file_payer_exempt = false;
+static void paid_unlink_locked(struct Burrow *v) {
+    struct AddrSpace *as = v->payer;
+    if (v->paid_prev) v->paid_prev->paid_next = v->paid_next;
+    else              as->paid_burrows = v->paid_next;
+    if (v->paid_next) v->paid_next->paid_prev = v->paid_prev;
+    v->paid_next    = NULL;
+    v->paid_prev    = NULL;
+    v->payer        = NULL;
+    v->payer_exempt = false;
 }
 
-void burrow_file_set_payer(struct Burrow *v, struct AddrSpace *as, bool exempt) {
+void burrow_payer_set(struct Burrow *v, struct AddrSpace *as, bool exempt) {
     if (!v || v->type != BURROW_TYPE_FILE)
-        extinction("burrow_file_set_payer on a non-FILE Burrow");
-    spin_lock(&g_file_payer_lock);
-    if (v->file_private || v->file_payer)
-        extinction("burrow_file_set_payer twice on one Burrow");
-    v->file_private = true;
-    if (as) file_paid_link_locked(v, as, exempt);
-    spin_unlock(&g_file_payer_lock);
+        extinction("burrow_payer_set on a non-FILE Burrow");
+    spin_lock(&g_payer_lock);
+    if (v->payer_record || v->payer)
+        extinction("burrow_payer_set twice on one Burrow");
+    v->payer_record = true;
+    if (as) paid_link_locked(v, as, exempt);
+    spin_unlock(&g_payer_lock);
 }
 
 // Who would pay a mint into `v` now, what that payer still owes before it can
@@ -779,8 +779,8 @@ void burrow_file_set_payer(struct Burrow *v, struct AddrSpace *as, bool exempt) 
 static struct AddrSpace *mint_payer_locked(struct Burrow *v, struct AddrSpace *faulter,
                                            bool exempt, u32 *owed, bool *pexempt,
                                            bool *capfree) {
-    struct AddrSpace *payer = v->file_payer;
-    *pexempt = v->file_payer_exempt;
+    struct AddrSpace *payer = v->payer;
+    *pexempt = v->payer_exempt;
     *owed    = 0;
     // A lapsed record: the faulter becomes the payer, and a payer pays the
     // whole residency -- the pages its dead predecessor paid for are still
@@ -788,7 +788,7 @@ static struct AddrSpace *mint_payer_locked(struct Burrow *v, struct AddrSpace *f
     if (!payer) {
         payer    = faulter;
         *pexempt = exempt;
-        *owed    = v->file_charge_pages;
+        *owed    = v->payer_charge_pages;
     }
     *capfree = *pexempt && exempt;
     return payer;
@@ -808,21 +808,21 @@ static u32 mint_take_locked(struct AddrSpace *payer, u32 owed, bool capfree, u32
     return take;
 }
 
-u32 burrow_file_mint_headroom(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+u32 burrow_mint_headroom(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
                               u32 want) {
-    if (!v || !v->file_private || !faulter || want == 0) return 0;
-    spin_lock(&g_file_payer_lock);
+    if (!v || !v->payer_record || !faulter || want == 0) return 0;
+    spin_lock(&g_payer_lock);
     u32 owed; bool pexempt, capfree;
     struct AddrSpace *payer = mint_payer_locked(v, faulter, exempt, &owed, &pexempt, &capfree);
     u32 take = mint_take_locked(payer, owed, capfree, want);
-    spin_unlock(&g_file_payer_lock);
+    spin_unlock(&g_payer_lock);
     return take;
 }
 
-u32 burrow_file_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
+u32 burrow_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool exempt,
                             u32 want) {
-    if (!v || !v->file_private || !faulter || want == 0) return 0;
-    spin_lock(&g_file_payer_lock);
+    if (!v || !v->payer_record || !faulter || want == 0) return 0;
+    spin_lock(&g_payer_lock);
     u32 owed; bool pexempt, capfree;
     struct AddrSpace *payer = mint_payer_locked(v, faulter, exempt, &owed, &pexempt, &capfree);
     u32 n = 0;
@@ -836,64 +836,64 @@ u32 burrow_file_mint_charge(struct Burrow *v, struct AddrSpace *faulter, bool ex
         if (capfree) break;                             // only a wrapping counter refuses it
     }
     if (n) {
-        if (payer != v->file_payer) file_paid_link_locked(v, payer, pexempt);
-        v->file_charge_pages += n;
+        if (payer != v->payer) paid_link_locked(v, payer, pexempt);
+        v->payer_charge_pages += n;
     }
-    spin_unlock(&g_file_payer_lock);
+    spin_unlock(&g_payer_lock);
     return n;
 }
 
-void burrow_file_mint_refund(struct Burrow *v, u32 pages) {
+void burrow_mint_refund(struct Burrow *v, u32 pages) {
     if (!v || pages == 0) return;
-    spin_lock(&g_file_payer_lock);
-    if (!v->file_private || pages > v->file_charge_pages) {
-        spin_unlock(&g_file_payer_lock);
-        extinction("burrow_file_mint_refund of pages the record does not hold");
+    spin_lock(&g_payer_lock);
+    if (!v->payer_record || pages > v->payer_charge_pages) {
+        spin_unlock(&g_payer_lock);
+        extinction("burrow_mint_refund of pages the record does not hold");
     }
-    v->file_charge_pages -= pages;
-    if (v->file_payer) addrspace_uncharge_pages(v->file_payer, pages);
-    spin_unlock(&g_file_payer_lock);
+    v->payer_charge_pages -= pages;
+    if (v->payer) addrspace_uncharge_pages(v->payer, pages);
+    spin_unlock(&g_payer_lock);
 }
 
-bool burrow_file_payer_is(struct Burrow *v, const struct AddrSpace *as) {
-    if (!v || !as || !v->file_private) return false;
-    spin_lock(&g_file_payer_lock);
-    bool is = (v->file_payer == as);
-    spin_unlock(&g_file_payer_lock);
+bool burrow_payer_is(struct Burrow *v, const struct AddrSpace *as) {
+    if (!v || !as || !v->payer_record) return false;
+    spin_lock(&g_payer_lock);
+    bool is = (v->payer == as);
+    spin_unlock(&g_payer_lock);
     return is;
 }
 
-void burrow_file_payers_lapse(struct AddrSpace *as) {
+void burrow_payers_lapse(struct AddrSpace *as) {
     if (!as) return;
-    spin_lock(&g_file_payer_lock);
-    while (as->file_paid)
-        file_paid_unlink_locked(as->file_paid);   // the record keeps its count
-    spin_unlock(&g_file_payer_lock);
+    spin_lock(&g_payer_lock);
+    while (as->paid_burrows)
+        paid_unlink_locked(as->paid_burrows);   // the record keeps its count
+    spin_unlock(&g_payer_lock);
 }
 
 // The FILE free arm's half: {h:0,m:0}, so no mint is in flight (a faulter
 // holds a handle pin across its fill).
-static void burrow_file_payer_release(struct Burrow *v) {
-    spin_lock(&g_file_payer_lock);
-    if (v->file_payer) {
-        addrspace_uncharge_pages(v->file_payer, v->file_charge_pages);
-        file_paid_unlink_locked(v);
+static void burrow_payer_release(struct Burrow *v) {
+    spin_lock(&g_payer_lock);
+    if (v->payer) {
+        addrspace_uncharge_pages(v->payer, v->payer_charge_pages);
+        paid_unlink_locked(v);
     }
-    v->file_charge_pages = 0;
-    spin_unlock(&g_file_payer_lock);
+    v->payer_charge_pages = 0;
+    spin_unlock(&g_payer_lock);
 }
 
 #ifdef KERNEL_TESTS
-u32 burrow_file_charge_pages_for_test(struct Burrow *v) {
-    spin_lock(&g_file_payer_lock);
-    u32 n = v ? v->file_charge_pages : 0;
-    spin_unlock(&g_file_payer_lock);
+u32 burrow_payer_charge_pages_for_test(struct Burrow *v) {
+    spin_lock(&g_payer_lock);
+    u32 n = v ? v->payer_charge_pages : 0;
+    spin_unlock(&g_payer_lock);
     return n;
 }
-struct AddrSpace *burrow_file_payer_for_test(struct Burrow *v) {
-    spin_lock(&g_file_payer_lock);
-    struct AddrSpace *as = v ? v->file_payer : NULL;
-    spin_unlock(&g_file_payer_lock);
+struct AddrSpace *burrow_payer_for_test(struct Burrow *v) {
+    spin_lock(&g_payer_lock);
+    struct AddrSpace *as = v ? v->payer : NULL;
+    spin_unlock(&g_payer_lock);
     return as;
 }
 #endif
@@ -981,8 +981,8 @@ static void burrow_free_internal(struct Burrow *v) {
             extinction("burrow_free_internal(FILE) with spoor already NULL (double-free)");
         // Vote 118: a private image's record is refunded whole, to whoever
         // pays it now -- the last mapping to go may be any holder's.
-        if (v->file_private)
-            burrow_file_payer_release(v);
+        if (v->payer_record)
+            burrow_payer_release(v);
         if (pagemap_live(&v->pm))
             pagemap_destroy(&v->pm, file_put_page, NULL);
         spoor_clunk(v->spoor);
@@ -1339,7 +1339,7 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
     if (!vma_args_ok(vaddr, vaddr + length, prot, v, /*offset=*/0)) return -1;
     struct Vma *vma = vma_alloc(vaddr, vaddr + length, prot, v, /*offset=*/0);
     if (!vma) return -(int)T_E_NOMEM;
-    vma_file_payer_mark_fresh(as, vma);
+    vma_payer_mark_fresh(as, vma);
 
     // vma_insert refuses an overlap (-1) or the VMA cap (-T_E_NOMEM: a resource
     // refusal the caller may report as one, B-1a' audit F18). Either way the

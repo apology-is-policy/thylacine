@@ -288,10 +288,10 @@ ORed in at each departure and never cleared; the I-39 image join weighs them,
 [[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4)
 / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
-`file_paid` (vote 118: the private FILE Burrows whose payer record names this
-space, under `g_file_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
+`paid_burrows` (vote 118: the private FILE Burrows whose payer record names this
+space, under `g_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
 The struct is 96 bytes. `addrspace_destroy` calls
-`burrow_file_payers_lapse` after `vma_drain_in`: the private images only this
+`burrow_payers_lapse` after `vma_drain_in`: the private images only this
 space held were freed by the drain (refunding a count that dies with the
 space), and every record left -- an image surviving in a fork's child --
 lapses before a kernel pin could let the descriptor outlive its owners.
@@ -627,7 +627,7 @@ declaration and lifecycle, the release/destroy pair with it, and the actual
 and the device resets are host doubles, and its VMA list is real nodes the walk
 can follow. The drain double has the kernel's external linkage, so a mutant
 that removes destroy's only drain still compiles and meets its assertion; so
-does the double for `burrow_file_payers_lapse`, which refuses a lapse after
+does the double for `burrow_payers_lapse`, which refuses a lapse after
 the last lifetime drop (it compares the space against the last pointer the
 `kfree` double freed, and so refuses before it would read freed memory); the
 cases count one lapse to each destroy and, after their own drain checks, see

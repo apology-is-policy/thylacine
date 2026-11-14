@@ -311,8 +311,8 @@ void test_image_bypass_takes_a_payer(void) {
     struct Burrow *x = as ? image_lookup_or_create(mk_spoor(0x3F000, 1), 0, PAGE_SIZE,
                                                    /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN,
                                                    as, false) : NULL;
-    bool priv  = x && x->file_private;
-    bool payer = x && burrow_file_payer_for_test(x) == as;
+    bool priv  = x && x->payer_record;
+    bool payer = x && burrow_payer_for_test(x) == as;
     bool unregistered = true;
     for (int i = 0; i < n; i++) if (held[i] == x) unregistered = false;
     if (x) burrow_unref(x);              // the bypass's only ref: it frees here
