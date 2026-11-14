@@ -52,7 +52,7 @@ mv /tmp/report.txt /mnt/mac/folders/work/report.txt
 mv /mnt/mac/folders/work/drafts /tmp/drafts
 ```
 
-`/tmp/report.txt` and `drafts` are illustrative names. Such a move is not a single step: a program on the Mac can see the new file before the original is gone. If the copy fails, `mv` removes what it copied and leaves the original whole. If the original cannot be removed, both remain, and `mv` says so and fails.
+`/tmp/report.txt` and `drafts` are illustrative names. Such a move is not a single step: a program on the Mac can see the new file before the original is gone. If the copy fails, `mv` removes what it copied and leaves the original whole. If the original cannot be removed, both remain, and `mv` says so and fails. A symbolic link cannot be moved across a boundary, because Thylacine's own programs cannot create one yet: moving a link, or a directory that holds one, fails with `creating a link is not supported`, and the original is left whole.
 
 Only regular files and directories can be opened. A Mac device, socket or named pipe in a shared folder is listed, but opening it fails with `permission denied`. A Mac file that the Mac user cannot read cannot be read from the guest either.
 
