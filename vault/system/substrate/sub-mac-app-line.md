@@ -101,7 +101,10 @@ user, and nothing else.
 - **The record** (`--line-log`): one line per event, in tools/mac-app-fake.py's words
   (`hello maxframe=N`, `chan N attach n_uname=U uname='' aname=''`,
   `chan N snarf set N bytes '...'`, `close chan N` and so on). `ls-mac-line` reads the app's
-  record as it reads the fake's.
+  record as it reads the fake's. Each walk is one line naming the node it began at, its names
+  and its outcome: `chan N walk 'folders/work/d' ['secret.txt'] -> errno 40`, `-> 1 of 1`, or
+  `walk no fid [] -> errno 9`. `ls-mac-folders` reads it to show a walk from a held directory
+  began there.
 - **Running it.**
   `thylacine-mac --mac-line <socket> [--share <name>=<path>[:ro]]... [--line-log <path>] [--snarf-memory <text>] [--line-once]`.
   - With `--attach`, the line runs beside the window, on its own thread. Without it, the line
@@ -188,7 +191,7 @@ No ARCHITECTURE 28 invariant applies: this code runs on the Mac. Its rules are M
 
 ## Prosecution
 
-Host tests (`cargo test interop` in macrunner/app), 29 of them:
+Host tests (`cargo test interop` in macrunner/app), 30 of them:
 - errno translation, the share argument, the record's quoting, and the lock table;
 - the folder calls against real directories: a link inside or outside the share is a link and is
   never passed through, a share root that is a link is followed once, entries come without `.`
@@ -200,6 +203,8 @@ Host tests (`cargo test interop` in macrunner/app), 29 of them:
   - a rename, and the fids that follow it;
   - a read-only share's EROFS;
   - a link served and not walked;
+  - a walk from a directory the Mac replaced with a link: ELOOP, and the record of where each
+    walk began;
   - chown and mknod refused;
   - EOPNOTSUPP for Txattrwalk and Twalkgetattr;
   - readdir cookies;
@@ -219,11 +224,13 @@ all five legs, with the app in the fake's place: the app's first guest run.
 checks each change in the Mac's folder. The app's O_NOFOLLOW_ANY is reached by a walk from a
 fid the kernel holds below a directory the Mac replaced with a link, which `mac-line-probe
 beneath` makes with an O_PATH handle; a cwd is a name, re-walked from the root, and the kernel
-meets the link itself. Against a scripted guest that runs each command as the kernel does (9P
-against the real app, one name per walk, open before create, a served link resolved beneath the
-mount, the cwd a name; aux-gate `scendry-folders`): the clean app is green, all seven legs, and twelve faults are red, each at its own leg: seven of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-5.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (run 9,
-2026-11-14, 54bb63f6d) legs 1 to 4 were green with the app; leg 5 as it then stood assumed a cwd
-holds a fid, and was red. The corrected leg is NOT YET RUN IN A GUEST, and none of it is
+meets the link itself; the app's record names where each walk began. Against a scripted guest
+that runs each command as the kernel does (9P against the real app, one name per walk, open
+before create, a served link resolved beneath the mount, the cwd a name, the probe released by
+`go`; aux-gate `scendry-folders`): the clean app is green, all seven legs, and thirteen faults are red, each at its own leg and with its own words: eight of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- and a probe that walks before the swap, not released by `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-6.out, SCENDRY-FOLDERS DONE bad=0, with the walk-first `nowait` red twice and the clean app green again in resid/scendry-folders-7.out. In a guest under HVF (runs 9 and 10, 2026-11-14)
+legs 1 to 4 were green with the app. Leg 5 has not been green in a guest: run 9's assumed a cwd
+holds a fid, and in run 10 the held handle read ENOENT, with a release that could not show it
+came after the swap. Leg 5 as it now stands is NOT YET RUN IN A GUEST, and none of it is
 audited (round R5).
 
 ## Seams

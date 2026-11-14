@@ -112,7 +112,8 @@ measured.
 `macline` 13 host tests, `virtio-serial`'s pure half 22; 47 mutants of the three modules each
 turn a test red (aux-gate resid/r6-mut.py, `R6-MUT DONE bad=0`). `tools/mac-app-fake.py`, the
 app's end written from 4.4 rather than from `macline`, passes a scripted driver end (aux-gate
-resid/r6-fake-check.py, 45 checks). The guest build checks. `ls-mac-line` covers five legs:
+resid/r6-fake-check.py, 45 checks). Its record names each walk's start, names and outcome in
+the app's words. The guest build checks. `ls-mac-line` covers five legs:
 - the line up;
 - the session's own mount, attached at login as the user `id` names;
 - a program's walk of the tree, with ownership checked against `id`;
@@ -133,13 +134,15 @@ link the Mac puts in place of a directory the guest is using, the read-only shar
 ownership and modes. The swapped directory is met two ways. The cwd is a name (LS-4), so a read
 beside it walks from the root again, meets the link, and the kernel resolves it beneath
 `/mnt/mac` (ENOENT). `mac-line-probe beneath <dir> <name>` holds the directory as an O_PATH
-handle (walked, never opened) until a line on its stdin, then opens the name through it: that
-walk starts at the app's old directory, and the app refuses it (ELOOP). Against a scripted guest
+handle (walked, never opened) until the line `go` on its stdin, and says it was released before
+it opens the name through the handle: that walk starts at the app's old directory, the app
+refuses it (ELOOP), and the app's record names the directory the walk began at. Against a scripted guest
 that runs each command as the kernel does (9P against the real app, one name per walk, open
 before create, a served link resolved beneath the mount, the cwd a name; aux-gate
-`scendry-folders`): the clean app is green, all seven legs, and twelve faults are red, each at its own leg: seven of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-5.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (run 9, 2026-11-14, 54bb63f6d) legs 1 to 4
-were green with the app; leg 5 as it then stood assumed a cwd holds a fid, and was red. The
-corrected leg is NOT YET RUN IN A GUEST.
+`scendry-folders`): the clean app is green, all seven legs, and thirteen faults are red, each at its own leg and with its own words: eight of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- and a probe that walks before the swap, not released by `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-6.out, SCENDRY-FOLDERS DONE bad=0, with the walk-first `nowait` red twice and the clean app green again in resid/scendry-folders-7.out. In a guest under HVF (runs 9 and 10, 2026-11-14) legs 1 to 4 were green with
+the app, cp among them in run 10. Leg 5 has not been green in a guest: run 9's assumed a cwd
+holds a fid, and in run 10 the held handle read ENOENT, with a release that could not show it
+came after the swap. Leg 5 as it now stands is NOT YET RUN IN A GUEST.
 
 ## Seams
 

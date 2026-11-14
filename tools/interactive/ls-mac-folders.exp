@@ -15,11 +15,12 @@
 #      nothing. Without the remote declaration both flip.
 #   5. A link the Mac puts in place of a directory the guest is using: the guest stands in a
 #      shared directory, and mac-line-probe holds it as a path handle, while the Mac swaps it
-#      for a link to a folder outside the share. The handle walks from its fid, so the app's
-#      own O_NOFOLLOW_ANY refuses the next step (ELOOP). The cwd is a name (LS-4): a read beside
-#      it walks from the root again, meets the link, and the kernel resolves that beneath
-#      /mnt/mac, where the Mac's path names nothing (ENOENT). The outside file's words reach
-#      the guest by neither.
+#      for a link to a folder outside the share. Only a `go` sent after the swap releases the
+#      probe, and it says so before its walk. The handle walks from its fid, so the app's own
+#      O_NOFOLLOW_ANY refuses the next step (ELOOP), and the app's record shows that walk began
+#      at the held directory. The cwd is a name (LS-4): a read beside it walks from the root
+#      again, meets the link, and the kernel resolves that beneath /mnt/mac, where the Mac's
+#      path names nothing (ENOENT). The outside file's words reach the guest by neither.
 #   6. The read-only share reads, and refuses a create, a write over a file and a remove with
 #      EROFS (errno 30); the Mac's folder is unchanged.
 #   7. Every file is the session user's (the uid `id` names), with the host file's owner bits:
@@ -96,6 +97,11 @@ proc app_wait {re secs phase} {
         after 200
     }
     lc_fail "the app's log had no \[$re\] within ${secs}s ($phase); its log: [app_log]"
+}
+# The app's record of each walk naming `name`: where it began, its names and its outcome.
+proc app_walks {name} {
+    set got [regexp -all -inline -line -- "walk \[^\n\]*'[string map {. \\.} $name]'\[^\n\]*" [app_log]]
+    return [expr {[llength $got] ? [join $got "; "] : "none"}]
 }
 # A fact about the Mac's folder. Each is read after the guest printed the status of the command
 # that changed it, and the guest's command returns only once the app has answered.
@@ -205,8 +211,9 @@ lc_pass "ls-mac-folders: the Mac's links resolve beneath /mnt/mac -- the share's
 # ---- 5. a link the Mac puts in place of a directory the guest is using.
 lc_send "cd /mnt/mac/folders/work/d"
 read_ok inside.txt "INSIDE THE DIRECTORY THE MAC SWAPS" "a read beside the cwd, before the swap"
-# The probe waits for a line on its stdin between taking the handle and the walk from it. The
-# echoed command line holds no `mac-line-probe:`; only the probe's own lines do.
+# The probe holds the handle until the line `go` and says when it is released, so its walk follows
+# the swap only if that line does. The echoed command line holds no `mac-line-probe:`; only the
+# probe's own lines do.
 lc_send "mac-line-probe beneath /mnt/mac/folders/work/d secret.txt"
 lc_within $lc_cmd_timeout {
     -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
@@ -220,7 +227,17 @@ lc_step "the probe holds work/d as a path handle"
 file rename $::W/d $::W/d-before
 exec ln -s $::O $::W/d
 lc_step "on the Mac: work/d is now a link to $::O"
-lc_send ""
+lc_send "go"
+lc_within $lc_cmd_timeout {
+    -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
+    -re {EXTINCTION:}                                { lc_extinction_fail "kernel extinction at the probe's release" }
+    timeout                                          { lc_fail "the probe said nothing once sent go, after the swap" }
+    eof                                              { lc_fail "unexpected EOF at the probe's release" }
+}
+if {![string match "released by go*" $said]} {
+    lc_fail "the probe was not released by the go sent after the swap: it said '$said'"
+}
+lc_step "the probe was $said, sent after the swap"
 lc_within $lc_cmd_timeout {
     -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
     -re {EXTINCTION:}                                { lc_extinction_fail "kernel extinction at the walk from the held handle" }
@@ -231,9 +248,10 @@ if {[string match "secret.txt read *" $said]} {
     lc_fail "the guest read the outside file through the held handle: $said"
 }
 if {$said ne "secret.txt refused: too many levels of symbolic links"} {
-    lc_fail "the walk from the handle held across the swap gave '$said', not the app's ELOOP"
+    lc_fail "the walk from the handle held across the swap gave '$said', not the app's ELOOP; the app's walks naming secret.txt: [app_walks secret.txt]"
 }
 lc_step "refused: too many levels of symbolic links (a walk from the handle held across the swap)"
+app_wait {walk 'folders/work/d' \['secret\.txt'\] -> errno 40} 5 "the app refused the walk that began at the held directory"
 set why [read_refused secret.txt "SECRET OUTSIDE THE SHARE" "a read beside the cwd, after the swap"]
 if {$why ne "no such file or namespace entry"} {
     lc_fail "the read beside the cwd after the swap failed with '$why', not as a name /mnt/mac lacks"

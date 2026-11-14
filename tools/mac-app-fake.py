@@ -128,6 +128,32 @@ class Session:
             out += struct.pack("<IBH", 7 + len(body), rtype, tag) + body
         return out
 
+    def walk(self, fid, newfid, names):
+        """The qids of a walk from `fid`; newfid made when every name walked."""
+        f = self.fid(fid)
+        if f["mode"] is not None:
+            raise OSError(EBADF, "walk of an open fid")
+        if newfid != fid and newfid in self.fids:
+            raise OSError(EEXIST, "newfid")
+        node, qids = f["node"], []
+        for name in names:
+            kids = NODES[node][2]
+            if name == b"..":
+                nxt = ROOT
+            elif kids is None:
+                nxt = None
+            else:
+                nxt = kids.get(name)
+            if nxt is None:
+                break
+            node = nxt
+            qids.append(qid(node))
+        if names and not qids:
+            raise OSError(ENOENT, "walk")
+        if len(qids) == len(names):
+            self.fids[newfid] = {"node": node, "mode": None}
+        return qids
+
     def fid(self, n):
         f = self.fids.get(n)
         if f is None:
@@ -155,28 +181,15 @@ class Session:
         if t == 110:  # Twalk fid newfid nwname wname*
             fid, newfid, n = r.u32(), r.u32(), r.u16()
             names = [r.s() for _ in range(n)]
-            f = self.fid(fid)
-            if f["mode"] is not None:
-                raise OSError(EBADF, "walk of an open fid")
-            if newfid != fid and newfid in self.fids:
-                raise OSError(EEXIST, "newfid")
-            node, qids = f["node"], []
-            for name in names:
-                kids = NODES[node][2]
-                if name == b"..":
-                    nxt = ROOT
-                elif kids is None:
-                    nxt = None
-                else:
-                    nxt = kids.get(name)
-                if nxt is None:
-                    break
-                node = nxt
-                qids.append(qid(node))
-            if names and not qids:
-                raise OSError(ENOENT, "walk")
-            if len(qids) == len(names):
-                self.fids[newfid] = {"node": node, "mode": None}
+            start = self.fids.get(fid)
+            words = (self.chan, "no fid" if start is None else repr(self.name(start["node"])),
+                     repr([x.decode("latin-1") for x in names]))
+            try:
+                qids = self.walk(fid, newfid, names)
+            except OSError as e:
+                self.log("chan %d walk %s %s -> errno %d" % (words + (e.errno,)))
+                raise
+            self.log("chan %d walk %s %s -> %d of %d" % (words + (len(qids), len(names))))
             return 111, struct.pack("<H", len(qids)) + b"".join(qids)
         if t == 12:  # Tlopen fid flags
             fid, flags = r.u32(), r.u32()

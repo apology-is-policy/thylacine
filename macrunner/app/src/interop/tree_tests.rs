@@ -492,6 +492,43 @@ fn a_link_is_served_as_a_link_and_never_walked_through() {
 }
 
 #[test]
+fn a_walk_from_a_directory_the_mac_replaced_with_a_link_is_refused_and_recorded() {
+    let logs = Dir::new("swap-log");
+    let d = Dir::new("swap");
+    let outside = Dir::new("swap-outside");
+    fs::create_dir(d.0.join("d")).unwrap();
+    fs::write(outside.0.join("secret"), b"outside").unwrap();
+    let mut c = Client::new(vec![share("l", &d, false)], "", &logs);
+    c.walk(2, "folders/l/d").ok(P9_RWALK);
+    fs::rename(d.0.join("d"), d.0.join("d-before")).unwrap();
+    symlink(&outside.0, d.0.join("d")).unwrap();
+    let r = c.call(P9_TWALK, B::default().u32(2).u32(3).u16(1).s(b"secret"));
+    assert_eq!(
+        r.errno(),
+        Some(E_LOOP),
+        "the held fid's walk meets the link"
+    );
+    let log = c.logged();
+    assert!(
+        log.contains("chan 7 walk '/' ['folders', 'l', 'd'] -> 3 of 3"),
+        "{log}"
+    );
+    assert!(
+        log.contains("chan 7 walk 'folders/l/d' ['secret'] -> errno 40"),
+        "{log}"
+    );
+    c.walk(4, "folders/l/d-before").ok(P9_RWALK);
+    c.call(P9_TWALK, B::default().u32(4).u32(5).u16(1).s(b"none"));
+    c.call(P9_TWALK, B::default().u32(99).u32(6).u16(0));
+    let log = c.logged();
+    assert!(
+        log.contains("chan 7 walk 'folders/l/d-before' ['none'] -> errno 2"),
+        "{log}"
+    );
+    assert!(log.contains("chan 7 walk no fid [] -> errno 9"), "{log}");
+}
+
+#[test]
 fn ownership_never_changes_and_a_device_is_never_made() {
     let logs = Dir::new("own-log");
     let d = Dir::new("own");

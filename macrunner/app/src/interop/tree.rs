@@ -60,10 +60,13 @@ pub struct Shared {
     started: (u64, u64),
 }
 
+/// A share's folder, opened, and the device it is on.
+type OpenRoot = Arc<(Root, u64)>;
+
 struct ShareRoot {
     share: Share,
     // Opened at the first walk into the share that finds the folder, then kept.
-    root: Mutex<Option<Arc<(Root, u64)>>>,
+    root: Mutex<Option<OpenRoot>>,
 }
 
 impl Shared {
@@ -103,7 +106,7 @@ impl Shared {
     }
 
     /// The share's root, opened now if it was not; the folder's errno if it cannot be.
-    fn root(&self, share: usize) -> Result<Arc<(Root, u64)>, u32> {
+    fn root(&self, share: usize) -> Result<OpenRoot, u32> {
         let s = &self.shares[share];
         let mut held = s.root.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = held.as_ref() {
@@ -506,16 +509,38 @@ impl Session {
     // Walk, open, read, write, clunk.
 
     fn walk(&mut self, tag: u16, a: TwalkArgs<'_>) -> Result<usize, u32> {
-        let f = self.fid(a.fid)?;
+        let names = &a.names[..a.nwname as usize];
+        let from = self.fids.get(&a.fid).map(|f| self.node_name(&f.node));
+        let walked = self.walk_from(a.fid, a.newfid, names);
+        // Where each walk began: one from a fid held below a directory the Mac replaced reads
+        // apart from one that came down from the root again.
+        self.log(&format!(
+            "walk {} [{}] -> {}",
+            from.as_deref().map_or_else(|| String::from("no fid"), repr),
+            names
+                .iter()
+                .map(|n| repr(&latin1(n)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            match &walked {
+                Ok(qids) => format!("{} of {}", qids.len(), names.len()),
+                Err(e) => format!("errno {e}"),
+            }
+        ));
+        build_rwalk(&mut self.reply, tag, &walked?).map_err(|_| E_IO)
+    }
+
+    fn walk_from(&mut self, fid: u32, newfid: u32, names: &[&[u8]]) -> Result<Vec<Qid>, u32> {
+        let f = self.fid(fid)?;
         if !matches!(f.open, Open::No) {
             return Err(E_BADF);
         }
-        if a.newfid != a.fid && self.fids.contains_key(&a.newfid) {
+        if newfid != fid && self.fids.contains_key(&newfid) {
             return Err(E_EXIST);
         }
         let (mut node, uid) = (f.node.clone(), f.uid);
-        let mut qids = Vec::with_capacity(a.nwname as usize);
-        for name in &a.names[..a.nwname as usize] {
+        let mut qids = Vec::with_capacity(names.len());
+        for name in names {
             match self.step(&node, name) {
                 Ok((n, q)) => {
                     node = n;
@@ -526,9 +551,9 @@ impl Session {
                 Err(_) => break,
             }
         }
-        if qids.len() == a.nwname as usize {
+        if qids.len() == names.len() {
             self.fids.insert(
-                a.newfid,
+                newfid,
                 Fid {
                     node,
                     uid,
@@ -536,7 +561,24 @@ impl Session {
                 },
             );
         }
-        build_rwalk(&mut self.reply, tag, &qids).map_err(|_| E_IO)
+        Ok(qids)
+    }
+
+    /// The node's path in the tree, as the record names it.
+    fn node_name(&self, node: &Node) -> String {
+        match node {
+            Node::Root => String::from("/"),
+            Node::Snarf => String::from("snarf"),
+            Node::Folders => String::from("folders"),
+            Node::Host { share, rel } => {
+                let mut s = format!("folders/{}", self.shared.shares[*share].share.name);
+                for c in rel {
+                    s.push('/');
+                    s.push_str(&latin1(c));
+                }
+                s
+            }
+        }
     }
 
     fn lopen(&mut self, tag: u16, a: TlopenArgs) -> Result<usize, u32> {
@@ -956,11 +998,7 @@ impl Session {
     // Creating, renaming, removing.
 
     /// The directory a create or a name operation acts in: its share, root and path, writable.
-    fn writable_dir(
-        &self,
-        fid: u32,
-        name: &[u8],
-    ) -> Result<(usize, Arc<(Root, u64)>, Rel, OwnedFd), u32> {
+    fn writable_dir(&self, fid: u32, name: &[u8]) -> Result<(usize, OpenRoot, Rel, OwnedFd), u32> {
         let (share, rel) = match &self.fid(fid)?.node {
             Node::Host { share, rel } => (*share, rel.clone()),
             Node::Snarf => return Err(E_NOTDIR),

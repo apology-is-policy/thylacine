@@ -7,11 +7,11 @@
 //   mac-line-probe hold <n>      connect, then read snarf once a second for n seconds; a read
 //                                after the Mac app went away is an error, and is said
 //   mac-line-probe beneath <dir> <name>
-//                                hold <dir> as a path handle, wait for a line on stdin, then
-//                                open <name> through the handle and read it. The walk starts at
-//                                the held directory's fid, so if the Mac put a link in <dir>'s
-//                                place meanwhile, the app's own refusal answers (ELOOP); a cwd
-//                                is a name, re-walked from the root, and never reaches it
+//                                hold <dir> as a path handle until the line `go` on stdin, say
+//                                so, then open <name> through the handle and read it. The walk
+//                                starts at the held directory's fid, so if the Mac put a link in
+//                                <dir>'s place meanwhile, the app's own refusal answers (ELOOP);
+//                                a cwd is a name, re-walked from the root, and never reaches it
 //
 // Every result is one `mac-line-probe:` line on stdout; the status is 0 only when each step went
 // as the tree says.
@@ -30,7 +30,7 @@ use core::time::Duration;
 
 use libthyla_rs::io::Write;
 use libthyla_rs::{
-    t_close, t_fstat, t_open, t_read, t_readdir, t_write, T_OPATH, T_OREAD, T_ORDWR, T_OTRUNC,
+    t_close, t_fstat, t_open, t_read, t_readdir, t_write, T_OPATH, T_ORDWR, T_OREAD, T_OTRUNC,
     T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -111,7 +111,11 @@ fn once(text: &[u8]) -> bool {
     };
     let mut good = true;
     match read_snarf(root) {
-        Ok(b) => say(&alloc::format!("snarf read {} bytes: {}", b.len(), String::from_utf8_lossy(&b))),
+        Ok(b) => say(&alloc::format!(
+            "snarf read {} bytes: {}",
+            b.len(),
+            String::from_utf8_lossy(&b)
+        )),
         Err(e) => {
             say(&alloc::format!("snarf read failed: {}", e));
             good = false;
@@ -120,7 +124,12 @@ fn once(text: &[u8]) -> bool {
     let fd = open_at(root, b"snarf", T_OREAD);
     match if fd < 0 { Err(why(fd)) } else { stat(fd) } {
         Ok((uid, gid, mode, _)) => {
-            say(&alloc::format!("snarf owner uid={} gid={} mode={:o}", uid, gid, mode));
+            say(&alloc::format!(
+                "snarf owner uid={} gid={} mode={:o}",
+                uid,
+                gid,
+                mode
+            ));
             if mode & S_IFMT != S_IFREG || mode & 0o777 != 0o600 {
                 say("snarf's mode is not a regular file 0600");
                 good = false;
@@ -150,26 +159,45 @@ fn once(text: &[u8]) -> bool {
         let mut buf = [0u8; 1024];
         let n = unsafe { t_readdir(fd, buf.as_mut_ptr(), buf.len()) };
         let dir = matches!(stat(fd), Ok((_, _, _, q)) if q & QTDIR != 0);
-        say(&alloc::format!("folders is {} and lists {} bytes", if dir { "a directory" } else { "NOT a directory" }, n));
+        say(&alloc::format!(
+            "folders is {} and lists {} bytes",
+            if dir {
+                "a directory"
+            } else {
+                "NOT a directory"
+            },
+            n
+        ));
         good &= dir && n == 0;
         unsafe { t_close(fd) };
     }
     let fd = open_at(root, b"snarf", T_OWRITE | T_OTRUNC);
     if fd < 0 {
-        say(&alloc::format!("snarf open for writing failed: {}", why(fd)));
+        say(&alloc::format!(
+            "snarf open for writing failed: {}",
+            why(fd)
+        ));
         good = false;
     } else {
         let n = unsafe { t_write(fd, text.as_ptr(), text.len()) };
         let c = unsafe { t_close(fd) };
         if n != text.len() as i64 || c < 0 {
-            say(&alloc::format!("snarf write gave {} and its close {}", n, c));
+            say(&alloc::format!(
+                "snarf write gave {} and its close {}",
+                n,
+                c
+            ));
             good = false;
         } else {
             say(&alloc::format!("snarf set {} bytes", n));
         }
     }
     unsafe { t_close(root) };
-    say(if good { "once: every step as the tree says" } else { "once: NOT as the tree says" });
+    say(if good {
+        "once: every step as the tree says"
+    } else {
+        "once: NOT as the tree says"
+    });
     good
 }
 
@@ -203,17 +231,51 @@ fn beneath(dir: &[u8], name: &[u8]) -> bool {
     // A navigation handle: walked, never opened, so the server still walks from its fid.
     let h = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, dir.as_ptr(), dir.len(), T_OPATH) };
     if h < 0 {
-        say(&alloc::format!("beneath: {} did not open: {}", dir_s, why(h)));
+        say(&alloc::format!(
+            "beneath: {} did not open: {}",
+            dir_s,
+            why(h)
+        ));
         return false;
     }
     say(&alloc::format!("beneath: holding {}", dir_s));
+    // Only the line `go` releases the handle, and the release is said before the walk: a blank
+    // line, a stray byte or a closed stdin cannot start the walk unseen.
+    let (mut line, mut blank, mut other) = (Vec::new(), 0u32, 0u32);
     let mut b = [0u8; 1];
     loop {
         let n = unsafe { t_read(0, b.as_mut_ptr(), 1) };
-        if n <= 0 || b[0] == b'\n' || b[0] == b'\r' {
+        if n <= 0 {
+            let how = if n == 0 {
+                String::from("end of file")
+            } else {
+                why(n)
+            };
+            say(&alloc::format!("beneath: stdin ended before go: {}", how));
+            unsafe { t_close(h) };
+            return false;
+        }
+        if b[0] != b'\n' && b[0] != b'\r' {
+            if line.len() < 64 {
+                line.push(b[0]);
+            }
+            continue;
+        }
+        if line == b"go" {
             break;
         }
+        if line.is_empty() {
+            blank += 1;
+        } else {
+            other += 1;
+        }
+        line.clear();
     }
+    say(&alloc::format!(
+        "beneath: released by go, after {} blank line(s) and {} other(s)",
+        blank,
+        other
+    ));
     let fd = open_at(h, name, T_OREAD);
     unsafe { t_close(h) };
     if fd < 0 {
@@ -222,8 +284,17 @@ fn beneath(dir: &[u8], name: &[u8]) -> bool {
             == Err(libthyla_rs::err::Error::SymlinkLoop);
     }
     match read_all(fd) {
-        Ok(got) => say(&alloc::format!("beneath: {} read {} bytes: {}", name_s, got.len(), String::from_utf8_lossy(&got))),
-        Err(e) => say(&alloc::format!("beneath: {} opened, and its read failed: {}", name_s, e)),
+        Ok(got) => say(&alloc::format!(
+            "beneath: {} read {} bytes: {}",
+            name_s,
+            got.len(),
+            String::from_utf8_lossy(&got)
+        )),
+        Err(e) => say(&alloc::format!(
+            "beneath: {} opened, and its read failed: {}",
+            name_s,
+            e
+        )),
     }
     unsafe { t_close(fd) };
     false
@@ -235,7 +306,11 @@ pub extern "C" fn rs_main() -> i64 {
     let ok = match args.get(1).copied() {
         Some(b"once") => once(args.get(2).copied().unwrap_or(b"")),
         Some(b"hold") => {
-            let n = args.get(2).and_then(|a| core::str::from_utf8(a).ok()).and_then(|s| s.parse().ok()).unwrap_or(5);
+            let n = args
+                .get(2)
+                .and_then(|a| core::str::from_utf8(a).ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5);
             hold(n)
         }
         Some(b"beneath") if args.len() == 4 => beneath(args[2], args[3]),

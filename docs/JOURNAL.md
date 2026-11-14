@@ -72,7 +72,8 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   - links contained beneath `/mnt/mac`;
   - a link the Mac swaps in for a directory the guest is using: beside the cwd, which is a name,
     the kernel resolves it beneath `/mnt/mac` (ENOENT); from a handle `mac-line-probe beneath`
-    held across the swap, the app refuses the walk (ELOOP);
+    held across the swap and released by `go`, the app refuses the walk (ELOOP), and its record
+    shows the walk began at the held directory;
   - the read-only share's EROFS for a create, a write over a file and a remove;
   - ownership and modes.
   Leg 5 is there because the kernel walks one name at a time and resolves a link it is served
@@ -155,6 +156,35 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   EACCES); and `mv` between a share and the guest's own files fails with `invalid argument`
   (OPEN-BUGS 2026-10-15 00:17Z). Leg 3 now copies a guest file in with `cp`, the manual's way
   across that edge.
+- **Run 10's leg 5 could not say which of two causes it saw** (guest run 10). The held handle's
+  walk read ENOENT, not ELOOP. Two causes give those words: the probe walked before the swap
+  (`d` still a directory, with no `secret.txt` in it), or the kernel walked the handle's path
+  again by name after the swap and resolved the link beneath `/mnt/mac`. The probe's wait ended
+  on any CR or LF byte, or on a stdin that ended or failed, and the scenario released it with an
+  empty line. In the log, `holding` and `refused` are adjacent, and neither carries a time. The
+  scripted guest gives run 10's words under either model (`nowait`, the walk finished before the swap, against the 89a206385 scenario, twice in resid/scendry-folders-7.out; `handlename` in
+  resid/scendry-folders-5.out), so only a second axis could tell them apart. A first `nowait`
+  let the walk race the swap, and the old scenario went green against it: the walk reached the
+  app after the Mac's rename (resid/scendry-6-old-nowait.txt). So with a probe that does not
+  wait, leg 5's verdict was the race's, either way. `nowait` now finishes its walk before the
+  probe says `holding`. Two instruments give the second axis, each shown both ways:
+  - the probe holds the handle until the line `go`. Before its walk it says `released by go,
+    after N blank line(s) and M other(s)`, or `stdin ended before go: <why>` and exits 1. The
+    scenario sends `go` after the swap and wants the release line before the result;
+  - the app's record gains one line per walk: where it began, its names and its outcome
+    (`walk 'folders/work/d' ['secret.txt'] -> errno 40`). tools/mac-app-fake.py writes the same
+    words. The scenario wants that line after the ELOOP, and a wrong result's FAIL line carries
+    every walk of `secret.txt` the app saw. A host test holds the record, and with the record
+    naming the new fid in place of the walk's start it turns red (aux-gate resid/sab-walklog.py).
+- **scendry-folders took a red at the right leg as the right red.** Its runner checked only the
+  PASS count, so two faults red at leg 5 for different reasons could stand in for each other.
+  Each red now names words its FAIL line must hold.
+- **A clippy finding since I-c** (9f5bfa182): `writable_dir`'s return type (type_complexity).
+  Nothing ran clippy over the app when it landed. The share's opened root is now the type
+  `OpenRoot`, and the app is clippy- and rustfmt-clean. mac-line-probe had not been
+  rustfmt-clean since 7584af216 (12 hunks); it is formatted, and clippy finds nothing in it. The
+  libraries it builds on carry clippy warnings (libthyla-rs 133, ninep 73, loom-client 18), under
+  OPEN-BUGS' 2026-11-11 lint entry; ninep's are swept with round R5's I-c work.
 
 ### Evidence
 
@@ -234,6 +264,14 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   above (`refused: no such file or namespace entry (a read beside the cwd, after the swap)`), so
   the controls did not run.
 - **The scripted guest, made faithful to the cwd**: the clean app is green, all seven legs, and twelve faults are red, each at its own leg: seven of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-5.out, SCENDRY-FOLDERS DONE bad=0.
+- **Guest run 10** (15:14-15:21Z, 89a206385, resid/live10-run10.out, mac released). `ls-mac-line`
+  green, all five legs. `ls-mac-folders` legs 1 to 4 green again, leg 3's cp among them
+  (`copied.txt` on the Mac held the guest file's line). Leg 5's held handle read `secret.txt
+  refused: no such file or namespace entry`, the wrong turn above. Nothing outside the share was
+  read, and the controls did not run.
+- **The app's interop tests**: 30 of 30 with the walk record's test; the full suite 105 of 105.
+  The fake app passes its 45 checks (resid/r6-fake-check-gowait.out). The guest build checks.
+- **The scripted guest with the go release and the walk record**: the clean app is green, all seven legs, and thirteen faults are red, each at its own leg and with its own words: eight of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- and a probe that walks before the swap, not released by `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-6.out, SCENDRY-FOLDERS DONE bad=0, with the walk-first `nowait` red twice and the clean app green again in resid/scendry-folders-7.out.
 
 ### Decided by the operator
 
@@ -246,15 +284,18 @@ session's mount attached as the user and read through, a program's walk with own
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
 tools/mac-app-fake.py, not the app. In run 8 a guest spoke to the app itself: `ls-mac-line` was
-green, all five legs, with the app in the fake's place. In run 9 a guest ran `ls-mac-folders`
-legs 1 to 4 green against the app, the remote post's leg among them; leg 5's premise failed
-there. The corrected leg 5, leg 3's cp, legs 6 and 7, and every control are shown against the
-scripted guest only. None of it is audited (round R5).
+green, all five legs, with the app in the fake's place. In runs 9 and 10 a guest ran
+`ls-mac-folders` legs 1 to 4 green against the app, the remote post's leg among them, and in
+run 10 leg 3's cp. Leg 5 has not been green in a guest: run 9's premise failed, and run 10's
+result could not say which way. Leg 5 as it now stands, legs 6 and 7, and every control are
+shown against the scripted guest only. None of it is audited (round R5).
 
 ### Open
 
-- Guest run 10: `ls-mac-folders` green with the held-handle leg and cp, then the five app mutants
-  (resid/mutbin) and the `noremote` control bake, each red at its leg (resid-live10.sh).
+- Guest run 11: `ls-mac-folders` green with the go release and the walk record, then the five
+  app mutants (resid/mutbin) and the `noremote` control bake, each red at its leg
+  (resid-live10.sh). If the held handle still reads ENOENT after a release that followed the
+  swap, the app's record says where the kernel's walk began, and that is the next hunt.
 - libthyla-rs names no EROFS: a refused write reads `kernel error (errno 30)`, and `$errstr`
   `Other(30)`. Names for 30, 27, 18 and 36 wait on an operator vote (the EISDIR precedent:
   named with signoff, docs/ERRORS.md), asked together with EXDEV for a cross-device rename and
