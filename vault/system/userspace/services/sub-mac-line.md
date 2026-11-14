@@ -36,6 +36,12 @@ from one source.
   the first four ports, and takes the first port the device names `org.thylacine.mac`. With no
   such port it posts nothing and says so. It writes READY once the ports have named themselves
   (or 2 s passed) and, when the app is on the line, once the app's HELLO came (or 2 s more).
+- **The post.** `/srv/mac` is posted declared remote (`T_WALK_CREATE_DMSRVREMOTE`, HAUL-DESIGN
+  4.8), since the line's transport leaves the guest. Every attach over it is then remote, so a
+  link the Mac's folders hold is a served link, and the kernel resolves it beneath the session's
+  mount (DISTRO 4.6). Posted without the mark (until 2026-11-14), such a link resolved from the
+  guest's root: `notes -> /home/michael/.profile` in a shared folder would have steered a guest
+  program into the guest's own file. The mark grants nothing.
 - **A guest connection** taken while the line is up gets a channel (OPEN); its bytes go as DATA
   no larger than either end allows; its hang-up sends CLOSE. A connection opened while no app is
   on the line, or past 32 connections, is hung up at once, so the opener's attach fails (EIO)
@@ -120,12 +126,19 @@ builds turned it red at its own leg: a driver that sends no HELLO at leg 1, one 
 app-departure hangs no connection up at leg 4, and a newns that does not mount at leg 2. The
 Mac's end there is the fake app. Not yet audited (round R5).
 
+`ls-mac-folders` runs the shared folders through the guest's kernel against the app itself,
+checking every change on the Mac: the shares listed and read, a write, mkdir, mv, rm and rmdir,
+links contained beneath `/mnt/mac` (the remote post above), a link swapped in under the guest's
+cwd refused by the app, the read-only share's EROFS, ownership and modes. Against a scripted guest that runs each command as the kernel does (9P against the real app, one name per walk, open before create, a served link resolved beneath the mount; aux-gate `scendry-folders`, resid/scendry-folders-1.out), the clean app is green, all seven legs, and ten faults are red, each at its own leg: five of the guest (no `docs` listed, no write, no rename, links resolved from the guest's root, a cwd re-walked by name) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest -- the host uid reported, group bits kept). NOT YET RUN
+IN A GUEST.
+
 ## Seams
 
 - **newns** ([[sub-newns]], vote M13): login starts each session's program through it; it opens
   `/srv/mac` as the user, mounts `/mnt/mac` and execs the program in place. login routes `mac` as
   a resident name and makes the mount point ([[sub-stratum-session]]).
-- The app's end (`macrunner/app`): the mac1 line and its 9P server. Not yet built.
+- The app's end ([[sub-mac-app-line]]): the mac1 line and its 9P server, `macline` built as
+  `End::App`.
 
 ## Caveats
 

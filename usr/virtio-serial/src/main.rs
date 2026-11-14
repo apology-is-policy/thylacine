@@ -47,7 +47,7 @@ use libthyla_rs::time::monotonic_ns;
 use libthyla_rs::{
     t_burrow_attach, t_close, t_open, t_pipe, t_poll, t_read, t_set_nonblock, t_srv_accept, t_walk_create,
     t_write, thread, virtio_rmb, TPollFd, T_OPATH, T_OREAD, T_POLLERR, T_POLLHUP, T_POLLIN, T_POLLOUT,
-    T_WALK_OPEN_FROM_ROOT,
+    T_WALK_CREATE_DMSRVREMOTE, T_WALK_OPEN_FROM_ROOT,
 };
 
 use virtio_serial::console::{self, Act, Console, Control};
@@ -797,7 +797,10 @@ impl LineDriver {
             say!("virtio-serial: /srv did not open");
             return;
         }
-        let l = unsafe { t_walk_create(srv, b"mac".as_ptr(), 3, T_OREAD, 0) };
+        // The Mac's folders are another machine's, and their links are the Mac's to write: declared
+        // remote, every link they hold resolves beneath the session's mount (DISTRO 4.6), never from
+        // the guest's root.
+        let l = unsafe { t_walk_create(srv, b"mac".as_ptr(), 3, T_OREAD, T_WALK_CREATE_DMSRVREMOTE) };
         let _ = unsafe { t_close(srv) };
         if l < 0 {
             say!("virtio-serial: /srv/mac post failed ({})", l);

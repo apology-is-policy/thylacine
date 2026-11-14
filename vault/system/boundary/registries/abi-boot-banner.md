@@ -50,6 +50,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-chained.exp (EXTINCTION: only -- two takeover waits in series, ended by the bound from the chord)"
   - "tools/interactive/ls-graphical-sak-blank.exp (EXTINCTION: only -- a restore that gives the compositor's frame up, told to the compositor)"
   - "tools/interactive/ls-mac-line.exp (EXTINCTION: only -- the line to the Mac, /srv/mac, against a fake app)"
+  - "tools/interactive/ls-mac-folders.exp (EXTINCTION: only -- the shared folders through the guest's kernel, against the Mac app)"
   - "tools/interactive/ls-graphical-sak-soak.exp (EXTINCTION: only -- the seat's return, cycled)"
   - "tools/interactive/git-shell.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"

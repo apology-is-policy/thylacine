@@ -1,0 +1,272 @@
+#!/usr/bin/expect -f
+# ls-mac-folders -- the shared folders of the line to the Mac (docs/MAC-RUNNER.md 4.4), through the
+# guest's kernel, against the Mac app itself: THYLACINE_MAC_APP, else macrunner/app's debug build.
+# Without one this SKIPs (exit 77): an absent app is neither a regression nor coverage. The app
+# shares two host folders this scenario makes, `work` read-write and `docs` read-only, and every
+# change the guest makes is checked ON THE MAC, in the folder itself:
+#
+#   1. folders/ lists both shares, and files one and two levels down read as the Mac wrote them.
+#   2. A file the guest writes holds the guest's bytes on the Mac.
+#   3. mkdir, mv, rm and rmdir each change the Mac's folder as they say.
+#   4. A link in a shared folder is a served link (DISTRO 4.6; the driver posts /srv/mac remote):
+#      a relative one resolves beside it, and an absolute one beneath /mnt/mac -- one naming
+#      /folders/work/... reads the share's file, and one naming the guest's own /tmp decoy reads
+#      nothing. Without the remote declaration both flip.
+#   5. The app follows no host link: the guest stands in a shared directory, the Mac swaps that
+#      directory for a link to a folder outside the share, and a read beside the guest's cwd is
+#      refused with ELOOP. The outside file's words never reach the guest. (The kernel walks one
+#      name at a time and resolves a link it is served itself, so only a link that appears under
+#      a walked fid reaches the app's own O_NOFOLLOW_ANY.)
+#   6. The read-only share reads, and refuses a create, a write over a file and a remove with
+#      EROFS (errno 30); the Mac's folder is unchanged.
+#   7. Every file is the session user's (the uid `id` names), with the host file's owner bits:
+#      0600 for a 0644 file, 0400 in the read-only share.
+#
+# Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
+# it, and the guest's output is upper-cased, so the echoed command line can never match it.
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set app [expr {[info exists ::env(THYLACINE_MAC_APP)] && $::env(THYLACINE_MAC_APP) ne "" \
+    ? $::env(THYLACINE_MAC_APP) : [file join $::lc_repo macrunner app target debug thylacine-mac]}]
+if {![file executable $app]} {
+    puts "LS-CI SKIP: no Mac app at $app -- build it (cargo build in macrunner/app) or set THYLACINE_MAC_APP"
+    exit 77
+}
+
+# The Mac's folders.
+set ::work [exec mktemp -d -t thyla-mac-folders]
+set ::W $::work/work
+set ::R $::work/docs
+set ::O $::work/outside
+file mkdir $::W/sub $::W/d $::R $::O
+proc write_file {path text} {
+    set fh [open $path w]
+    puts -nonewline $fh $text
+    close $fh
+    file attributes $path -permissions 00644
+}
+proc read_file {path} {
+    if {[catch {set fh [open $path r]}]} { return "<unreadable>" }
+    set s [read $fh]
+    close $fh
+    return $s
+}
+write_file $::W/hello.txt        "hello from a mac folder\n"
+write_file $::W/sub/inner.txt    "inner file two deep\n"
+write_file $::W/sub/linked.txt   "reached by a relative link\n"
+write_file $::W/sub/anchored.txt "reached by an absolute link beneath the mount\n"
+write_file $::W/d/inside.txt     "inside the directory the mac swaps\n"
+write_file $::O/secret.txt       "secret outside the share\n"
+write_file $::R/readme.txt       "read only words\n"
+# `file link` insists the target exist, and these targets are the guest's to resolve.
+exec ln -s sub/linked.txt                 $::W/rel
+exec ln -s /folders/work/sub/anchored.txt $::W/inshare
+exec ln -s /tmp/mac-decoy-a               $::W/abs
+
+set ::mac_sock [file join $::lc_repo build "mac-folders-[pid].sock"]
+set ::mac_log [file join $::lc_repo build "mac-folders-[pid].log"]
+catch {file delete -force $::mac_sock $::mac_log}
+set ::env(THYLACINE_MAC_LINE) $::mac_sock
+set ::app_pid [exec $app --mac-line $::mac_sock --line-log $::mac_log --snarf-memory "folders" \
+    --share work=$::W --share docs=$::R:ro >>& $::mac_log.err &]
+lc_step "thylacine-mac started (pid $::app_pid): work=$::W, docs=$::R read-only"
+exit -onexit {
+    catch {exec kill $::app_pid}
+    catch {file delete -force $::mac_sock}
+    catch {file delete -force $::work}
+}
+
+proc app_log {} {
+    if {[catch {set f [open $::mac_log r]}]} { return "" }
+    set s [read $f]
+    close $f
+    return $s
+}
+proc app_wait {re secs phase} {
+    for {set i 0} {$i < $secs * 5} {incr i} {
+        if {[regexp -line -- $re [app_log] m]} {
+            lc_step "the app logged: $m ($phase)"
+            return $m
+        }
+        after 200
+    }
+    lc_fail "the app's log had no \[$re\] within ${secs}s ($phase); its log: [app_log]"
+}
+# A fact about the Mac's folder. Each is read after the guest printed the status of the command
+# that changed it, and the guest's command returns only once the app has answered.
+proc on_mac {ok what} {
+    if {!$ok} { lc_fail "on the Mac: NOT $what" }
+    lc_step "on the Mac: $what"
+}
+
+# `cat path`, upper-cased; the file's words, or a failure naming the tool's error.
+proc read_ok {path want phase} {
+    lc_send "cat $path | tr a-z A-Z"
+    lc_within $::lc_cmd_timeout {
+        -ex $want                                   { lc_step "saw: $phase" }
+        -re {(cat|tr|ut): ([^\r\n]*)[\r\n]}         { lc_fail "[string trimright $expect_out(0,string)] ($phase)" }
+        -re {EXTINCTION:}                           { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout                                     { lc_fail "timeout waiting for \[$want\] ($phase)" }
+        eof                                         { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+# `cat path` that must fail: the error's text, or a failure if `never` (upper-cased words the read
+# must not reach) shows instead.
+proc read_refused {path never phase} {
+    lc_send "cat $path | tr a-z A-Z"
+    lc_within $::lc_cmd_timeout {
+        -ex $never                                  { lc_fail "the guest read \[$never\] through $path ($phase)" }
+        -re {cat: ([^\r\n]*): ([^\r\n]*)[\r\n]}     { set why $expect_out(2,string) }
+        -re {EXTINCTION:}                           { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout                                     { lc_fail "cat $path printed neither an error nor \[$never\] ($phase)" }
+        eof                                         { lc_fail "unexpected EOF during '$phase'" }
+    }
+    lc_step "refused: $why ($phase)"
+    return $why
+}
+# Run `cmd`, then echo its status and $errstr under `tag`; {status errstr}, or a failure on any
+# tool's error line. $errstr means something only when the status is not 0.
+proc run_status {cmd tag phase} {
+    lc_send "$cmd; echo $tag status \$status err \$errstr end | tr a-z A-Z"
+    set re "[string toupper $tag] STATUS (\[0-9\]+) ERR(\[^\r\n\]*) END\[\r\n\]"
+    lc_within $::lc_cmd_timeout {
+        -re $re                                              { set st $expect_out(1,string); set err [string trim $expect_out(2,string)] }
+        -re {(cat|ls|mkdir|mv|rm|rmdir|tr|ut): ([^\r\n]*)[\r\n]} { lc_fail "[string trimright $expect_out(0,string)] ($phase)" }
+        -re {EXTINCTION:}                                    { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout                                              { lc_fail "timeout waiting for \[$tag\]'s status ($phase)" }
+        eof                                                  { lc_fail "unexpected EOF during '$phase'" }
+    }
+    return [list $st $err]
+}
+proc run_ok {cmd tag phase} {
+    lassign [run_status $cmd $tag $phase] st err
+    if {$st != 0} { lc_fail "status $st, \$errstr '$err' ($phase)" }
+    lc_step "status 0: $phase"
+}
+
+lc_boot
+app_wait {hello maxframe=16384} 30 "the driver's HELLO reached the app before the login"
+lc_login michael correct-horse-battery-staple-v1
+lc_send "echo guest side a > /tmp/mac-decoy-a"
+# lc_send consumes nothing, so the login's own `ut: ...` lines are still unread, and the tool-error
+# arms below would take the first of them. Read past them to a marker first.
+lc_send "echo folders-setup-done | tr a-z A-Z"
+lc_expect "FOLDERS-SETUP-DONE" "the guest's decoy, and past the login's lines"
+
+# ---- 1. the shares, and reads one and two levels down.
+lc_send "ls /mnt/mac/folders | tr a-z A-Z"
+lc_within $lc_cmd_timeout {
+    -re {DOCS[\r\n]+WORK[\r\n]}             { lc_step "folders/ lists docs and work" }
+    -re {(ls|tr|ut): ([^\r\n]*)[\r\n]}      { lc_fail "[string trimright $expect_out(0,string)] (ls /mnt/mac/folders)" }
+    -re {EXTINCTION:}                       { lc_extinction_fail "kernel extinction at ls /mnt/mac/folders" }
+    timeout                                 { lc_fail "ls /mnt/mac/folders did not list DOCS then WORK" }
+    eof                                     { lc_fail "unexpected EOF at ls /mnt/mac/folders" }
+}
+read_ok /mnt/mac/folders/work/hello.txt "HELLO FROM A MAC FOLDER" "a file in a share"
+read_ok /mnt/mac/folders/work/sub/inner.txt "INNER FILE TWO DEEP" "a file two levels down"
+lc_pass "ls-mac-folders: folders/ lists both shares, and the Mac's files read one and two levels down"
+
+# ---- 2. a write lands on the Mac.
+run_ok "echo written by the guest > /mnt/mac/folders/work/new.txt" leg2 "the guest writes new.txt"
+on_mac [expr {[read_file $::W/new.txt] eq "written by the guest\n"}] "work/new.txt holds the guest's line"
+lc_pass "ls-mac-folders: a file the guest wrote holds its bytes on the Mac"
+
+# ---- 3. mkdir, mv, rm, rmdir.
+run_ok "mkdir /mnt/mac/folders/work/made" leg3a "mkdir"
+on_mac [file isdirectory $::W/made] "work/made is a directory"
+run_ok "mv /mnt/mac/folders/work/new.txt /mnt/mac/folders/work/made/moved.txt" leg3b "mv"
+on_mac [expr {![file exists $::W/new.txt]}] "work/new.txt is gone"
+on_mac [expr {[read_file $::W/made/moved.txt] eq "written by the guest\n"}] "work/made/moved.txt holds the guest's line"
+run_ok "rm /mnt/mac/folders/work/made/moved.txt" leg3c "rm"
+on_mac [expr {![file exists $::W/made/moved.txt]}] "work/made/moved.txt is gone"
+run_ok "rmdir /mnt/mac/folders/work/made" leg3d "rmdir"
+on_mac [expr {![file exists $::W/made]}] "work/made is gone"
+lc_pass "ls-mac-folders: mkdir, mv, rm and rmdir each changed the Mac's folder as they say"
+
+# ---- 4. served links, contained beneath /mnt/mac.
+read_ok /mnt/mac/folders/work/rel "REACHED BY A RELATIVE LINK" "a relative link resolves beside itself"
+read_ok /mnt/mac/folders/work/inshare "REACHED BY AN ABSOLUTE LINK BENEATH THE MOUNT" \
+    "an absolute link naming /folders/work/... resolves beneath /mnt/mac"
+set why [read_refused /mnt/mac/folders/work/abs "GUEST SIDE A" "an absolute link naming the guest's /tmp decoy"]
+if {$why ne "no such file or namespace entry"} {
+    lc_fail "the link to /tmp/mac-decoy-a failed with '$why', not as a name /mnt/mac lacks"
+}
+lc_pass "ls-mac-folders: the Mac's links resolve beneath /mnt/mac -- the share's file, never the guest's"
+
+# ---- 5. the app follows no host link, even one swapped in under the guest.
+lc_send "cd /mnt/mac/folders/work/d"
+read_ok inside.txt "INSIDE THE DIRECTORY THE MAC SWAPS" "a read beside the cwd, before the swap"
+file rename $::W/d $::W/d-before
+exec ln -s $::O $::W/d
+lc_step "on the Mac: work/d is now a link to $::O"
+set why [read_refused secret.txt "SECRET OUTSIDE THE SHARE" "a read beside the cwd, after the swap"]
+if {$why ne "too many levels of symbolic links"} {
+    lc_fail "the read through the swapped-in link failed with '$why', not the app's ELOOP"
+}
+lc_send "cd"
+lc_pass "ls-mac-folders: a link swapped in under the guest's cwd is refused (ELOOP); nothing outside the share was read"
+
+# ---- 6. the read-only share.
+read_ok /mnt/mac/folders/docs/readme.txt "READ ONLY WORDS" "the read-only share reads"
+lassign [run_status "echo should not land > /mnt/mac/folders/docs/new.txt" leg6a "a create in the read-only share"] st err
+if {$st == 0 || ![string match "*OTHER(30)*" $err]} {
+    lc_fail "a create in the read-only share gave status $st, \$errstr '$err' -- not EROFS (errno 30)"
+}
+lc_step "the create was refused: $err"
+on_mac [expr {![file exists $::R/new.txt]}] "docs/new.txt was never made"
+# An existing file: the kernel opens it O_WRONLY|O_TRUNC rather than creating it, so this is the
+# open's check, and a miss would truncate the Mac's file.
+lassign [run_status "echo should not land > /mnt/mac/folders/docs/readme.txt" leg6b "a write over a read-only file"] st err
+if {$st == 0 || ![string match "*OTHER(30)*" $err]} {
+    lc_fail "a write over a read-only file gave status $st, \$errstr '$err' -- not EROFS (errno 30)"
+}
+lc_step "the write was refused: $err"
+on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is unchanged"
+lc_send "rm /mnt/mac/folders/docs/readme.txt"
+lc_within $lc_cmd_timeout {
+    -re {rm: ([^\r\n]*): ([^\r\n]*)[\r\n]}  { set why $expect_out(2,string) }
+    -re {EXTINCTION:}                       { lc_extinction_fail "kernel extinction at rm in the read-only share" }
+    timeout                                 { lc_fail "rm in the read-only share printed no error" }
+    eof                                     { lc_fail "unexpected EOF at rm in the read-only share" }
+}
+if {$why ne "kernel error (errno 30)"} {
+    lc_fail "rm in the read-only share failed with '$why', not EROFS (errno 30)"
+}
+lc_step "the remove was refused: $why"
+on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is still there, unchanged"
+lc_pass "ls-mac-folders: the read-only share reads and refuses a create, a write over a file and a remove with EROFS"
+
+# ---- 7. ownership and modes.
+lc_send "id"
+lc_within $lc_cmd_timeout {
+    -re {uid=([0-9]+) gid=}  { set me $expect_out(1,string) }
+    -re {EXTINCTION:}        { lc_extinction_fail "kernel extinction at id" }
+    timeout                  { lc_fail "id printed no uid" }
+    eof                      { lc_fail "unexpected EOF at id" }
+}
+lc_step "michael is principal $me"
+foreach {path mode} {/mnt/mac/folders/work/hello.txt 0600 /mnt/mac/folders/docs/readme.txt 0400} {
+    lc_send "stat $path"
+    lc_within $lc_cmd_timeout {
+        -re {Mode:(?:\x1b\[[0-9;]*m)? \(([0-7]{4})/} { set got $expect_out(1,string) }
+        -re {stat: ([^\r\n]*)[\r\n]}                  { lc_fail "stat $path failed: $expect_out(1,string)" }
+        -re {EXTINCTION:}                             { lc_extinction_fail "kernel extinction at stat $path" }
+        timeout                                       { lc_fail "stat $path printed no Mode" }
+        eof                                           { lc_fail "unexpected EOF at stat $path" }
+    }
+    lc_within $lc_cmd_timeout {
+        -re {Uid:(?:\x1b\[[0-9;]*m)? *([0-9]+|system)[ \t\r\n]} { set uid $expect_out(1,string) }
+        -re {EXTINCTION:}                                       { lc_extinction_fail "kernel extinction at stat $path" }
+        timeout                                                 { lc_fail "stat $path printed no Uid" }
+        eof                                                     { lc_fail "unexpected EOF at stat $path" }
+    }
+    if {$got ne $mode || $uid ne $me} {
+        lc_fail "$path is mode $got, owner $uid; wanted $mode, owned by michael ($me)"
+    }
+    lc_step "$path: mode $got, owned by $uid"
+}
+lc_pass "ls-mac-folders: every file is michael's ($me), with the host file's owner bits (0600; 0400 read-only)"
+
+lc_quit

@@ -916,6 +916,9 @@ for later trees. A file added later is not a format break; a name or format chan
   - The app never follows a host symbolic link while it resolves a walk or an open. A link is
     served as a link (readlink), and every open stays beneath the folder's root (macOS
     `O_NOFOLLOW_ANY` on each step).
+  - The guest's driver posts `/srv/mac` declared remote (HAUL-DESIGN 4.8: the line's transport
+    leaves the guest), so a link a folder holds is a served link. The guest's kernel resolves it
+    beneath the session's mount, never from the guest's root (DISTRO 4.6).
   - The app does the I/O as the Mac user. A host file that user cannot reach answers EACCES.
 - **Errors** are the Linux errno values 9P2000.L carries in Rlerror. The app translates macOS's
   numbering, which differs (ENOTEMPTY is 66 on macOS and 39 on Linux).

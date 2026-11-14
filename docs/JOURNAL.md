@@ -60,6 +60,22 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   leaves the arbitration to the server (kernel/dev9p.c's lock path), so a stub would have lied.
   `usr/lib/ninep` gained the rest of what the kernel's client sends. `ls-mac-line` takes
   `THYLACINE_MAC_APP` to run the app in the fake's place.
+- **`/srv/mac` posted remote, and `ls-mac-folders`.** The driver's post carries
+  DMSRVREMOTE. HAUL-DESIGN 4.8 defines the declaration as "the session's transport leaves the
+  machine", and DISTRO 4.6 (voted 2026-10-05) contains only a remote session's links, so this
+  applies voted rules rather than making a new one. MAC-RUNNER 4.4 now says so in one bullet.
+  `ls-mac-folders` runs the shared folders through the guest's kernel against the app itself,
+  in seven legs, checking each change in the Mac's folder:
+  - the shares listed, and files one and two levels down read;
+  - a write;
+  - mkdir, mv, rm and rmdir;
+  - links contained beneath `/mnt/mac`;
+  - a link the Mac swaps in under the guest's cwd, refused by the app with ELOOP;
+  - the read-only share's EROFS for a create, a write over a file and a remove;
+  - ownership and modes.
+  Leg 5 is there because the kernel walks one name at a time and resolves a link it is served
+  itself, so the app's O_NOFOLLOW_ANY is reached only by a link that appears under a walked fid.
+  Without an app binary it skips (exit 77), as haul-links does without its server.
 
 ### Wrong turns, and what caught each
 
@@ -97,6 +113,13 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   `pointer::place`. Nothing routine runs the app's `cargo test` (tools/test-rust.sh covers the
   usr workspace only), so it failed unseen for a day. The pin now reads `pointer.rs` and the
   call in main.rs; a changed `place` turns it red. 104 of 104 pass.
+- **`/srv/mac` was posted without the remote mark**, from 7584af216 (the driver) until now.
+  Found while writing the link legs: haul-links' header says a served link is contained only
+  over a session declared remote, and the driver's post passed 0. Not run in a guest. Logged in
+  OPEN-BUGS 2026-11-14T11:00Z before the fix. `ls-mac-folders` leg 4 is the witness: links
+  resolved from the guest's root turn it red in the scripted guest. A guest run is owed.
+- **sub-mac-line's Seams still said the app's end was "Not yet built"** after I-c landed. Found
+  writing this docs pass; it now names [[sub-mac-app-line]].
 
 ### Evidence
 
@@ -151,6 +174,19 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   The no-argument list was taken by running the script's enumeration alone: 143 crates,
   the app last. A full run of every crate was not taken: the disk was at 97%, and it
   would have built every usr crate's tests into a new target directory.
+- **`ls-mac-folders` against a scripted guest** (aux-gate `scendry-folders`: fake-folders.py
+  runs each command as the kernel does, as 9P against the REAL app, one name per walk, open
+  before create, a served link resolved beneath the mount, the typed line echoed;
+  resid/scendry-folders-1.out, `SCENDRY-FOLDERS DONE bad=0`). The clean app is green, all seven
+  legs, and ten faults are red, each at its own leg:
+  - lsdocs at 1, nowrite at 2, nomv at 3;
+  - uncontained at 4: the link inside the mount reads ENOENT;
+  - rootwalk at 5: a cwd re-walked by name reads ENOENT, not ELOOP;
+  - the app's rules, built into its binary by resid/mutbin.py, six binaries with distinct
+    hashes: ro-create at 6, ro-open-write at 6, owner-not-attacher at 7, group-bits-kept at 7,
+    and nofollow-dropped at 5, where the outside file's words reached the guest.
+  `check-expect-forms.py` reads the new file (a planted `expect -timeout` block was found at
+  its line; the restored file is clean). The driver's guest build checks.
 
 ### Decided by the operator
 
@@ -164,14 +200,18 @@ against `id`, the app going away under a held connection and the session's mount
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
 tools/mac-app-fake.py, not the app. The app's line and server (I-c) are shown on the host only:
 against real directories, and against the scripted guest with the fake's verdicts. No guest has
-spoken to the app, and no test has driven the shared folders through the guest's kernel. None of
-it is audited (round R5).
+spoken to the app. `ls-mac-folders` and the remote post are shown against the scripted guest
+only: whether the kernel walks a relative read from the cwd's fid (leg 5's premise) is a guest
+run's to show, and the `rootwalk` fault shows the leg would then read red, not green. None of it
+is audited (round R5).
 
 ### Open
 
-- A guest run with the app in the fake's place (`THYLACINE_MAC_APP`), and a scenario of the
-  shared folders through the guest's kernel: walk, read, write, create, rename, remove, a link
-  read as a link, a read-only share's EROFS.
+- Guest run 8: `ls-mac-line` with the app in the fake's place, `ls-mac-folders`, and the five app
+  mutants (resid/mutbin) each red at its leg.
+- libthyla-rs names no EROFS: a refused write reads `kernel error (errno 30)`, and `$errstr`
+  `Other(30)`. Display names for 30, 27, 18 and 36, and every exhaustive match on `Error`,
+  are owed with the manual's `/mnt/mac` section.
 - I-d: the power key and Quit; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor
