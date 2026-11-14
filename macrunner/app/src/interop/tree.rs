@@ -970,6 +970,23 @@ impl Session {
     }
 
     fn fsync(&mut self, tag: u16, fid: u32) -> Result<usize, u32> {
+        let synced = self.fsync_fid(fid);
+        // What was made durable, in order with the walks: a move syncs its copy and the
+        // destination's directory before its source goes.
+        let name = self.fids.get(&fid).map(|f| self.node_name(&f.node));
+        self.log(&format!(
+            "fsync {} -> {}",
+            name.as_deref().map_or_else(|| String::from("no fid"), repr),
+            match &synced {
+                Ok(()) => String::from("ok"),
+                Err(e) => format!("errno {e}"),
+            }
+        ));
+        synced?;
+        build_rfsync(&mut self.reply, tag).map_err(|_| E_IO)
+    }
+
+    fn fsync_fid(&self, fid: u32) -> Result<(), u32> {
         match &self.fid(fid)?.open {
             Open::No => return Err(E_BADF),
             Open::File { fd, .. } | Open::Dir { fd: Some(fd), .. } => {
@@ -977,7 +994,7 @@ impl Session {
             }
             _ => {}
         }
-        build_rfsync(&mut self.reply, tag).map_err(|_| E_IO)
+        Ok(())
     }
 
     fn readlink(&mut self, tag: u16, fid: u32) -> Result<usize, u32> {

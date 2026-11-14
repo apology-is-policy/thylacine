@@ -223,6 +223,31 @@ fn the_root_lists_folders_and_snarf_and_everything_is_the_attachers() {
 }
 
 #[test]
+fn a_sync_reaches_an_open_file_and_directory_and_is_recorded() {
+    let d = Dir::new("fsync");
+    fs::create_dir(d.0.join("sub")).unwrap();
+    fs::write(d.0.join("sub/f.txt"), b"synced\n").unwrap();
+    let logs = Dir::new("fsync-log");
+    let mut c = Client::new(vec![share("work", &d, false)], "", &logs);
+    let sync = |c: &mut Client, fid: u32| c.call(P9_TFSYNC, B::default().u32(fid).u32(0));
+    c.walk(2, "folders/work/sub/f.txt").ok(P9_RWALK);
+    assert_eq!(sync(&mut c, 2).errno(), Some(E_BADF), "an unopened fid");
+    c.open(2, 0).ok(P9_RLOPEN);
+    sync(&mut c, 2).ok(P9_RFSYNC);
+    c.walk(3, "folders/work/sub").ok(P9_RWALK);
+    c.open(3, 0).ok(P9_RLOPEN);
+    sync(&mut c, 3).ok(P9_RFSYNC);
+    let log = c.logged();
+    for line in [
+        "fsync 'folders/work/sub/f.txt' -> errno 9",
+        "fsync 'folders/work/sub/f.txt' -> ok",
+        "fsync 'folders/work/sub' -> ok",
+    ] {
+        assert!(log.contains(line), "no [{line}] in {log}");
+    }
+}
+
+#[test]
 fn one_host_file_has_one_qid_whichever_share_reaches_it() {
     let d = Dir::new("qid-outer");
     fs::create_dir(d.0.join("sub")).unwrap();
