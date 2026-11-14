@@ -5015,10 +5015,11 @@ static s64 sys_open_create_handler(u64 start_fd_raw, u64 path_va,
 // SYS_FSYNC — durability barrier (FS-mutation foundation; IDENTITY-DESIGN.md
 // §9.2). Either right, as POSIX fsync works on a descriptor opened only for
 // reading -- a directory's included, which is how a rename becomes durable
-// (vote M22); neither -> -T_E_BADF. A navigation (T_OPATH) handle is born R|W
-// with no check on its target and opens nothing at the server, so it answers
-// -T_E_BADF, as Linux's O_PATH does (#81: it is no I/O channel). A Dev with a
-// NULL .fsync slot -> -T_E_OPNOTSUPP.
+// (vote M22); neither -> -T_E_BADF. A navigation (T_OPATH) handle syncs too,
+// where Linux's O_PATH answers EBADF (vote M22a): corvus's rename-swap barrier
+// syncs its directories through one, and a sync moves no bytes across the
+// handle, the only thing #81's CWALKONLY gate refuses it. A Dev with a NULL
+// .fsync slot -> -T_E_OPNOTSUPP.
 // =============================================================================
 
 VISIBLE_IF_KERNEL_TESTS
@@ -5030,7 +5031,6 @@ s64 sys_fsync_for_proc(struct Proc *p, hidx_t h, u64 datasync_raw) {
     // missing/underqualified handle; OPNOTSUPP for a Dev with no .fsync slot.
     struct Spoor *c = sys_lookup_spoor_any(p, h, RIGHT_READ | RIGHT_WRITE);
     if (!c)                                          return -T_E_BADF;
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -T_E_BADF; }
     if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
     // Normalize datasync to 0/1 (any non-zero is "data only").
@@ -15900,7 +15900,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // full fsync into data-only, a silent wrong answer. The native core
         // takes either right (vote M22), so fsync on an O_RDONLY fd -- git
         // fsyncs directory fds when core.fsync is enabled -- works as on
-        // Linux, and an O_PATH fd answers EBADF as on Linux.
+        // Linux. An O_PATH fd syncs too, where Linux answers EBADF (vote
+        // M22a: corvus syncs its directories through navigation handles).
         // fsync/fdatasync(unsigned int fd).
         return sys_fsync_handler((u64)(u32)args[0],
                                  (linux_nr == VIV_LINUX_FDATASYNC) ? 1 : 0);

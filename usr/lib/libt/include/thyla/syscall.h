@@ -2101,7 +2101,7 @@ static inline long t_walk_create(long parent_fd, const char *name,
 }
 
 // t_fsync — durability barrier on `fd` (KOBJ_SPOOR, RIGHT_READ or RIGHT_WRITE;
-// a navigation handle answers EBADF). datasync 0 =
+// a navigation handle syncs too). datasync 0 =
 // full (data + metadata), non-zero = data only. Returns 0 / -1. FS-mutation
 // foundation (IDENTITY-DESIGN.md section 9.2).
 __attribute__((always_inline))

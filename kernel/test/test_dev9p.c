@@ -7017,9 +7017,10 @@ void test_dev9p_cached_open_loose_fsync(void) {
 }
 
 // SYS_FSYNC's gate (vote M22): either right reaches the Dev, as POSIX fsync
-// works on a descriptor opened only for reading; a handle with neither, and a
-// navigation (CWALKONLY) handle whatever its rights, answer EBADF with nothing
-// sent. Each refusal sits one variable from a leg that reaches the server.
+// works on a descriptor opened only for reading; a handle with neither answers
+// EBADF with nothing sent, one variable from a leg that reaches the server. A
+// navigation (CWALKONLY) handle syncs (vote M22a): corvus's rename-swap barrier
+// syncs its directories through one.
 void test_dev9p_fsync_rights(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
@@ -7045,13 +7046,11 @@ void test_dev9p_fsync_rights(void) {
     TEST_EXPECT_EQ((u64)g_tfsync_seen, 2ull, "and nothing sent");
     root->flag |= CWALKONLY;
     s64 nav = sys_fsync_for_proc(p, fd[3], 0);
-    u32 nav_seen = g_tfsync_seen;
+    u32 nav_seen = g_tfsync_seen, nav_fid = g_tfsync_fid;
     root->flag &= ~CWALKONLY;
-    TEST_EXPECT_EQ(nav, -(s64)T_E_BADF, "a navigation handle, born R|W: EBADF");
-    TEST_EXPECT_EQ((u64)nav_seen, 2ull, "and nothing sent");
-    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[3], 0), 0ll,
-                   "the same handle, not a navigation one, syncs");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 3ull, "with a third");
+    TEST_EXPECT_EQ(nav, 0ll, "a navigation handle, born R|W, syncs");
+    TEST_EXPECT_EQ((u64)nav_seen, 3ull, "with a third Tfsync");
+    TEST_EXPECT_EQ((u64)nav_fid, 0ull, "on its walked fid");
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     teardown(root);

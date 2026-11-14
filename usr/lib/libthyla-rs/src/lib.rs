@@ -3370,7 +3370,7 @@ pub unsafe fn t_console_episode(op: u64) -> i64 {
 }
 
 // t_fsync — durability barrier on `fd` (KOBJ_SPOOR, RIGHT_READ or RIGHT_WRITE;
-// a navigation handle answers EBADF). datasync 0 =
+// a navigation handle syncs too). datasync 0 =
 // full, non-zero = data only. Returns 0 / -1. FS-mutation foundation (§9.2).
 #[inline(always)]
 pub unsafe fn t_fsync(fd: i64, datasync: u32) -> i64 {

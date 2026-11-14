@@ -1554,7 +1554,8 @@ void test_9p_client_pump_ready_eof_is_dead(void) {
 // 9P client -- register a dev9p Spoor in a Loom, stage an FSYNC SQE, loom_enter
 // submits (Tfsync via the submit-time pin) + pumps the reply (Rfsync) + posts a
 // CQE. Plus the I-30 rights gate (a handle with neither right denies fsync; a
-// read-only one syncs, vote M22; a navigation one answers EBADF) and the #898
+// read-only one syncs, vote M22, and so does a navigation one, vote M22a) and
+// the #898
 // quiesce (a loom torn down with an op in flight abandons it cleanly).
 // =============================================================================
 
@@ -1643,9 +1644,8 @@ void test_9p_client_loom_rights_deny(void) {
 }
 
 // Vote M22: a read-only registered handle's FSYNC dispatches, as SYS_FSYNC's
-// does; the same handle as a navigation (CWALKONLY) one answers EBADF at submit
-// and is never dispatched -- EBADF, not the rights gate's EACCES, so the
-// navigation gate is the one that fired.
+// does; so does the same handle as a navigation (CWALKONLY) one (vote M22a:
+// corvus's rename-swap barrier syncs its directories through one).
 void test_9p_client_loom_fsync_read_only(void) {
     drive_client_open(&g_client, &g_loopback);
 
@@ -1675,9 +1675,8 @@ void test_9p_client_loom_fsync_read_only(void) {
     sp->flag &= ~CWALKONLY;
     TEST_EXPECT_EQ(n, 1, "second SQE consumed");
     TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "a second CQE");
-    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_BADF),
-                   "a navigation handle's fsync: EBADF");
-    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "never dispatched");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)0, "a navigation handle's fsync succeeds");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "dispatched, completed, reaped");
 
     loom_unref(l);
     p9_client_destroy(&g_client);

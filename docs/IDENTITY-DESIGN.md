@@ -1243,12 +1243,13 @@ SYS_FSYNC(fd, datasync) -> 0 / -1
 - **Rights (vote M22, 2026-11-14):** either right, as POSIX `fsync` works on a
   descriptor opened only for reading -- a directory's included, which is how a
   rename becomes durable (`mv` across devices syncs the destination directory).
-  A navigation (`T_OPATH`) handle answers `EBADF` whatever its rights, as
-  Linux's `O_PATH` does: it is born R|W with no check on its target and opens
-  nothing at the server. `LOOM_OP_FSYNC` asks the same (`EACCES` for neither
-  right, its rights gate's errno; `EBADF` for a navigation handle).
-- **Error cases:** fd not `KOBJ_SPOOR`, holding neither right, or a navigation
-  handle (`EBADF`); no `.fsync` slot (`EOPNOTSUPP`); server Rlerror.
+  A navigation (`T_OPATH`) handle syncs too, where Linux's `O_PATH` answers
+  `EBADF` (vote M22a): corvus's rename-swap barrier (9.3) syncs its directories
+  through navigation handles, and a sync moves no bytes across the handle, the
+  only thing #81's `CWALKONLY` gate refuses it. `LOOM_OP_FSYNC` asks the same
+  (`EACCES` for neither right, its rights gate's errno).
+- **Error cases:** fd not `KOBJ_SPOOR` or holding neither right (`EBADF`); no
+  `.fsync` slot (`EOPNOTSUPP`); server Rlerror.
 
 **`SYS_READDIR = 56`** -- directory enumeration. Needed for A-1b load-time user
 enumeration and for the A-2 coreutils `ls`.
@@ -1357,8 +1358,9 @@ SYS_RENAME(olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_le
   `mv`'s copy-then-remove, not a kernel primitive.
 - **Error cases (-1):** either fd not `KOBJ_SPOOR` / not a directory / missing
   `RIGHT_WRITE`; FROM_ROOT with no pivoted root; name bounds / `/` / `\0` on
-  either name; cross-Dev; backing Dev has no `.rename`; server `Rlerror` (source
+  either name; backing Dev has no `.rename`; server `Rlerror` (source
   `ENOENT`; dest is a non-empty directory; `EXDEV`; permission; out of space).
+  Two devices answer `EXDEV` (above), not -1.
 
 **`SYS_UNLINK = 58`** — remove a single component (a non-directory, or an empty
 directory) from a parent directory. 9P2000.L `Tunlinkat`.
@@ -1403,8 +1405,9 @@ int (*unlink)(struct Spoor *parent, const char *name, u32 flags);
   target is dev9p / the disk-backed Stratum FS — consistent with `.readdir`
   being dev9p-only). Kernel loopback tests drive dev9p (as FS-alpha/beta did).
 - **Cross-Dev invariant** (rename takes two dir fds): the handler validates
-  `olddir` and `newdir` share a Dev before calling `dev->rename`; a cross-Dev
-  rename is rejected at the handler and never reaches a Dev op (`dev9p_rename`
+  `olddir` and `newdir` share a Dev and its instance (`devno`) before calling
+  `dev->rename`; a rename across devices answers `EXDEV` at the handler and never
+  reaches a Dev op (`dev9p_rename`
   adds the same-`p9_client`-session check, since two dev9p mounts are distinct
   sessions and a 9P renameat is within one session).
 
@@ -1510,7 +1513,9 @@ create/walk target -- §3.6). `fstat` stays ALLOWED on O_PATH (Linux allows it;
 type/navigation checks need it); `lseek` (harmless) + `wstat` (already re-runs
 `perm_check`, not a bypass) are unchanged -- the full Linux-`O_PATH` intent
 alignment (reject all but fstat/navigation) is a v1.x completeness item, not
-security. **Safety:** the five legitimate O_PATH consumers (chroot, walk_create,
+security. `fsync` stays allowed on O_PATH by decision (vote M22a, 2026-11-14),
+so that alignment keeps it: corvus's rename-swap barrier (9.3) syncs its
+directories through navigation handles. **Safety:** the five legitimate O_PATH consumers (chroot, walk_create,
 mount, pivot_root, the joey `/bin`+`/srv`+`/proc`+`/ctl`+`/dev` re-graft) use the
 handle as a navigation base via `sys_lookup_spoor` -- none read/write/readdir it
 -- so the gate does not regress them. Scripture-first; audit-bearing (the

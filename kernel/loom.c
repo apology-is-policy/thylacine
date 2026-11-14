@@ -2816,19 +2816,12 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         // Either right, as SYS_FSYNC (vote M22): POSIX fsync works on a
         // descriptor opened only for reading (omode-derived rights, A-3 F1). A
         // handle with neither is denied here, never re-checked at completion
-        // (I-30). A navigation (CWALKONLY) handle is born R|W with no check on
-        // its target, so its rights say nothing: it answers EBADF, as the
-        // syscall does.
+        // (I-30). A navigation (CWALKONLY) handle syncs, as the syscall's does
+        // (vote M22a).
         if (!(rt & (RIGHT_READ | RIGHT_WRITE))) {
             spoor_clunk(sp);
             loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_ACCES);
-            return;
-        }
-        if (sp->flag & CWALKONLY) {
-            spoor_clunk(sp);
-            loom_chain_done(l, chain, false);
-            loom_complete_inline(l, ud, -(s32)T_E_BADF);
             return;
         }
         struct p9_client *cl; u32 fid;
