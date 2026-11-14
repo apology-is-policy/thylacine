@@ -32,7 +32,7 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states, expected generated states ("-" = do not pin)
-CLEAN="payer:-:-"
+CLEAN="payer:15603:89443"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="payer_buggy_handover_no_owed:ChargeExact

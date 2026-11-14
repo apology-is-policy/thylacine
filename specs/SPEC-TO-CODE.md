@@ -3696,7 +3696,8 @@ model because its `as->lock` serializes them; only the mint is split, at the
 two locks it takes in turn.
 
 Gate: `specs/check-payer.sh`. `payer.cfg` clean (three spaces, two slots),
-pinned at the first TLC run; the seven buggy cfgs each violate their named
+15603 distinct and 89443 generated states, pinned at the first TLC run
+(2026-11-14); the seven buggy cfgs each violate their named
 invariant -- three of them with a law that must HOLD listed ahead
 (`loser_keeps_charge`: ChargeExact; `unmap_releases`: RecordIsResidency and
 ChargeExact; `unmap_lapses`: ChargeExact).
