@@ -230,14 +230,17 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
 
 // Keeping attributes on the open destination: times first (the owner may set
 // them, and the handle that wrote flushes before they apply), then owner and
-// group, then the mode. False only when a failure fails the copy.
+// group, then the mode. A soft refusal is said and the rest are still tried.
+// False only when a failure fails the copy.
 fn preserve(f: &File, dst: &str, m: &Metadata, o: &Opts) -> bool {
     let times = FileTimes::new()
         .set_accessed(libthyla_rs::time::SystemTime::from_unix(m.atime_sec(), 0))
         .set_modified(libthyla_rs::time::SystemTime::from_unix(m.mtime_sec(), 0));
     if let Err(e) = f.set_times(times) {
         eprintln!("{}: preserving times for '{}': {}", o.tool, dst, e);
-        return o.attrs_soft;
+        if !o.attrs_soft {
+            return false;
+        }
     }
     // Each separately, so a refused owner does not cost the group. A refusal
     // leaves the destination's own, which POSIX permits without a diagnostic.

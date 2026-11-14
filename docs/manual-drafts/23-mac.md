@@ -27,7 +27,7 @@ echo 'from the guest' > /mnt/mac/snarf
 
 The pasteboard is set when the file is closed, to everything written since it was opened, so opening the file for writing and closing it without writing anything empties the pasteboard. Text that is not valid UTF-8 is set with each invalid sequence replaced by U+FFFD. A read takes the pasteboard's text when it starts at the beginning of the file, and later reads of the same open file continue that text, even if the Mac's pasteboard changes meanwhile. The file cannot be opened for reading and writing at once; such an open fails with `permission denied`. Its size reads 0 and its mode `0600`.
 
-Only plain text is carried. A pasteboard that holds no text, such as one holding only an image, reads as empty. Text larger than 16 MiB can be neither read nor written through `snarf`: the read, or the write that passes 16 MiB, fails with `kernel error (errno 27)`, the Linux code for a file too large.
+Only plain text is carried. A pasteboard that holds no text, such as one holding only an image, reads as empty. Text larger than 16 MiB can be neither read nor written through `snarf`: the read, or the write that passes 16 MiB, fails with `file too large`.
 
 ### Use a shared folder
 
@@ -45,14 +45,14 @@ rmdir /mnt/mac/folders/work/drafts
 
 `work` and `notes.txt` in these commands are illustrative names. Each change is made on the Mac before the command that made it returns, and programs on the Mac see it immediately. A file created from the guest belongs on the Mac to the Mac user who runs the app.
 
-`mv` within one shared folder is a rename on the Mac. Between two shared folders it fails with `kernel error (errno 18)`, the Linux code for a move across file systems, and between a shared folder and the guest's own files it fails with `invalid argument`. To move a file across either boundary, copy it and then remove the original:
+`mv` within one shared folder is a rename on the Mac. Between two shared folders, and between a shared folder and the guest's own files, `mv` copies the file or directory, keeping its modification time and permissions, and then removes the original, as a move between two disks does:
 
 ```sh
-cp /tmp/report.txt /mnt/mac/folders/work/report.txt
-rm /tmp/report.txt
+mv /tmp/report.txt /mnt/mac/folders/work/report.txt
+mv /mnt/mac/folders/work/drafts /tmp/drafts
 ```
 
-`/tmp/report.txt` is an illustrative name. The copy is made on the Mac by the time `cp` returns, so the original can be removed then.
+`/tmp/report.txt` and `drafts` are illustrative names. Such a move is not a single step: a program on the Mac can see the new file before the original is gone. If the copy fails, `mv` removes what it copied and leaves the original whole. If the original cannot be removed, both remain, and `mv` says so and fails.
 
 Only regular files and directories can be opened. A Mac device, socket or named pipe in a shared folder is listed, but opening it fails with `permission denied`. A Mac file that the Mac user cannot read cannot be read from the guest either.
 
@@ -70,13 +70,21 @@ rm: /mnt/mac/folders/docs/readme.txt: permission denied
 
 A refused redirection prints nothing; it sets `$status` to 1 and `$errstr` to a message ending in `PermissionDenied`.
 
-A file's owner may change its mode, so `chmod` is passed to the Mac, which refuses it with `kernel error (errno 30)`, the Linux code for a read-only file system:
+A file's owner may change its mode, so `chmod` is passed to the Mac, which refuses it:
 
 ```text
-chmod: /mnt/mac/folders/docs/readme.txt: kernel error (errno 30)
+chmod: /mnt/mac/folders/docs/readme.txt: read-only file system
 ```
 
 The folder on the Mac is unchanged.
+
+Moving a file out of a read-only folder copies it and then fails to remove the original:
+
+```text
+mv: cannot remove '/mnt/mac/folders/docs/readme.txt': permission denied
+```
+
+The copy stays where `mv` put it, and the folder on the Mac is unchanged.
 
 ### Ownership and permissions
 
@@ -128,9 +136,13 @@ The Mac app performs every operation on the Mac as the user who runs it, and rep
 
 `/srv/mac` is posted as a remote service, the declaration Haul's posts carry, because the line's data leaves the guest. A link served by a remote session is resolved by the kernel within the mount it was reached through, which for `/mnt/mac` is the session's mount. The Mac app reports a link as a link and never resolves one on the Mac: each lookup and open on the Mac takes one name at a time from the shared folder's root and refuses to pass through a link. A lookup the kernel makes from a directory it already holds, such as one a program took as a path handle before the Mac replaced it with a link, is therefore refused by the Mac app itself, with `too many levels of symbolic links`. A working directory holds no such reference: it is a name, resolved again from the root for each lookup.
 
+### Moves across devices
+
+A rename is one operation within one 9P session. The guest's own files are served by other sessions than `/mnt/mac`, so the kernel refuses a rename between them and `/mnt/mac` with `invalid cross-device link` before it asks either side. The Mac app refuses a rename between two shared folders with the same error, because they are separate folders on the Mac. `mv` answers that error by copying and then removing, as POSIX `mv` does.
+
 ### Errors
 
-The Mac app reports errors in the Linux numbering that 9P2000.L uses, translated from the Mac's (for example, the Mac's code for a non-empty directory is 66, and the guest receives 39, `directory not empty`). A Mac error with no Linux counterpart reaches the guest as `I/O error`. Thylacine's tools name the common codes; others, such as 30 for a read-only file system and 18 for a move across folders, are printed by number.
+The Mac app reports errors in the Linux numbering that 9P2000.L uses, translated from the Mac's (for example, the Mac's code for a non-empty directory is 66, and the guest receives 39, `directory not empty`). A Mac error with no Linux counterpart reaches the guest as `I/O error`. Thylacine's tools name the common codes, among them 30, `read-only file system`, 27, `file too large`, and 18, `invalid cross-device link`; others are printed as `kernel error (errno N)`.
 
 ### Failure and cleanup
 

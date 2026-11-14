@@ -64,7 +64,7 @@ fn run(args: Args) -> i64 {
                 match ch {
                     'v' => verbose = true,
                     'n' => no_clobber = true,
-                    'f' => {} // force: a no-op (mv replaces atomically, never prompts)
+                    'f' => {} // force: a no-op (mv never prompts)
                     _ => return usage::die("mv", &format!("invalid option -- '{}'", ch)),
                 }
             }

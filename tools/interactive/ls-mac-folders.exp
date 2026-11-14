@@ -2,10 +2,10 @@
 # ls-mac-folders -- the shared folders of the line to the Mac (docs/MAC-RUNNER.md 4.4), through the
 # guest's kernel, against the Mac app itself: THYLACINE_MAC_APP, else macrunner/app's debug build.
 # Without one this SKIPs (exit 77): an absent app is neither a regression nor coverage. The app
-# shares two host folders this scenario makes, `work` read-write and `docs` read-only, and every
-# change the guest makes is checked ON THE MAC, in the folder itself:
+# shares three host folders this scenario makes, `work` and `inbox` read-write and `docs`
+# read-only, and every change the guest makes is checked ON THE MAC, in the folder itself:
 #
-#   1. folders/ lists both shares, and files one and two levels down read as the Mac wrote them.
+#   1. folders/ lists the three shares, and files one and two levels down read as the Mac wrote them.
 #   2. A file the guest writes holds the guest's bytes on the Mac.
 #   3. mkdir, mv, rm and rmdir each change the Mac's folder as they say, and cp brings a file of
 #      the guest's own into a share.
@@ -25,9 +25,15 @@
 #   6. The read-only share reads. Its modes carry no write, and the guest's kernel checks them
 #      (dev9p enforces rwx), so a create, a write over a file, a remove and a rename are refused
 #      in the guest (permission denied). The owner's mode change is passed on, and the app's own
-#      rule refuses it (EROFS, errno 30). The Mac's folder is unchanged.
+#      rule refuses it (EROFS: read-only file system). The Mac's folder is unchanged.
 #   7. Every file is the session user's (the uid `id` names), with the host file's owner bits:
 #      0600 for a 0644 file, 0400 in the read-only share.
+#   8. A move across devices (vote M15): the guest's /tmp is its home's 9P session and /mnt/mac
+#      another, so the kernel answers a rename between them EXDEV before it asks either, and
+#      between two shares the app answers it. mv then copies, keeping times and mode, and removes
+#      the source: a guest file into a share, a file between two shares (its time kept), a tree out
+#      of a share into the guest. Out of the read-only share the copy is made and the source cannot
+#      be removed: mv says so, fails, and leaves both, as POSIX mv does.
 #
 # Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
 # it, and the guest's output is upper-cased, so the echoed command line can never match it.
@@ -46,8 +52,9 @@ if {![file executable $app]} {
 set ::work [exec mktemp -d -t thyla-mac-folders]
 set ::W $::work/work
 set ::R $::work/docs
+set ::I $::work/inbox
 set ::O $::work/outside
-file mkdir $::W/sub $::W/d $::R $::O
+file mkdir $::W/sub $::W/d $::W/tree/deeper $::R $::I $::O
 proc write_file {path text} {
     set fh [open $path w]
     puts -nonewline $fh $text
@@ -67,6 +74,11 @@ write_file $::W/sub/anchored.txt "reached by an absolute link beneath the mount\
 write_file $::W/d/inside.txt     "inside the directory the mac swaps\n"
 write_file $::O/secret.txt       "secret outside the share\n"
 write_file $::R/readme.txt       "read only words\n"
+write_file $::W/tree/a.txt       "tree file a\n"
+write_file $::W/tree/deeper/b.txt "tree file b one deeper\n"
+write_file $::W/old.txt          "an old file the mac wrote\n"
+set ::old_time 1000000000
+file mtime $::W/old.txt $::old_time
 # `file link` insists the target exist, and these targets are the guest's to resolve.
 exec ln -s sub/linked.txt                 $::W/rel
 exec ln -s /folders/work/sub/anchored.txt $::W/inshare
@@ -77,8 +89,8 @@ set ::mac_log [file join $::lc_repo build "mac-folders-[pid].log"]
 catch {file delete -force $::mac_sock $::mac_log}
 set ::env(THYLACINE_MAC_LINE) $::mac_sock
 set ::app_pid [exec $app --mac-line $::mac_sock --line-log $::mac_log --snarf-memory "folders" \
-    --share work=$::W --share docs=$::R:ro >>& $::mac_log.err &]
-lc_step "thylacine-mac started (pid $::app_pid): work=$::W, docs=$::R read-only"
+    --share work=$::W --share docs=$::R:ro --share inbox=$::I >>& $::mac_log.err &]
+lc_step "thylacine-mac started (pid $::app_pid): work=$::W, inbox=$::I, docs=$::R read-only"
 exit -onexit {
     catch {exec kill $::app_pid}
     catch {file delete -force $::mac_sock}
@@ -186,15 +198,15 @@ lc_expect "FOLDERS-SETUP-DONE" "the guest's decoy, and past the login's lines"
 # ---- 1. the shares, and reads one and two levels down.
 lc_send "ls /mnt/mac/folders | tr a-z A-Z"
 lc_within $lc_cmd_timeout {
-    -re {DOCS[\r\n]+WORK[\r\n]}             { lc_step "folders/ lists docs and work" }
+    -re {DOCS[\r\n]+INBOX[\r\n]+WORK[\r\n]} { lc_step "folders/ lists docs, inbox and work" }
     -re {(ls|tr|ut): ([^\r\n]*)[\r\n]}      { lc_fail "[string trimright $expect_out(0,string)] (ls /mnt/mac/folders)" }
     -re {EXTINCTION:}                       { lc_extinction_fail "kernel extinction at ls /mnt/mac/folders" }
-    timeout                                 { lc_fail "ls /mnt/mac/folders did not list DOCS then WORK" }
+    timeout                                 { lc_fail "ls /mnt/mac/folders did not list DOCS, INBOX, WORK" }
     eof                                     { lc_fail "unexpected EOF at ls /mnt/mac/folders" }
 }
 read_ok /mnt/mac/folders/work/hello.txt "HELLO FROM A MAC FOLDER" "a file in a share"
 read_ok /mnt/mac/folders/work/sub/inner.txt "INNER FILE TWO DEEP" "a file two levels down"
-lc_pass "ls-mac-folders: folders/ lists both shares, and the Mac's files read one and two levels down"
+lc_pass "ls-mac-folders: folders/ lists the three shares, and the Mac's files read one and two levels down"
 
 # ---- 2. a write lands on the Mac.
 run_ok "echo written by the guest > /mnt/mac/folders/work/new.txt" leg2 "the guest writes new.txt"
@@ -314,8 +326,8 @@ if {$st == 0 || ![string match "*: permission denied" $why]} {
 lc_step "the rename was refused in the guest: $why"
 on_mac [expr {[file exists $::R/readme.txt] && ![file exists $::R/moved.txt]}] "docs/readme.txt kept its name"
 lassign [tool_status chmod "chmod 600 /mnt/mac/folders/docs/readme.txt" leg6e "the owner's mode change in the read-only share"] st why
-if {$st == 0 || ![string match "*: kernel error (errno 30)" $why]} {
-    lc_fail "the owner's mode change in the read-only share gave status $st, '$why' -- not the app's EROFS (errno 30)"
+if {$st == 0 || ![string match "*: read-only file system" $why]} {
+    lc_fail "the owner's mode change in the read-only share gave status $st, '$why' -- not the app's EROFS (read-only file system)"
 }
 lc_step "the app refused the mode change: $why"
 on_mac [expr {[file attributes $::R/readme.txt -permissions] eq $::mac_mode}] "docs/readme.txt keeps its mode ($::mac_mode)"
@@ -351,5 +363,48 @@ foreach {path mode} {/mnt/mac/folders/work/hello.txt 0600 /mnt/mac/folders/docs/
     lc_step "$path: mode $got, owned by $uid"
 }
 lc_pass "ls-mac-folders: every file is michael's ($me), with the host file's owner bits (0600; 0400 read-only)"
+
+# ---- 8. a move across devices (vote M15). /mnt/mac is one 9P session and the guest's /tmp its
+# home's, two devices, so the kernel answers a rename between them EXDEV before it asks either;
+# between two shares the app answers it (two host folders). On EXDEV mv copies, keeping times and
+# mode, then removes the source, as POSIX mv does. Each move is checked on the Mac and in the guest.
+run_ok "echo moved from the guest > /tmp/mac-mv-a" leg8s "a guest file to move"
+lassign [tool_status mv "mv /tmp/mac-mv-a /mnt/mac/folders/work/from-guest.txt" leg8a "a guest file moved into a share"] st why
+if {$st != 0 || $why ne ""} {
+    lc_fail "a guest file moved into a share gave status $st, '$why' -- not a quiet copy and remove"
+}
+lc_step "status 0, nothing said: the guest's file moved into the share"
+on_mac [expr {[read_file $::W/from-guest.txt] eq "moved from the guest\n"}] "work/from-guest.txt holds the guest's line"
+set why [read_refused /tmp/mac-mv-a "MOVED FROM THE GUEST" "the moved file's old name in the guest"]
+if {$why ne "no such file or namespace entry"} {
+    lc_fail "the guest's /tmp/mac-mv-a after the move: '$why', not a name the guest lacks"
+}
+lassign [tool_status mv "mv /mnt/mac/folders/work/old.txt /mnt/mac/folders/inbox/across.txt" leg8b "a file moved between two shares"] st why
+if {$st != 0 || $why ne ""} {
+    lc_fail "a file moved between two shares gave status $st, '$why' -- not a quiet copy and remove"
+}
+lc_step "status 0, nothing said: the file moved from work to inbox"
+on_mac [expr {[read_file $::I/across.txt] eq "an old file the mac wrote\n"}] "inbox/across.txt holds work/old.txt's words"
+on_mac [expr {![file exists $::W/old.txt]}] "work/old.txt is gone"
+set t [expr {[file exists $::I/across.txt] ? [file mtime $::I/across.txt] : "none"}]
+on_mac [expr {$t eq $::old_time}] "inbox/across.txt keeps the source's time ($t, wanted $::old_time)"
+lassign [tool_status mv "mv /mnt/mac/folders/work/tree /tmp/mac-tree" leg8c "a tree moved out of a share into the guest"] st why
+if {$st != 0 || $why ne ""} {
+    lc_fail "a tree moved out of a share gave status $st, '$why' -- not a quiet copy and remove"
+}
+lc_step "status 0, nothing said: work/tree moved into the guest"
+read_ok /tmp/mac-tree/a.txt "TREE FILE A" "the moved tree's file in the guest"
+read_ok /tmp/mac-tree/deeper/b.txt "TREE FILE B ONE DEEPER" "the moved tree's file one deeper"
+on_mac [expr {![file exists $::W/tree]}] "work/tree is gone, with what it held"
+# Out of the read-only share the copy is made and the source cannot be removed: mv says so, fails,
+# and leaves both.
+lassign [tool_status mv "mv /mnt/mac/folders/docs/readme.txt /tmp/mac-readme.txt" leg8d "a file moved out of the read-only share"] st why
+if {$st == 0 || $why ne "cannot remove '/mnt/mac/folders/docs/readme.txt': permission denied"} {
+    lc_fail "a file moved out of the read-only share gave status $st, '$why' -- not a copy whose source could not be removed"
+}
+lc_step "status $st: $why"
+on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is still there, unchanged"
+read_ok /tmp/mac-readme.txt "READ ONLY WORDS" "the copy stays in the guest"
+lc_pass "ls-mac-folders: a move across devices copies, then removes: a guest file into a share, a file between two shares with its time, a tree into the guest; out of the read-only share the copy stays and the source cannot be removed"
 
 lc_quit

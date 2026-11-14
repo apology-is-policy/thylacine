@@ -5329,13 +5329,16 @@ static int sys_copy_component(u64 name_va, u64 name_len, char *scratch) {
 VISIBLE_IF_KERNEL_TESTS
 s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od, struct Spoor *nd,
                          const char *old_name, const char *new_name) {
-    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
-    // both directories MUST be on the same Dev (dev9p_rename adds the same-
-    // session guard). Rejected here before any Dev op, and before the slot
-    // check below: two devices answer EXDEV whatever either can do, as Linux
-    // refuses a cross-mount rename before it asks the file system, and a
-    // caller like `mv` reads it as "copy, then remove" (vote M15).
-    if (od->dev != nd->dev)                           return -T_E_XDEV;
+    // Two-cursor + cross-device invariant: a 9P renameat is within ONE server,
+    // so both directories MUST be on one device -- the same Dev, and the same
+    // instance of it (devno, the st_dev a stat reports; dev9p mints one per
+    // attach session, so two sessions are two servers). Rejected here before
+    // any Dev op, and before the slot and permission checks below: two devices
+    // answer EXDEV whatever either can do or the caller may, as Linux refuses a
+    // cross-mount rename before it asks the file system, and a caller like `mv`
+    // reads it as "copy, then remove" (vote M15). dev9p_rename keeps its own
+    // same-session guard for any other caller of its slot.
+    if (od->dev != nd->dev || od->devno != nd->devno) return -T_E_XDEV;
     // #80: a Dev with no .rename slot cannot perform the operation at all --
     // OPNOTSUPP, distinguishable from every verdict the slot itself can return
     // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
@@ -5418,11 +5421,11 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     // HOLDS the source (od) and lands the destination in the SAME member when
     // both fds name one LIVE union (Plan 9 within-member rename), else the
     // MCREATE member (nd). Non-union dirfds act on od/nd directly; a
-    // cross-member move then falls to spoor_rename_in_dirs's same-Dev guard, or
-    // dev9p's same-session one (EXDEV). Once the union has DISSOLVED each handle
-    // means its own member[0] -- two handles on one point may hold different
-    // ones (shed r4 F2: taken while dissolved, the shortcut renamed into od's
-    // member[0] a directory the caller never named for the destination).
+    // cross-member move then falls to spoor_rename_in_dirs's one-device guard
+    // (EXDEV). Once the union has DISSOLVED each handle means its own member[0]
+    // -- two handles on one point may hold different ones (shed r4 F2: taken
+    // while dissolved, the shortcut renamed into od's member[0] a directory the
+    // caller never named for the destination).
     bool same_union = od->union_snap && od->union_snap->point &&
                       nd->union_snap && nd->union_snap->point &&
                       spoor_same_mount_identity(od->union_snap->point,
@@ -15849,8 +15852,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // the destination lands in the member holding the source, not the
         // union's MCREATE member. Otherwise the source parent selects the member
         // holding oldleaf and a different-union / non-union dest selects its
-        // create target; spoor_rename_in_dirs's same-Dev guard (or dev9p's
-        // same-session one) then answers a genuine cross-member move EXDEV.
+        // create target; spoor_rename_in_dirs's one-device guard then answers a
+        // genuine cross-member move EXDEV.
         bool same_union = od_union && nd_union &&
                           spoor_same_mount_identity(od_res, nd_res);
         struct Spoor *od = viv_union_member(p, od_res, od_union, oldleaf,

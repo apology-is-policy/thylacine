@@ -3051,9 +3051,10 @@ static long dev9p_readlink(struct Spoor *c, char *buf, long n) {
 
 // olddir / newdir are the caller's looked-up directory Spoors (not clone-walked:
 // Trenameat names the dirfids without transitioning them, like Tsync / Treaddir).
-// SYS_RENAME already required the same Dev; this adds the same-SESSION guard (two
-// dev9p mounts are distinct p9_clients, and a 9P renameat is within one session).
-// Names are NUL-terminated by the handler.
+// SYS_RENAME already required one device (the same Dev and devno, so one
+// session); the same-SESSION guard below holds for any other caller of the slot
+// (two dev9p mounts are distinct p9_clients, and a 9P renameat is within one
+// session). Names are NUL-terminated by the handler.
 static int dev9p_rename(struct Spoor *olddir, const char *oldname,
                         struct Spoor *newdir, const char *newname) {
     struct dev9p_priv *od = priv_of(olddir);
