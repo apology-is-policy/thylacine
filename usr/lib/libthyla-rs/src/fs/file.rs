@@ -149,6 +149,18 @@ impl File {
         Self::open_create_at_path(path.as_ref(), T_OWRITE | T_OTRUNC, true, false, 0o644)
     }
 
+    /// Close the file and report what the close reports: a write the server
+    /// had not yet taken (dev9p's write-behind) fails here, where dropping the
+    /// `File` would lose the error.
+    pub fn close(self) -> Result<()> {
+        let fd = self.handle.raw();
+        core::mem::forget(self);
+        // SAFETY: fd is this File's live handle; forgetting `self` keeps its
+        // Drop from closing the slot a second time.
+        let rc = unsafe { t_close(fd as i64) };
+        Error::from_syscall_return(rc).map(|_| ())
+    }
+
     /// The underlying raw handle index. For interop with code that
     /// passes raw `fd`s through other syscalls; libthyla-rs callers
     /// should prefer `Read`/`Write`/`Seek`.

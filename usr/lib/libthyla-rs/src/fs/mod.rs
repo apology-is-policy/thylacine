@@ -123,6 +123,12 @@ const CREATE_DIR_MODE: u32 = 0o755;
 /// if a parent component is not a directory; `PermissionDenied` (or another
 /// kernel error) when the parent denies creation or the FS is read-only.
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
+    create_dir_mode(path, CREATE_DIR_MODE)
+}
+
+/// [`create_dir`] with the permission bits given (under the umask), as
+/// `mkdir(2)` takes them.
+pub fn create_dir_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
     // #50: one SYS_OPEN_CREATE with DMDIR replaces the split + parent-T_OPATH
     // + t_walk_create dance. The kernel's own leaf rows match this function's
     // documented ones exactly: a root / `.` / `..` leaf answers EEXIST (the
@@ -141,7 +147,7 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
             s.as_ptr(),
             s.len(),
             crate::T_OREAD,
-            crate::T_WALK_CREATE_DMDIR | CREATE_DIR_MODE,
+            crate::T_WALK_CREATE_DMDIR | (mode & 0o777),
         )
     };
     let fd = Error::from_syscall_return(rc)?;

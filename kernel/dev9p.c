@@ -3022,11 +3022,6 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     return (long)got;
 }
 
-// Rename -> Stratum Trenameat (FS-mutation foundation FS-gamma; section 9.3).
-// olddir / newdir are the caller's looked-up directory Spoors (NOT clone-walked
-// -- Trenameat operates on the dirfids by name without transitioning them, like
-// Tsync / Treaddir). The SYS_RENAME handler already required the same Dev; this
-// adds the same-SESSION guard (two dev9p mounts are distinct p9_clients, and a
 // DISTRO D-1: Dev.readlink -- Treadlink on the walked link fid. `c` is the
 // resolver's transient walked-link clone: never opened, never donated to the
 // G2 dir-fid cache (donation gates on QTDIR, and a link's qid never carries
@@ -3049,6 +3044,7 @@ static long dev9p_readlink(struct Spoor *c, char *buf, long n) {
     return (long)len;
 }
 
+// Rename -> Stratum Trenameat (FS-mutation foundation FS-gamma; section 9.3).
 // olddir / newdir are the caller's looked-up directory Spoors (not clone-walked:
 // Trenameat names the dirfids without transitioning them, like Tsync / Treaddir).
 // SYS_RENAME already required one device (the same Dev and devno, so one

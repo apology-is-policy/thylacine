@@ -386,13 +386,15 @@
 #define T_E_STALE      116
 
 // Cross-device link: a rename whose two directories are on different
-// devices -- two Devs, or two dev9p sessions (two servers). SYS_RENAME
-// answers it before any Dev op, before a Dev's missing rename slot and
+// devices -- two Devs, or two dev9p sessions. SYS_RENAME answers it
+// before the rename's own Dev op, before a Dev's missing rename slot and
 // before its permission checks, as Linux refuses a cross-mount rename
 // before it asks the file system;
 // a caller like `mv` reads it as "copy, then remove". Loom's RENAMEAT and
-// LINK answer it for two fids of two sessions. Kernels before it answered
-// T_E_INVAL. Operator vote M15 (2026-11-14). POSIX: EXDEV.
+// LINK answer it for a second handle on another session or Dev; a server
+// answers it by value. Kernels before it answered T_E_INVAL (T_E_OPNOTSUPP
+// for a source Dev with no rename slot). Operator vote M15 (2026-11-14).
+// POSIX: EXDEV.
 #define T_E_XDEV       18
 
 // File too large, read-only file system, file name too long: a server's

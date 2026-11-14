@@ -7116,9 +7116,10 @@ void test_9p_client_async_share_leaves_sync_tags(void) {
 }
 
 // A 9P renameat or link names two fids of ONE session, so Loom's RENAMEAT and
-// LINK with their second handle on another session are two servers: EXDEV, as
-// the sync rename answers (vote M15), inline, with nothing on the wire. The
-// controls are the same ops with the second handle on the first session.
+// LINK with their second handle on another session, or on another Dev, are two
+// devices: EXDEV, as the sync rename answers (vote M15), inline, with nothing on
+// the wire. The controls are the same ops with the second handle on the first
+// session.
 void test_9p_client_loom_two_sessions_exdev(void) {
     loom_ga_reset();
     loom_ga_dir(0755u, 0x1234u, 0x5678u);
@@ -7130,16 +7131,23 @@ void test_9p_client_loom_two_sessions_exdev(void) {
     TEST_ASSERT(cl2_open() == 0, "a second session");
     struct Spoor *other = dev9p_attach_client(&g_client2, 0);
     TEST_ASSERT(other != NULL, "the second session's root");
+    struct Spoor *rd = devramfs.attach("");
+    TEST_ASSERT(rd != NULL, "a directory of another Dev (the ramfs root)");
     struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     loom_install_test_handle(l, 0, root,  RIGHT_READ | RIGHT_WRITE);
     loom_install_test_handle(l, 1, sub,   RIGHT_READ | RIGHT_WRITE);
     loom_install_test_handle(l, 2, other, RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 3, rd,    RIGHT_READ | RIGHT_WRITE);
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
     const char *nm = "abcdef";
     for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
     struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    if (!who) {                      // the runner releases the clients, not the ring
+        burrow_unref(b);
+        loom_unref(l);
+    }
     TEST_ASSERT(who != NULL, "bind the owner");
 
     DM_RENAMEAT(l, 0, "RENAMEAT, both directories in one session -> reaches the wire");
@@ -7148,10 +7156,13 @@ void test_9p_client_loom_two_sessions_exdev(void) {
                 "RENAMEAT into another session's directory -> -EXDEV, nothing on the wire");
     loom_dm_leg(l, LOOM_OP_LINK, 3, 0, 0, 0, /*second handle=*/2, -(s32)T_E_XDEV,
                 "LINK naming another session's file -> -EXDEV, nothing on the wire");
+    loom_dm_leg(l, LOOM_OP_RENAMEAT, 6, 0, 3, 0, /*second handle=*/3, -(s32)T_E_XDEV,
+                "RENAMEAT into a directory of another Dev -> -EXDEV, nothing on the wire");
 
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
     burrow_unref(b);
     loom_unref(l);
+    spoor_clunk(rd);
     spoor_clunk(other);
     spoor_clunk(sub);
     spoor_clunk(root);

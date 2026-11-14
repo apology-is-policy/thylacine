@@ -1343,8 +1343,10 @@ SYS_RENAME(olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_le
   (`p9_client_renameat` tolerates `olddirfid == newdirfid`).
 - **Rights gate:** `RIGHT_WRITE` on **both** dir fds (both directories are
   mutated). FROM_ROOT resolves to the Territory root as in `SYS_WALK_CREATE`.
-- **Cross-Dev reject:** A and B on different Devs → -1. A 9P `renameat` is within
-  one server; a cross-Dev move is copy-then-unlink, not a v1.0 primitive.
+- **Cross-device reject:** A and B on different devices -- two Devs, or two
+  instances of one (two 9P sessions) → `EXDEV` (vote M15; it was -1, then
+  `EINVAL`). A 9P `renameat` is within one session; a move across devices is
+  `mv`'s copy-then-remove, not a kernel primitive.
 - **Error cases (-1):** either fd not `KOBJ_SPOOR` / not a directory / missing
   `RIGHT_WRITE`; FROM_ROOT with no pivoted root; name bounds / `/` / `\0` on
   either name; cross-Dev; backing Dev has no `.rename`; server `Rlerror` (source

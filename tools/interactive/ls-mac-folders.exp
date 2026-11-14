@@ -34,6 +34,8 @@
 #      the source: a guest file into a share, a file between two shares (its time kept), a tree out
 #      of a share into the guest. Out of the read-only share the copy is made and the source cannot
 #      be removed: mv says so, fails, and leaves both, as POSIX mv does.
+#   9. rm -r removes a link in a tree, never what it names: work/rmtree holds a link to the
+#      directory work/keep, and the tree goes while work/keep and its file stay on the Mac.
 #
 # Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
 # it, and the guest's output is upper-cased, so the echoed command line can never match it.
@@ -54,7 +56,7 @@ set ::W $::work/work
 set ::R $::work/docs
 set ::I $::work/inbox
 set ::O $::work/outside
-file mkdir $::W/sub $::W/d $::W/tree/deeper $::R $::I $::O
+file mkdir $::W/sub $::W/d $::W/tree/deeper $::W/keep $::W/rmtree $::R $::I $::O
 proc write_file {path text} {
     set fh [open $path w]
     puts -nonewline $fh $text
@@ -79,10 +81,13 @@ write_file $::W/tree/deeper/b.txt "tree file b one deeper\n"
 write_file $::W/old.txt          "an old file the mac wrote\n"
 set ::old_time 1000000000
 file mtime $::W/old.txt $::old_time
+write_file $::W/keep/kept.txt     "kept beside the tree\n"
+write_file $::W/rmtree/gone.txt   "removed with the tree\n"
 # `file link` insists the target exist, and these targets are the guest's to resolve.
 exec ln -s sub/linked.txt                 $::W/rel
 exec ln -s /folders/work/sub/anchored.txt $::W/inshare
 exec ln -s /tmp/mac-decoy-a               $::W/abs
+exec ln -s ../keep                        $::W/rmtree/link
 
 set ::mac_sock [file join $::lc_repo build "mac-folders-[pid].sock"]
 set ::mac_log [file join $::lc_repo build "mac-folders-[pid].log"]
@@ -368,6 +373,7 @@ lc_pass "ls-mac-folders: every file is michael's ($me), with the host file's own
 # home's, two devices, so the kernel answers a rename between them EXDEV before it asks either;
 # between two shares the app answers it (two host folders). On EXDEV mv copies, keeping times and
 # mode, then removes the source, as POSIX mv does. Each move is checked on the Mac and in the guest.
+run_ok "rm -rf /tmp/mac-mv-a /tmp/mac-tree /tmp/mac-readme.txt" leg8h "the moves' guest targets, gone before the leg"
 run_ok "echo moved from the guest > /tmp/mac-mv-a" leg8s "a guest file to move"
 lassign [tool_status mv "mv /tmp/mac-mv-a /mnt/mac/folders/work/from-guest.txt" leg8a "a guest file moved into a share"] st why
 if {$st != 0 || $why ne ""} {
@@ -379,6 +385,8 @@ set why [read_refused /tmp/mac-mv-a "MOVED FROM THE GUEST" "the moved file's old
 if {$why ne "no such file or namespace entry"} {
     lc_fail "the guest's /tmp/mac-mv-a after the move: '$why', not a name the guest lacks"
 }
+file stat $::W/old.txt pre
+set ::old_ino $pre(ino)
 lassign [tool_status mv "mv /mnt/mac/folders/work/old.txt /mnt/mac/folders/inbox/across.txt" leg8b "a file moved between two shares"] st why
 if {$st != 0 || $why ne ""} {
     lc_fail "a file moved between two shares gave status $st, '$why' -- not a quiet copy and remove"
@@ -388,6 +396,9 @@ on_mac [expr {[read_file $::I/across.txt] eq "an old file the mac wrote\n"}] "in
 on_mac [expr {![file exists $::W/old.txt]}] "work/old.txt is gone"
 set t [expr {[file exists $::I/across.txt] ? [file mtime $::I/across.txt] : "none"}]
 on_mac [expr {$t eq $::old_time}] "inbox/across.txt keeps the source's time ($t, wanted $::old_time)"
+set ino none
+if {[file exists $::I/across.txt]} { file stat $::I/across.txt post; set ino $post(ino) }
+on_mac [expr {$ino ne "none" && $ino != $::old_ino}] "inbox/across.txt is a copy (inode $ino; the source's was $::old_ino), the app having refused the rename between two shares"
 lassign [tool_status mv "mv /mnt/mac/folders/work/tree /tmp/mac-tree" leg8c "a tree moved out of a share into the guest"] st why
 if {$st != 0 || $why ne ""} {
     lc_fail "a tree moved out of a share gave status $st, '$why' -- not a quiet copy and remove"
@@ -406,5 +417,15 @@ lc_step "status $st: $why"
 on_mac [expr {[read_file $::R/readme.txt] eq "read only words\n"}] "docs/readme.txt is still there, unchanged"
 read_ok /tmp/mac-readme.txt "READ ONLY WORDS" "the copy stays in the guest"
 lc_pass "ls-mac-folders: a move across devices copies, then removes: a guest file into a share, a file between two shares with its time, a tree into the guest; out of the read-only share the copy stays and the source cannot be removed"
+
+# ---- 9. rm -r removes a link in a tree, never what it names. work/rmtree holds `link -> ../keep`;
+# a removal that followed it would empty work/keep through it.
+lassign [tool_status rm "rm -r /mnt/mac/folders/work/rmtree" leg9 "rm -r of a tree holding a link to a directory"] st why
+if {$st != 0 || $why ne ""} {
+    lc_fail "rm -r of a tree holding a link to a directory gave status $st, '$why'"
+}
+on_mac [expr {![file exists $::W/rmtree]}] "work/rmtree is gone"
+on_mac [expr {[read_file $::W/keep/kept.txt] eq "kept beside the tree\n"}] "work/keep/kept.txt, in the directory the link named, is still there"
+lc_pass "ls-mac-folders: rm -r removes a link in a tree, never the directory it names"
 
 lc_quit

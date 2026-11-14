@@ -1972,6 +1972,7 @@ void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_readdir_cookie_high_bit(void);
+void test_dev9p_readdir_refuses_bad_names(void);
 void test_dev9p_poll_regular_file_always_ready(void);
 void test_dev9p_poll_snapshot_answers_at_zero_timeout(void);
 void test_dev9p_poll_local_and_remote_both_reported(void);

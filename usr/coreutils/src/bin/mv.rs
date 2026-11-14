@@ -6,7 +6,10 @@
 // mv does what POSIX mv does: the destination removed, the source's tree
 // duplicated with its times, owner and mode (coreutils::copy), then the source
 // removed. A duplication that fails removes what it made and leaves the source
-// whole, so one of the two is always complete.
+// whole. A union can make two names one file, or point a name at a different
+// file between two lookups, so mv compares identities (Dev instance, qid path)
+// before it removes either name: a destination that is the source is refused,
+// and a source that no longer names the file copied is not removed.
 
 #![no_std]
 #![no_main]
@@ -146,9 +149,14 @@ fn move_across(src: &str, dst: &str, verbose: bool) -> bool {
         eprintln!("mv: cannot move symbolic link '{}' to another device: creating a link is not supported", src);
         return false;
     }
+    let sid = (sm.dev(), sm.qid_path());
     // What a rename would have replaced: a file by a file, an empty directory by
-    // a directory.
+    // a directory -- never the source itself, which POSIX leaves in place.
     if let Ok(dm) = lstat(dst) {
+        if (dm.dev(), dm.qid_path()) == sid {
+            eprintln!("mv: '{}' and '{}' are the same file", src, dst);
+            return false;
+        }
         if sm.is_dir() && !dm.is_dir() {
             eprintln!(
                 "mv: cannot overwrite non-directory '{}' with directory '{}'",
@@ -180,12 +188,23 @@ fn move_across(src: &str, dst: &str, verbose: bool) -> bool {
         preserve: true,
         no_deref: true,
         attrs_soft: true,
+        refuse_special: true,
     };
     if !copy::copy(src, dst, &o) {
         if !remove_tree(dst) {
             eprintln!("mv: '{}' is left partly copied; '{}' is whole", dst, src);
         }
         return false;
+    }
+    match lstat(src) {
+        Ok(m) if (m.dev(), m.qid_path()) == sid => {}
+        _ => {
+            eprintln!(
+                "mv: '{}' no longer names the file copied to '{}'; not removed",
+                src, dst
+            );
+            return false;
+        }
     }
     if !remove_tree(src) {
         return false;

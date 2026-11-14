@@ -94,6 +94,7 @@ fn run(args: Args) -> i64 {
         preserve,
         no_deref,
         attrs_soft: false,
+        refuse_special: false,
     };
 
     let mut ops: Vec<&str> = Vec::new();

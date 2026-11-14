@@ -66,6 +66,10 @@ static u64 le64_at(const u8 *p) {
 // test can assert dev9p_readdir forwards a high-bit (>INT64_MAX) cookie verbatim
 // rather than sign-clamping it to 0.
 static u64 g_readdir_req_offset;
+// The name the responder's one dirent carries: "foo" unless a test names another.
+static const u8  g_rd_foo[] = {'f','o','o'};
+static const u8 *g_rd_name = g_rd_foo;
+static u32       g_rd_name_len = sizeof(g_rd_foo);
 
 // #37: capture the Tread/Twrite request offsets so the positioned-I/O tests
 // can assert the CALLER's offset (SYS_PREAD/SYS_PWRITE) vs the Spoor cursor
@@ -512,11 +516,12 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // Capture the request offset (Treaddir body: fid@7, offset@11, count@19).
         if (req_len >= P9_HDR_LEN + 4 + 8 + 4)
             g_readdir_req_offset = le64_at(req + 11);
-        // Rreaddir = count(4 LE) + data. One dirent "foo":
-        //   qid(13) + offset(8 LE, cookie=1) + dtype(1) + name_len(2 LE=3) + "foo"
-        // = 27 bytes.
-        const u8 nm[] = {'f','o','o'};
-        u32 dcount = (u32)(P9_QID_LEN + 8 + 1 + 2 + sizeof(nm));   // 27
+        // Rreaddir = count(4 LE) + data. One dirent, "foo" unless a test names
+        // another: qid(13) + offset(8 LE, cookie=1) + dtype(1) + name_len(2 LE)
+        // + the name = 27 bytes for "foo".
+        const u8 *nm = g_rd_name;
+        u32 nmlen = g_rd_name_len;
+        u32 dcount = (u32)(P9_QID_LEN + 8 + 1 + 2 + nmlen);
         size_t total = P9_HDR_LEN + 4 + dcount;
         if (resp_cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
@@ -534,9 +539,9 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[o++] = 1; for (int i = 1; i < 8; i++) resp[o++] = 0;
         // dirent type (1)
         resp[o++] = 8;
-        // name_len (2 LE) = 3
-        resp[o++] = (u8)sizeof(nm); resp[o++] = 0;
-        for (size_t i = 0; i < sizeof(nm); i++) resp[o++] = nm[i];
+        // name_len (2 LE), then the name
+        resp[o++] = (u8)(nmlen & 0xff); resp[o++] = (u8)(nmlen >> 8);
+        for (u32 i = 0; i < nmlen; i++) resp[o++] = nm[i];
         return (int)total;
     }
     if (type == P9_TRENAMEAT) {
@@ -802,6 +807,8 @@ static struct Spoor *make_open_client_and_root(void) {
     g_ga_fail_ecode = 0;
     g_unlinkat_fail_ecode = 0;
     g_renameat_fail_ecode = 0;
+    g_rd_name = g_rd_foo;
+    g_rd_name_len = sizeof(g_rd_foo);
     lock_wire_reset();
     if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                             dev9p_responder, NULL) != 0) return NULL;
@@ -1707,6 +1714,39 @@ void test_dev9p_readdir_cookie_high_bit(void) {
     TEST_EXPECT_EQ(g_readdir_req_offset, 0xC123456789ABCDEFULL,
                    "dev9p_readdir forwards the high-bit cookie verbatim (no sign-clamp)");
     teardown(root);
+}
+
+// A dirent name is one path component. A server that sends an empty one, or
+// one holding a '/' or a NUL, would steer a walker that joins it to the path it
+// lists (rm -r, cp -r, mv across devices) out of that tree, so the syscall's
+// readdir run refuses it as malformed (EIO), as Linux's verify_dirent_name
+// does. The controls are the same reply naming "foo" and "..".
+void test_dev9p_readdir_refuses_bad_names(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    static const u8 slash[] = {'x','/','.','.'};
+    static const u8 nul[]   = {'a','\0','b'};
+    static const u8 dots[]  = {'.','.'};
+    u8 buf[128];
+    u64 cookie = 0;
+    s64 foo = spoor_readdir_run(root, buf, (long)sizeof(buf), &cookie);
+    g_rd_name = dots;  g_rd_name_len = sizeof(dots);
+    s64 dd = spoor_readdir_run(root, buf, (long)sizeof(buf), &cookie);
+    g_rd_name = slash; g_rd_name_len = sizeof(slash);
+    s64 sl = spoor_readdir_run(root, buf, (long)sizeof(buf), &cookie);
+    g_rd_name = nul;   g_rd_name_len = sizeof(nul);
+    s64 nu = spoor_readdir_run(root, buf, (long)sizeof(buf), &cookie);
+    g_rd_name = slash; g_rd_name_len = 0;
+    s64 em = spoor_readdir_run(root, buf, (long)sizeof(buf), &cookie);
+    g_rd_name = g_rd_foo;            // fixture hygiene, before any assert
+    g_rd_name_len = sizeof(g_rd_foo);
+    teardown(root);
+
+    TEST_EXPECT_EQ((u64)foo, (u64)27, "the control \"foo\": the run is delivered");
+    TEST_EXPECT_EQ((u64)dd, (u64)26, "the control \"..\": the run is delivered");
+    TEST_EXPECT_EQ((u64)sl, (u64)(s64)(-T_E_IO), "a name holding '/' -> EIO");
+    TEST_EXPECT_EQ((u64)nu, (u64)(s64)(-T_E_IO), "a name holding a NUL -> EIO");
+    TEST_EXPECT_EQ((u64)em, (u64)(s64)(-T_E_IO), "an empty name -> EIO");
 }
 
 // dev9p.rename routes through p9_client_renameat -> Trenameat; the responder

@@ -2848,6 +2848,7 @@ struct test_case g_tests[] = {
     { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "dev9p.readdir_cookie_high_bit", test_dev9p_readdir_cookie_high_bit, false, NULL },
+    { "dev9p.readdir_refuses_bad_names", test_dev9p_readdir_refuses_bad_names, false, NULL },
     { "dev9p.poll_regular_file_always_ready", test_dev9p_poll_regular_file_always_ready, false, NULL },
     { "dev9p.poll_snapshot_answers_at_zero_timeout", test_dev9p_poll_snapshot_answers_at_zero_timeout, false, NULL },
     { "dev9p.poll_local_and_remote_both_reported", test_dev9p_poll_local_and_remote_both_reported, false, NULL },

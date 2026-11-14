@@ -4387,6 +4387,8 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
 int spoor_devclass(struct Spoor *c);
 s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od, struct Spoor *nd,
                          const char *old_name, const char *new_name);
+s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
+                      u64 *last_cookie_out);
 s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
                            const u8 *aname, u64 aname_len, u64 n_uname,
                            u64 flags);

@@ -9,10 +9,13 @@
 // open could empty it, wherever in a tree it occurs; a directory met again
 // below itself (a symlink cycle), or the destination tree met inside the
 // source, is not descended. Keeping attributes keeps the source's times, owner
-// and mode (an owner or group the caller may not give is left, as POSIX
-// allows). Copying a symlink as a symlink needs a creation call native code
-// does not have yet, so a symlink source is refused when links are not
-// followed.
+// and mode (an owner or group the caller may not give is left without a word,
+// as GNU cp and mv leave it for an unprivileged caller; the mode carries no
+// setuid or setgid bit, so none survives a refused owner). Copying a symlink as
+// a symlink needs a creation call native code does not have yet, so a symlink
+// source is refused when links are not followed. Every destination file is
+// closed with its error checked: a write the server had not yet taken fails the
+// copy there.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -29,9 +32,12 @@ pub struct Opts {
     pub no_clobber: bool,
     pub preserve: bool,
     pub no_deref: bool,
-    /// An attribute that cannot be kept is said and does not fail the copy, as
-    /// POSIX asks of mv.
+    /// An attribute the server refuses to set is said and does not fail the
+    /// copy, as POSIX asks of mv.
     pub attrs_soft: bool,
+    /// A source that, opened, is neither a regular file nor a directory is
+    /// refused: a device's or a service's stream is not its content.
+    pub refuse_special: bool,
 }
 
 /// A file's identity: its Dev instance and the server's qid path.
@@ -102,7 +108,14 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
         );
         return false;
     }
-    let created = match fs::create_dir(dst) {
+    // Kept attributes widen the mode at the end; until then, and if that is
+    // refused, only the owner reaches the copy.
+    let made = if o.preserve {
+        fs::create_dir_mode(dst, 0o700)
+    } else {
+        fs::create_dir(dst)
+    };
+    let created = match made {
         Ok(()) => true,
         Err(Error::Exists) => false,
         Err(e) => {
@@ -200,6 +213,21 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
             return false;
         }
     };
+    // Asked of the open file: an unconnected /srv entry stats as a regular
+    // file, and only its connection says what it is.
+    if o.refuse_special {
+        match r.metadata() {
+            Ok(rm) if rm.is_file() => {}
+            Ok(_) => {
+                eprintln!("{}: cannot copy special file '{}'", o.tool, src);
+                return false;
+            }
+            Err(e) => {
+                eprintln!("{}: cannot stat '{}': {}", o.tool, src, e);
+                return false;
+            }
+        }
+    }
     // The source's mode for a file this creates (the umask applies); an
     // existing destination keeps its own unless attributes are kept.
     let mut wr = match OpenOptions::new()
@@ -222,6 +250,10 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
     if o.preserve && !preserve(&wr, dst, m, o) {
         return false;
     }
+    if let Err(e) = wr.close() {
+        eprintln!("{}: error writing '{}': {}", o.tool, dst, e);
+        return false;
+    }
     if o.verbose {
         println!("'{}' -> '{}'", src, dst);
     }
@@ -230,20 +262,21 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
 
 // Keeping attributes on the open destination: times first (the owner may set
 // them, and the handle that wrote flushes before they apply), then owner and
-// group, then the mode. A soft refusal is said and the rest are still tried.
-// False only when a failure fails the copy.
+// group, then the mode. A soft refusal is said and the rest are still tried;
+// any other failure (a change flushes writes the server had not taken) fails
+// the copy. False only when a failure fails the copy.
 fn preserve(f: &File, dst: &str, m: &Metadata, o: &Opts) -> bool {
     let times = FileTimes::new()
         .set_accessed(libthyla_rs::time::SystemTime::from_unix(m.atime_sec(), 0))
         .set_modified(libthyla_rs::time::SystemTime::from_unix(m.mtime_sec(), 0));
     if let Err(e) = f.set_times(times) {
         eprintln!("{}: preserving times for '{}': {}", o.tool, dst, e);
-        if !o.attrs_soft {
+        if !soft(o, &e) {
             return false;
         }
     }
     // Each separately, so a refused owner does not cost the group. A refusal
-    // leaves the destination's own, which POSIX permits without a diagnostic.
+    // leaves the destination's own, without a word (see the header).
     if let Ok(cur) = f.metadata() {
         if cur.uid() != m.uid() {
             let _ = f.chown(Some(m.uid()), None);
@@ -254,9 +287,22 @@ fn preserve(f: &File, dst: &str, m: &Metadata, o: &Opts) -> bool {
     }
     if let Err(e) = f.chmod(m.permissions()) {
         eprintln!("{}: preserving permissions for '{}': {}", o.tool, dst, e);
-        return o.attrs_soft;
+        return soft(o, &e);
     }
     true
+}
+
+/// A refused attribute that does not fail a soft copy: the server will not set
+/// it. Anything else is a failure.
+fn soft(o: &Opts, e: &Error) -> bool {
+    o.attrs_soft
+        && matches!(
+            e,
+            Error::PermissionDenied
+                | Error::NotPermitted
+                | Error::ReadOnlyFilesystem
+                | Error::Unsupported
+        )
 }
 
 /// Canonicalize lexically: anchor a relative path against the per-Proc cwd

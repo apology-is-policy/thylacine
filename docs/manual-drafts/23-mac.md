@@ -45,14 +45,14 @@ rmdir /mnt/mac/folders/work/drafts
 
 `work` and `notes.txt` in these commands are illustrative names. Each change is made on the Mac before the command that made it returns, and programs on the Mac see it immediately. A file created from the guest belongs on the Mac to the Mac user who runs the app.
 
-`mv` within one shared folder is a rename on the Mac. Between two shared folders, and between a shared folder and the guest's own files, `mv` copies the file or directory, keeping its modification time and permissions, and then removes the original, as a move between two disks does:
+`mv` within one shared folder is a rename on the Mac. Between two shared folders, and between a shared folder and the guest's own files, `mv` copies the file or directory, keeping its modification time and the permissions the guest sees, and then removes the original, as a move between two disks does. The guest sees only a Mac file's owner bits, so a file of mode `0644` moved between two shared folders arrives as `0600`:
 
 ```sh
 mv /tmp/report.txt /mnt/mac/folders/work/report.txt
 mv /mnt/mac/folders/work/drafts /tmp/drafts
 ```
 
-`/tmp/report.txt` and `drafts` are illustrative names. Such a move is not a single step: a program on the Mac can see the new file before the original is gone. If the copy fails, `mv` removes what it copied and leaves the original whole. If the original cannot be removed, both remain, and `mv` says so and fails. A symbolic link cannot be moved across a boundary, because Thylacine's own programs cannot create one yet: moving a link, or a directory that holds one, fails with `creating a link is not supported`, and the original is left whole.
+`/tmp/report.txt` and `drafts` are illustrative names. Such a move is not a single step: a program on the Mac can see the new file before the original is gone. A destination that already exists is removed first, as POSIX requires. If the copy fails, `mv` removes what it copied and leaves the original whole. If the original cannot be removed, the copy remains, and so does whatever of the original could not be removed; `mv` says what and fails. A device, socket or other special file is not moved this way: `mv` says so. A symbolic link cannot be moved across a boundary, because Thylacine's own programs cannot create one yet: moving a link, or a directory that holds one, fails with `creating a link is not supported`, and the original is left whole.
 
 Only regular files and directories can be opened. A Mac device, socket or named pipe in a shared folder is listed, but opening it fails with `permission denied`. A Mac file that the Mac user cannot read cannot be read from the guest either.
 
@@ -78,13 +78,13 @@ chmod: /mnt/mac/folders/docs/readme.txt: read-only file system
 
 The folder on the Mac is unchanged.
 
-Moving a file out of a read-only folder copies it and then fails to remove the original:
+Moving a file out of a read-only folder into the guest's own files copies it and then fails to remove the original:
 
 ```text
 mv: cannot remove '/mnt/mac/folders/docs/readme.txt': permission denied
 ```
 
-The copy stays where `mv` put it, and the folder on the Mac is unchanged.
+The copy stays where `mv` put it, and the folder on the Mac is unchanged. Moving it into another shared folder is refused before anything is copied, with `permission denied`, because the two folders are one session and the guest checks the read-only folder's modes first.
 
 ### Ownership and permissions
 

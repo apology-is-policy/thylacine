@@ -3,6 +3,9 @@
 // -r / -R: recursively remove a directory and its contents.
 // -f:      ignore nonexistent operands; never fail on a missing target.
 //
+// Each entry is examined without following a link, so a link is removed itself,
+// never the directory it names.
+//
 // Recursion skips "." and ".." (fs::read_dir yields them -- Stratum returns
 // cookie 1 = ".", cookie 2 = ".."), so the walk cannot loop or escape upward.
 // Recursion depth tracks FS depth; deep trees are an interactive, non-adversarial
@@ -19,7 +22,8 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::err::{Error, Result};
-use libthyla_rs::{eprintln, fs, println};
+use libthyla_rs::fs::{self, File, Metadata};
+use libthyla_rs::{eprintln, println};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -103,8 +107,13 @@ fn run(args: Args) -> i64 {
     status
 }
 
+/// What `path` names itself, a link not followed.
+fn lstat(path: &str) -> Result<Metadata> {
+    File::open_link(path).and_then(|f| f.metadata())
+}
+
 fn remove(path: &str, recursive: bool, force: bool, verbose: bool) -> Result<()> {
-    match fs::metadata(path) {
+    match lstat(path) {
         Ok(m) if m.is_dir() => {
             if !recursive {
                 return Err(Error::InvalidArgument); // "is a directory" (need -r)

@@ -5173,8 +5173,9 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
 // getdents answer for an fd that is not a data channel], OPNOTSUPP for a Dev
 // with no .readdir slot, IO for a malformed stream, and the Dev's own
 // negative propagated verbatim).
-static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
-                             u64 *last_cookie_out) {
+VISIBLE_IF_KERNEL_TESTS
+s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
+                      u64 *last_cookie_out) {
     // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject
     // readdir too (listing a dir's entries is content the perm_check-exempt
     // O_PATH open would otherwise leak for a non-readable dir). An O_PATH open
@@ -5216,6 +5217,15 @@ static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
         u32 nlen = (u32)scratch[pos + 22] | ((u32)scratch[pos + 23] << 8);
         long entry = 24 + (long)nlen;
         if (pos + entry > got)                       break;       // truncated trailing entry
+        // A name is one path component: never empty, never holding a '/' or a
+        // NUL (Linux's verify_dirent_name). A server that sent one would steer
+        // a walker joining it to the path it lists (rm -r, cp -r, mv across
+        // devices) out of that tree, so the run is malformed (I-28, I-14).
+        if (nlen == 0)                               return -T_E_IO;
+        for (u32 k = 0; k < nlen; k++) {
+            u8 nb = scratch[pos + 24 + k];
+            if (nb == '/' || nb == '\0')            return -T_E_IO;
+        }
         last_cookie = cookie;
         advanced = true;
         pos += entry;
