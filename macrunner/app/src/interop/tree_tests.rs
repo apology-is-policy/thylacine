@@ -223,6 +223,43 @@ fn the_root_lists_folders_and_snarf_and_everything_is_the_attachers() {
 }
 
 #[test]
+fn one_host_file_has_one_qid_whichever_share_reaches_it() {
+    let d = Dir::new("qid-outer");
+    fs::create_dir(d.0.join("sub")).unwrap();
+    fs::write(d.0.join("sub/f.txt"), b"one file\n").unwrap();
+    fs::write(d.0.join("g.txt"), b"another\n").unwrap();
+    let logs = Dir::new("qid-log");
+    let inner = Share {
+        name: "inner".to_string(),
+        path: d.0.join("sub"),
+        read_only: false,
+    };
+    let mut c = Client::new(vec![share("outer", &d, false), inner], "", &logs);
+    let via_outer = c.walk(2, "folders/outer/sub/f.txt");
+    via_outer.ok(P9_RWALK);
+    let via_inner = c.walk(3, "folders/inner/f.txt");
+    via_inner.ok(P9_RWALK);
+    let other = c.walk(4, "folders/outer/g.txt");
+    other.ok(P9_RWALK);
+    let (a, b, g) = (
+        via_outer.qid(2 + 3 * P9_QID_LEN).path,
+        via_inner.qid(2 + 2 * P9_QID_LEN).path,
+        other.qid(2 + 2 * P9_QID_LEN).path,
+    );
+    assert_eq!(a, b, "one host file, one qid path, through either share");
+    assert_ne!(a, g, "two host files, two qid paths");
+    let dir_outer = c.walk(5, "folders/outer/sub");
+    dir_outer.ok(P9_RWALK);
+    let dir_inner = c.walk(6, "folders/inner");
+    dir_inner.ok(P9_RWALK);
+    assert_eq!(
+        dir_outer.qid(2 + 2 * P9_QID_LEN).path,
+        dir_inner.qid(2 + P9_QID_LEN).path,
+        "the inner share's root is the outer share's sub directory"
+    );
+}
+
+#[test]
 fn snarf_reads_the_pasteboard_and_a_clunked_write_sets_it() {
     let logs = Dir::new("snarf-log");
     let mut c = Client::new(vec![], "hello from the mac", &logs);

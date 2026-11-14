@@ -43,10 +43,12 @@ const Q_SNARF: u64 = SYNTH | 2;
 const Q_FOLDERS: u64 = SYNTH | 3;
 // A share whose folder cannot be opened is still listed, under this qid path plus its index.
 const Q_ABSENT_SHARE: u64 = SYNTH | 0x100;
-// A host file's qid path: the share's index + 1 in bits 56..62 over the inode, when the file is on
-// the share root's device and its inode fits; otherwise a number from the remap table, whose top
-// byte is REMAP. So shares are at most MAX_SHARES.
+// A host file's qid path: its device's index + 1 among the devices seen, in bits 56..62, over the
+// inode, when the inode fits and a slot is free; otherwise a number from the remap table, whose top
+// byte is REMAP. Never the share: two shares can reach one file (one inside the other), and the
+// guest knows a file by its qid.
 const REMAP: u64 = 0x7F << 56;
+const DEV_SLOTS: usize = 126;
 pub const MAX_SHARES: usize = 126;
 
 /// What every session of the line shares.
@@ -57,6 +59,7 @@ pub struct Shared {
     locks: Locks,
     sessions: AtomicU64,
     remap: Mutex<HashMap<(u64, u64), u64>>,
+    devs: Mutex<Vec<u64>>,
     started: (u64, u64),
 }
 
@@ -101,6 +104,7 @@ impl Shared {
             locks: Locks::default(),
             sessions: AtomicU64::new(0),
             remap: Mutex::new(HashMap::new()),
+            devs: Mutex::new(Vec::new()),
             started: (now.as_secs(), now.subsec_nanos() as u64),
         })
     }
@@ -119,9 +123,20 @@ impl Shared {
         Ok(r)
     }
 
-    fn qpath(&self, share: usize, root_dev: u64, dev: u64, ino: u64) -> u64 {
-        if dev == root_dev && ino < 1 << 56 {
-            return ((share as u64 + 1) << 56) | ino;
+    fn qpath(&self, dev: u64, ino: u64) -> u64 {
+        if ino < 1 << 56 {
+            let mut d = self.devs.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = match d.iter().position(|&x| x == dev) {
+                Some(i) => Some(i),
+                None if d.len() < DEV_SLOTS => {
+                    d.push(dev);
+                    Some(d.len() - 1)
+                }
+                None => None,
+            };
+            if let Some(i) = slot {
+                return ((i as u64 + 1) << 56) | ino;
+            }
         }
         let mut t = self.remap.lock().unwrap_or_else(|e| e.into_inner());
         let next = REMAP | t.len() as u64;
@@ -356,7 +371,7 @@ impl Session {
     // ------------------------------------------------------------------------------------------
     // Nodes: a qid, a step of a walk, an attribute set.
 
-    fn host_qid(&self, share: usize, root_dev: u64, st: &libc::stat) -> Qid {
+    fn host_qid(&self, st: &libc::stat) -> Qid {
         let kind = if folder::is_dir(st) {
             P9_QTDIR
         } else if folder::is_link(st) {
@@ -368,19 +383,13 @@ impl Session {
             kind,
             // QEMU's: a change of the file's time or size is a new version.
             version: (st.st_mtime as u64 ^ ((st.st_size as u64) << 8)) as u32,
-            path: self
-                .shared
-                .qpath(share, root_dev, st.st_dev as u32 as u64, st.st_ino),
+            path: self.shared.qpath(st.st_dev as u32 as u64, st.st_ino),
         }
     }
 
     fn share_qid(&self, share: usize) -> Qid {
-        match self
-            .shared
-            .root(share)
-            .and_then(|r| Ok((r.0.lstat(&[])?, r.1)))
-        {
-            Ok((st, dev)) => self.host_qid(share, dev, &st),
+        match self.shared.root(share).and_then(|r| r.0.lstat(&[])) {
+            Ok(st) => self.host_qid(&st),
             Err(_) => synth_qid(Q_ABSENT_SHARE + share as u64, true),
         }
     }
@@ -396,7 +405,7 @@ impl Session {
                 Node::Host { share, rel } => {
                     let up = rel[..rel.len() - 1].to_vec();
                     let r = self.shared.root(*share)?;
-                    let q = self.host_qid(*share, r.1, &r.0.lstat(&up)?);
+                    let q = self.host_qid(&r.0.lstat(&up)?);
                     (
                         Node::Host {
                             share: *share,
@@ -425,7 +434,7 @@ impl Session {
                     .position(|s| s.share.name.as_bytes() == name)
                     .ok_or(E_NOENT)?;
                 let r = self.shared.root(i)?;
-                let q = self.host_qid(i, r.1, &r.0.lstat(&[])?);
+                let q = self.host_qid(&r.0.lstat(&[])?);
                 Ok((
                     Node::Host {
                         share: i,
@@ -441,7 +450,7 @@ impl Session {
                 // is ELOOP and one past a file ENOTDIR.
                 let mut next = rel.clone();
                 next.push(name.to_vec());
-                let q = self.host_qid(*share, r.1, &r.0.lstat(&next)?);
+                let q = self.host_qid(&r.0.lstat(&next)?);
                 Ok((
                     Node::Host {
                         share: *share,
@@ -477,17 +486,10 @@ impl Session {
         }
     }
 
-    fn host_attr(
-        &self,
-        share: usize,
-        root_dev: u64,
-        st: &libc::stat,
-        uid: u32,
-        read_only: bool,
-    ) -> Attr {
+    fn host_attr(&self, st: &libc::stat, uid: u32, read_only: bool) -> Attr {
         Attr {
             valid: P9_GETATTR_BASIC | P9_GETATTR_BTIME,
-            qid: self.host_qid(share, root_dev, st),
+            qid: self.host_qid(st),
             mode: host_mode(st, read_only),
             uid,
             gid: uid,
@@ -630,7 +632,7 @@ impl Session {
                         return Err(E_ISDIR);
                     }
                     let fd = r.0.dir(rel)?;
-                    let q = self.host_qid(*share, r.1, &folder::fstat(fd.as_raw_fd())?);
+                    let q = self.host_qid(&folder::fstat(fd.as_raw_fd())?);
                     (
                         Open::Dir {
                             fd: Some(fd),
@@ -649,7 +651,7 @@ impl Session {
                     if !folder::is_reg(&st) {
                         return Err(E_PERM);
                     }
-                    let q = self.host_qid(*share, r.1, &st);
+                    let q = self.host_qid(&st);
                     let open = Open::File {
                         fd,
                         read: acc != 1,
@@ -757,7 +759,7 @@ impl Session {
                     }
                     _ => r.0.lstat(rel)?,
                 };
-                self.host_attr(*share, r.1, &st, f.uid, r.0.read_only)
+                self.host_attr(&st, f.uid, r.0.read_only)
             }
             n => self.synth_attr(n, f.uid),
         };
@@ -870,9 +872,8 @@ impl Session {
                     qid: self.share_qid(i),
                 })
                 .collect(),
-            Node::Host { share, .. } => {
+            Node::Host { .. } => {
                 let fd = fd.ok_or(E_BADF)?.as_raw_fd();
-                let r = self.shared.root(*share)?;
                 let dev = folder::fstat(fd)?.st_dev as u32 as u64;
                 folder::entries(fd)?
                     .into_iter()
@@ -882,7 +883,7 @@ impl Session {
                             libc::DT_LNK => P9_QTSYMLINK,
                             _ => P9_QTFILE,
                         };
-                        let path = self.shared.qpath(*share, r.1, dev, e.ino);
+                        let path = self.shared.qpath(dev, e.ino);
                         Dirent {
                             name: e.name,
                             dtype: e.dtype,
@@ -998,7 +999,7 @@ impl Session {
     // Creating, renaming, removing.
 
     /// The directory a create or a name operation acts in: its share, root and path, writable.
-    fn writable_dir(&self, fid: u32, name: &[u8]) -> Result<(usize, OpenRoot, Rel, OwnedFd), u32> {
+    fn writable_dir(&self, fid: u32, name: &[u8]) -> Result<(usize, Rel, OwnedFd), u32> {
         let (share, rel) = match &self.fid(fid)?.node {
             Node::Host { share, rel } => (*share, rel.clone()),
             Node::Snarf => return Err(E_NOTDIR),
@@ -1013,17 +1014,17 @@ impl Session {
             return Err(E_INVAL);
         }
         let dir = r.0.dir(&rel)?;
-        Ok((share, r, rel, dir))
+        Ok((share, rel, dir))
     }
 
     fn lcreate(&mut self, tag: u16, a: TlcreateArgs<'_>) -> Result<usize, u32> {
         if !matches!(self.fid(a.fid)?.open, Open::No) {
             return Err(E_BADF);
         }
-        let (share, r, mut rel, dir) = self.writable_dir(a.fid, a.name)?;
+        let (share, mut rel, dir) = self.writable_dir(a.fid, a.name)?;
         let flags = folder::mac_open_flags(a.flags)?;
         let fd = folder::create(dir.as_raw_fd(), a.name, flags, a.mode)?;
-        let qid = self.host_qid(share, r.1, &folder::fstat(fd.as_raw_fd())?);
+        let qid = self.host_qid(&folder::fstat(fd.as_raw_fd())?);
         rel.push(a.name.to_vec());
         let acc = a.flags & 3;
         let f = self.fid_mut(a.fid)?;
@@ -1038,16 +1039,16 @@ impl Session {
     }
 
     fn mkdir(&mut self, tag: u16, a: TmkdirArgs<'_>) -> Result<usize, u32> {
-        let (share, r, _, dir) = self.writable_dir(a.dfid, a.name)?;
+        let (_, _, dir) = self.writable_dir(a.dfid, a.name)?;
         folder::mkdirat(dir.as_raw_fd(), a.name, a.mode)?;
-        let qid = self.host_qid(share, r.1, &folder::fstatat(dir.as_raw_fd(), a.name)?);
+        let qid = self.host_qid(&folder::fstatat(dir.as_raw_fd(), a.name)?);
         build_rmkdir(&mut self.reply, tag, &qid).map_err(|_| E_IO)
     }
 
     fn symlink(&mut self, tag: u16, a: TsymlinkArgs<'_>) -> Result<usize, u32> {
-        let (share, r, _, dir) = self.writable_dir(a.fid, a.name)?;
+        let (_, _, dir) = self.writable_dir(a.fid, a.name)?;
         folder::symlinkat(a.target, dir.as_raw_fd(), a.name)?;
-        let qid = self.host_qid(share, r.1, &folder::fstatat(dir.as_raw_fd(), a.name)?);
+        let qid = self.host_qid(&folder::fstatat(dir.as_raw_fd(), a.name)?);
         build_rsymlink(&mut self.reply, tag, &qid).map_err(|_| E_IO)
     }
 
@@ -1087,7 +1088,7 @@ impl Session {
                 _ => return Err(E_PERM),
             },
         };
-        let (to_share, _, to_dir_rel, to_dir) = self.writable_dir(newdir, newname)?;
+        let (to_share, to_dir_rel, to_dir) = self.writable_dir(newdir, newname)?;
         if to_share != share {
             return Err(E_XDEV);
         }
@@ -1124,7 +1125,7 @@ impl Session {
         if a.flags & !P9_UNLINK_AT_REMOVEDIR != 0 {
             return Err(E_INVAL);
         }
-        let (_, _, _, dir) = self.writable_dir(a.dfid, a.name)?;
+        let (_, _, dir) = self.writable_dir(a.dfid, a.name)?;
         let rmdir = a.flags & P9_UNLINK_AT_REMOVEDIR != 0;
         // macOS answers EPERM for an unlink of a directory; Linux, whose errno the guest reads,
         // answers EISDIR.
