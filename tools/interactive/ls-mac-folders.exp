@@ -35,7 +35,8 @@
 #      of a share into the guest. Out of the read-only share the copy is made and the source cannot
 #      be removed: mv says so, fails, and leaves both, as POSIX mv does.
 #   9. rm -r removes a link in a tree, never what it names: work/rmtree holds a link to the
-#      directory work/keep, and the tree goes while work/keep and its file stay on the Mac.
+#      directory work/keep, and the tree goes while work/keep and its file stay on the Mac. A
+#      plain rm of a link to a directory removes the link: a link is not a directory.
 #
 # Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
 # it, and the guest's output is upper-cased, so the echoed command line can never match it.
@@ -88,6 +89,7 @@ exec ln -s sub/linked.txt                 $::W/rel
 exec ln -s /folders/work/sub/anchored.txt $::W/inshare
 exec ln -s /tmp/mac-decoy-a               $::W/abs
 exec ln -s ../keep                        $::W/rmtree/link
+exec ln -s keep                           $::W/dirlink
 
 set ::mac_sock [file join $::lc_repo build "mac-folders-[pid].sock"]
 set ::mac_log [file join $::lc_repo build "mac-folders-[pid].log"]
@@ -426,6 +428,12 @@ if {$st != 0 || $why ne ""} {
 }
 on_mac [expr {![file exists $::W/rmtree]}] "work/rmtree is gone"
 on_mac [expr {[read_file $::W/keep/kept.txt] eq "kept beside the tree\n"}] "work/keep/kept.txt, in the directory the link named, is still there"
-lc_pass "ls-mac-folders: rm -r removes a link in a tree, never the directory it names"
+lassign [tool_status rm "rm /mnt/mac/folders/work/dirlink" leg9b "rm of a link to a directory"] st why
+if {$st != 0 || $why ne ""} {
+    lc_fail "rm of a link to a directory gave status $st, '$why' -- not the link removed"
+}
+on_mac [catch {file lstat $::W/dirlink dl}] "work/dirlink, the link, is gone"
+on_mac [expr {[read_file $::W/keep/kept.txt] eq "kept beside the tree\n"}] "work/keep/kept.txt, in the directory it named, is still there"
+lc_pass "ls-mac-folders: rm -r removes a link in a tree, never the directory it names; rm removes a link to a directory itself"
 
 lc_quit

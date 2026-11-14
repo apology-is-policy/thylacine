@@ -15,7 +15,17 @@
 // a symlink needs a creation call native code does not have yet, so a symlink
 // source is refused when links are not followed. Every destination file is
 // closed with its error checked: a write the server had not yet taken fails the
-// copy there.
+// copy there. A file's mode, times and identity come from its open handle, the
+// file actually copied; a special file is refused on what that handle says (an
+// unconnected /srv entry stats as a regular file, and the open that tells
+// connects to the service, a connection dropped at once).
+//
+// A directory's attributes and sync wait until the whole walk is done (its
+// entries change it until then, and a kept read-only mode would refuse them),
+// and are applied deepest first, each to the directory the copy made, checked
+// by identity. mv asks three more things: every entry created new (its
+// temporary tree), each file and directory synced, and directory attributes
+// kept only when the whole copy succeeded, since a failed one is removed.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,7 +33,7 @@ use alloc::vec::Vec;
 use libthyla_rs::env;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, File, FileTimes, Metadata, OpenOptions, Path};
-use libthyla_rs::{eprintln, io, println};
+use libthyla_rs::{eprintln, io, println, T_OREAD};
 
 /// How a copy behaves, and the tool its diagnostics name.
 pub struct Opts {
@@ -38,31 +48,72 @@ pub struct Opts {
     /// A source that, opened, is neither a regular file nor a directory is
     /// refused: a device's or a service's stream is not its content.
     pub refuse_special: bool,
+    /// Every destination entry is created new; one that exists fails the copy.
+    pub excl: bool,
+    /// Each file is synced before it is closed, and each directory once its
+    /// entries and attributes are in.
+    pub sync: bool,
+    /// Directory attributes are kept only when the whole copy succeeded.
+    pub attrs_only_whole: bool,
 }
 
 /// A file's identity: its Dev instance and the server's qid path.
-type Id = (u64, u64);
+pub type Id = (u64, u64);
 
-fn id_of(m: &Metadata) -> Id {
+pub fn id_of(m: &Metadata) -> Id {
     (m.dev(), m.qid_path())
 }
 
-/// One top-level source's traversal: the directories on the current path, and
-/// the destination directory it creates or fills.
+/// What a copy did, for a caller that removes its source or undoes it (mv).
+#[derive(Default)]
+pub struct Done {
+    /// The top source entry, as the copy found it.
+    pub src_top: Option<Id>,
+    /// The top destination entry, when the copy created it.
+    pub dst_top: Option<Id>,
+    /// Every source entry reproduced, sorted.
+    pub copied: Vec<Id>,
+}
+
+/// A directory the copy made or filled, whose attributes and sync wait for the
+/// end of the walk.
+struct Made {
+    path: String,
+    id: Id,
+    src: Metadata,
+}
+
+/// One top-level source's traversal: the directories on the current path, the
+/// destination directory it creates or fills, the directories left to finish,
+/// and what it did.
 struct Walk {
     ancestors: Vec<Id>,
     dest_root: Option<Id>,
+    made: Vec<Made>,
+    done: Done,
 }
 
 /// Copy `src` to `dst`, a file or a whole directory tree (the caller decides
 /// whether a directory may be copied), printing a diagnostic for each failure;
 /// false if any. A failed entry does not stop its siblings.
 pub fn copy(src: &str, dst: &str, o: &Opts) -> bool {
+    copy_tracked(src, dst, o, &mut Done::default())
+}
+
+/// `copy`, recording what it did in `done`.
+pub fn copy_tracked(src: &str, dst: &str, o: &Opts, done: &mut Done) -> bool {
     let mut w = Walk {
         ancestors: Vec::new(),
         dest_root: None,
+        made: Vec::new(),
+        done: Done::default(),
     };
-    copy_one(src, dst, o, &mut w)
+    let walked = copy_one(src, dst, o, &mut w);
+    let finished = finish(&w.made, walked, o);
+    w.done.copied.sort_unstable();
+    w.done.copied.dedup();
+    *done = w.done;
+    walked && finished
 }
 
 fn copy_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
@@ -84,7 +135,7 @@ fn copy_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
     }
     match fs::metadata(src) {
         Ok(m) if m.is_dir() => copy_dir(src, dst, &m, o, w),
-        Ok(m) => copy_file(src, dst, &m, o),
+        Ok(m) => copy_file(src, dst, &m, o, w),
         Err(e) => {
             eprintln!("{}: cannot stat '{}': {}", o.tool, src, e);
             false
@@ -94,6 +145,9 @@ fn copy_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
 
 fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool {
     let id = id_of(m);
+    if w.ancestors.is_empty() {
+        w.done.src_top = Some(id);
+    }
     if w.ancestors.contains(&id) {
         eprintln!(
             "{}: '{}': a directory that contains itself (a symlink cycle); not copied",
@@ -117,13 +171,20 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
     };
     let created = match made {
         Ok(()) => true,
-        Err(Error::Exists) => false,
+        Err(Error::Exists) if !o.excl => false,
         Err(e) => {
             eprintln!("{}: cannot create directory '{}': {}", o.tool, dst, e);
             return false;
         }
     };
-    let dm = match fs::metadata(dst) {
+    // An entry created new is asked without following a link; an existing
+    // destination may be a link to the directory to fill.
+    let stat = if o.excl {
+        File::open_link(dst).and_then(|f| f.metadata())
+    } else {
+        fs::metadata(dst)
+    };
+    let dm = match stat {
         Ok(dm) => dm,
         Err(e) => {
             eprintln!("{}: cannot stat '{}': {}", o.tool, dst, e);
@@ -143,10 +204,14 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
     }
     if w.ancestors.is_empty() {
         w.dest_root = Some(id_of(&dm));
+        if created {
+            w.done.dst_top = Some(id_of(&dm));
+        }
     }
     if o.verbose && created {
         println!("'{}' -> '{}'", src, dst);
     }
+    w.done.copied.push(id);
 
     w.ancestors.push(id);
     let mut ok = true;
@@ -177,33 +242,27 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
         }
     }
     w.ancestors.pop();
-
-    // After the entries: creating them moved the directory's mtime, and a
-    // read-only mode would have refused them.
-    if o.preserve {
-        match File::open_with_opath(dst) {
-            Ok(f) => ok &= preserve(&f, dst, m, o),
-            Err(e) => {
-                eprintln!(
-                    "{}: cannot open '{}' to preserve its attributes: {}",
-                    o.tool, dst, e
-                );
-                ok &= o.attrs_soft;
-            }
-        }
+    if o.preserve || o.sync {
+        w.made.push(Made {
+            path: String::from(dst),
+            id: id_of(&dm),
+            src: *m,
+        });
     }
     ok
 }
 
-fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
-    if let Ok(dm) = fs::metadata(dst) {
-        // -n: never overwrite an existing destination (skip silently).
-        if o.no_clobber {
-            return true;
-        }
-        if id_of(&dm) == id_of(m) {
-            eprintln!("{}: '{}' and '{}' are the same file", o.tool, src, dst);
-            return false;
+fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool {
+    if !o.excl {
+        if let Ok(dm) = fs::metadata(dst) {
+            // -n: never overwrite an existing destination (skip silently).
+            if o.no_clobber {
+                return true;
+            }
+            if id_of(&dm) == id_of(m) {
+                eprintln!("{}: '{}' and '{}' are the same file", o.tool, src, dst);
+                return false;
+            }
         }
     }
     let mut r = match File::open(src) {
@@ -213,28 +272,29 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
             return false;
         }
     };
-    // Asked of the open file: an unconnected /srv entry stats as a regular
-    // file, and only its connection says what it is.
-    if o.refuse_special {
-        match r.metadata() {
-            Ok(rm) if rm.is_file() => {}
-            Ok(_) => {
-                eprintln!("{}: cannot copy special file '{}'", o.tool, src);
-                return false;
-            }
-            Err(e) => {
-                eprintln!("{}: cannot stat '{}': {}", o.tool, src, e);
-                return false;
-            }
+    let sm = match r.metadata() {
+        Ok(sm) => sm,
+        Err(e) if o.refuse_special => {
+            eprintln!("{}: cannot stat '{}': {}", o.tool, src, e);
+            return false;
         }
+        Err(_) => *m,
+    };
+    if o.refuse_special && !sm.is_file() {
+        eprintln!("{}: cannot copy special file '{}'", o.tool, src);
+        return false;
+    }
+    if w.ancestors.is_empty() {
+        w.done.src_top = Some(id_of(&sm));
     }
     // The source's mode for a file this creates (the umask applies); an
     // existing destination keeps its own unless attributes are kept.
     let mut wr = match OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
-        .mode(m.permissions() & 0o777)
+        .create_new(o.excl)
+        .truncate(!o.excl)
+        .mode(sm.permissions() & 0o777)
         .open(dst)
     {
         Ok(wr) => wr,
@@ -243,21 +303,97 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
             return false;
         }
     };
+    if o.excl && w.ancestors.is_empty() {
+        match wr.metadata() {
+            Ok(dm) => w.done.dst_top = Some(id_of(&dm)),
+            Err(e) => {
+                eprintln!("{}: cannot stat '{}': {}", o.tool, dst, e);
+                return false;
+            }
+        }
+    }
     if let Err(e) = io::copy(&mut r, &mut wr) {
         eprintln!("{}: error copying '{}' to '{}': {}", o.tool, src, dst, e);
         return false;
     }
-    if o.preserve && !preserve(&wr, dst, m, o) {
+    if o.preserve && !preserve(&wr, dst, &sm, o) {
         return false;
+    }
+    if o.sync {
+        if let Err(e) = wr.sync_all() {
+            eprintln!("{}: cannot sync '{}': {}", o.tool, dst, e);
+            return false;
+        }
     }
     if let Err(e) = wr.close() {
         eprintln!("{}: error writing '{}': {}", o.tool, dst, e);
         return false;
     }
+    w.done.copied.push(id_of(&sm));
     if o.verbose {
         println!("'{}' -> '{}'", src, dst);
     }
     true
+}
+
+// The directories' attributes and syncs, once the walk is done: deepest first,
+// each checked to be the directory the copy made. A reading open is taken
+// before the attributes, whose mode may refuse one, so the sync covers them.
+// Nothing is finished for a failed copy whose attributes wait for a whole one:
+// it is removed. False when anything failed the copy.
+fn finish(made: &[Made], whole: bool, o: &Opts) -> bool {
+    if !whole && o.attrs_only_whole {
+        return true;
+    }
+    let mut ok = true;
+    for d in made.iter().rev() {
+        let nav = match File::open_link(d.path.as_str()) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{}: cannot open '{}': {}", o.tool, d.path, e);
+                ok &= !o.sync && soft(o, &e);
+                continue;
+            }
+        };
+        match nav.metadata() {
+            Ok(cur) if id_of(&cur) == d.id => {}
+            Ok(_) => {
+                eprintln!(
+                    "{}: '{}' was replaced during the copy; not finished",
+                    o.tool, d.path
+                );
+                ok = false;
+                continue;
+            }
+            Err(e) => {
+                eprintln!("{}: cannot stat '{}': {}", o.tool, d.path, e);
+                ok = false;
+                continue;
+            }
+        }
+        let rd = if o.sync {
+            match nav.open_at(".", T_OREAD) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    eprintln!("{}: cannot open '{}' to sync it: {}", o.tool, d.path, e);
+                    ok = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if o.preserve {
+            ok &= preserve(&nav, &d.path, &d.src, o);
+        }
+        if let Some(rd) = rd {
+            if let Err(e) = rd.sync_all() {
+                eprintln!("{}: cannot sync '{}': {}", o.tool, d.path, e);
+                ok = false;
+            }
+        }
+    }
+    ok
 }
 
 // Keeping attributes on the open destination: times first (the owner may set
@@ -345,4 +481,20 @@ pub fn join(dir: &str, name: &str) -> String {
     s.push('/');
     s.push_str(name);
     s
+}
+
+/// `path` as its directory and last name, for a call relative to the
+/// directory: trailing slashes dropped, "." for a bare name. None for a path
+/// with no last name to act on: "", "/", or one ending in "." or "..".
+pub fn split(path: &str) -> Option<(&str, &str)> {
+    let t = path.trim_end_matches('/');
+    let (dir, name) = match t.rfind('/') {
+        Some(0) => ("/", &t[1..]),
+        Some(i) => (&t[..i], &t[i + 1..]),
+        None => (".", t),
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    Some((dir, name))
 }

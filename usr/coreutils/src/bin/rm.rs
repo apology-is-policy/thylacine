@@ -1,29 +1,32 @@
-// rm [-rRf] FILE... -- remove files (and, with -r, directory trees).
+// rm [-rRfv] FILE... -- remove files (and, with -r, directory trees).
 //
 // -r / -R: recursively remove a directory and its contents.
 // -f:      ignore nonexistent operands; never fail on a missing target.
 //
-// Each entry is examined without following a link, so a link is removed itself,
-// never the directory it names.
-//
-// Recursion skips "." and ".." (fs::read_dir yields them -- Stratum returns
-// cookie 1 = ".", cookie 2 = ".."), so the walk cannot loop or escape upward.
-// Recursion depth tracks FS depth; deep trees are an interactive, non-adversarial
-// case at v1.0 (an explicit-stack rewrite is a v1.x refinement).
+// Each operand and entry is examined without following a link, so a link is
+// removed itself, never the directory it names, and needs no -r. An operand
+// written with a trailing slash names a directory (POSIX 4.13): a link so
+// written is followed, its directory emptied, and the link itself refused as
+// not a directory. The walk goes by descriptor (coreutils::rmtree): each
+// directory is opened relative to its parent and emptied relative to itself,
+// so a link swapped in mid-walk cannot steer it elsewhere. The first failure
+// ends an operand and is said once. An operand that names no entry of a
+// directory ("/", or one ending in "." or "..") is refused.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
-use alloc::string::String;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::copy::split;
+use coreutils::rmtree::{self, Rm};
 use libthyla_rs::env::{self, Args};
+use libthyla_rs::eprintln;
 use libthyla_rs::err::{Error, Result};
-use libthyla_rs::fs::{self, File, Metadata};
-use libthyla_rs::{eprintln, println};
+use libthyla_rs::fs::{File, Metadata};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -90,14 +93,35 @@ fn run(args: Args) -> i64 {
                 continue;
             }
         };
-        if !recursive && fs::is_dir(path) {
+        if !recursive && lstat(path).is_ok_and(|m| m.is_dir()) {
             eprintln!("rm: cannot remove '{}': Is a directory", path);
             status = 1;
             continue;
         }
-        if let Err(e) = remove(path, recursive, force, verbose) {
-            eprintln!("rm: {}: {}", path, e);
+        let Some((dir, name)) = split(path) else {
+            eprintln!("rm: refusing to remove '{}'", path);
             status = 1;
+            continue;
+        };
+        let r = Rm {
+            tool: "rm",
+            recursive,
+            keep_going: false,
+            verbose,
+            missing_ok: force,
+            only: None,
+        };
+        let gone = File::open_with_opath(dir).and_then(|parent| {
+            rmtree::remove_at(&parent, name, path, path.ends_with('/'), None, &r)
+        });
+        match gone {
+            Ok(_) => {}
+            // -f: a missing target is success, not an error.
+            Err(Error::NotFound) if force => {}
+            Err(e) => {
+                eprintln!("rm: {}: {}", path, e);
+                status = 1;
+            }
         }
     }
     if !had && !force {
@@ -110,44 +134,4 @@ fn run(args: Args) -> i64 {
 /// What `path` names itself, a link not followed.
 fn lstat(path: &str) -> Result<Metadata> {
     File::open_link(path).and_then(|f| f.metadata())
-}
-
-fn remove(path: &str, recursive: bool, force: bool, verbose: bool) -> Result<()> {
-    match lstat(path) {
-        Ok(m) if m.is_dir() => {
-            if !recursive {
-                return Err(Error::InvalidArgument); // "is a directory" (need -r)
-            }
-            for ent in fs::read_dir(path)? {
-                let e = ent?;
-                let name = e.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                remove(&join(path, name), recursive, force, verbose)?;
-            }
-            fs::remove_dir(path)?;
-            if verbose {
-                println!("removed directory '{}'", path);
-            }
-            Ok(())
-        }
-        Ok(_) => {
-            fs::remove_file(path)?;
-            if verbose {
-                println!("removed '{}'", path);
-            }
-            Ok(())
-        }
-        // -f: a missing target is success, not an error.
-        Err(Error::NotFound) if force => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-fn join(dir: &str, name: &str) -> String {
-    let mut s = String::from(dir.trim_end_matches('/'));
-    s.push('/');
-    s.push_str(name);
-    s
 }

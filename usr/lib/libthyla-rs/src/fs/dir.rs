@@ -88,9 +88,8 @@ impl DirEntry {
         (self.qid_type & QTDIR) != 0
     }
 
-    /// Whether this entry is a non-directory (regular file at v1.0 — Thylacine
-    /// has no symlink surface, and Devs mark directories with `QTDIR` and
-    /// everything else `QTFILE`).
+    /// Whether this entry is a non-directory: a file, a link, or anything else a
+    /// Dev does not mark `QTDIR`.
     #[inline]
     #[must_use]
     pub fn is_file(&self) -> bool {
@@ -110,7 +109,8 @@ pub struct ReadDir {
 }
 
 impl ReadDir {
-    pub(crate) fn from_file(dir: File) -> ReadDir {
+    /// List the directory `dir` is open on (opened for reading).
+    pub fn from_file(dir: File) -> ReadDir {
         ReadDir {
             dir,
             buf: vec![0u8; READDIR_BUF],
