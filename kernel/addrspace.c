@@ -27,6 +27,40 @@
 // space they name (Burrow.charge_as_id). Never 0, never reused.
 static u64 g_addrspace_next_id;
 
+#ifdef KERNEL_TESTS
+static u64 g_share_families_live;
+u64 share_family_live_for_test(void) {
+    return __atomic_load_n(&g_share_families_live, __ATOMIC_ACQUIRE);
+}
+#endif
+
+struct ShareFamily *share_family_new(void) {
+    struct ShareFamily *f = kzalloc(sizeof(*f), 0);
+    if (!f) return NULL;
+    f->refs = 1;
+#ifdef KERNEL_TESTS
+    __atomic_fetch_add(&g_share_families_live, 1u, __ATOMIC_RELAXED);
+#endif
+    return f;
+}
+
+void share_family_get(struct ShareFamily *f) {
+    if (!f) extinction("share_family_get(NULL)");
+    u32 pre = __atomic_fetch_add(&f->refs, 1u, __ATOMIC_RELAXED);
+    if (pre == 0 || pre == 0xFFFFFFFFu) extinction("share_family_get of a dead or saturated family");
+}
+
+void share_family_put(struct ShareFamily *f) {
+    if (!f) return;
+    u32 pre = __atomic_fetch_sub(&f->refs, 1u, __ATOMIC_ACQ_REL);
+    if (pre == 0) extinction("share_family_put of a dead family");
+    if (pre > 1) return;
+    kfree(f);
+#ifdef KERNEL_TESTS
+    __atomic_fetch_sub(&g_share_families_live, 1u, __ATOMIC_RELAXED);
+#endif
+}
+
 struct AddrSpace *addrspace_alloc(u32 page_budget) {
     // I-32 (A): an address space with no cap is the DoS hole the invariant
     // exists to close, so refuse rather than silently treat 0 as unlimited.
@@ -168,6 +202,10 @@ static void addrspace_lifetime_put(struct AddrSpace *as) {
     // claim that it did was fiction and is not load-bearing anywhere.
     proc_pgtable_destroy(as->pgtable_root);
     as->pgtable_root = 0;
+    // Vote 122: the family outlives the descriptor's last pointer to it, never
+    // the descriptor, so a pinned descriptor's family stays readable.
+    share_family_put(as->family);
+    as->family = NULL;
     kfree(as);
 }
 
@@ -344,10 +382,9 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
         // no payer flag (the child is not the payer: its leaves are charged to
         // it at fault, the mints to the payer). Nothing is charged here: the
         // child holds no page until it faults one, and a fault is where the
-        // charge is decided and can fail clean. The space is marked so the
-        // publication writes the Burrow's share record and the image join
-        // reads it (vote 120): `dst` is unpublished, so no lock is owed yet.
-        dst->xshare = 1u;
+        // charge is decided and can fail clean. vma_insert_in counts the
+        // mapping in dst->shared_maps, which puts the child in the share
+        // family after the loop (vote 122).
         break;
     default:
         // MMIO and DMA (I-5 / I-34 hardware). Refused whatever the prot: mapping
@@ -456,6 +493,20 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
     // drain may already have freed.
     for (struct Vma *v = src->vmas; v; v = v->next)
         if (vma_is_cow(v)) v->burrow->clone_cursor = NULL;
+
+    // Vote 122 (I-39; DEBUG-FS-DESIGN 3.4): a child that maps shared anonymous
+    // memory is in its parent's share family -- the parent's own, or a new one
+    // the publication links the parent to. src->family is stable under
+    // src->lock (the publication writes it under this lock too). The child is
+    // unpublished, so its pointer needs no lock; a failed fork's last unref
+    // drops the reference with the space.
+    if (ok && dst->shared_maps) {
+        struct ShareFamily *f = src->family;
+        if (f) share_family_get(f);
+        else   f = share_family_new();
+        if (f) dst->family = f;
+        else   ok = false;          // OOM: the fork fails whole
+    }
 
     // PHASE 3 -- flag the parent, on success only, so a FAILED fork leaves it
     // semantically intact: unflagged, so the faults phase 1 just cost it install

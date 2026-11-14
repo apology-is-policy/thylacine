@@ -3654,12 +3654,15 @@ against that tree. The vault note is spec-payer.
   charges its read-ahead slot by slot after the faulting slot, so it adopts
   again after the read-ahead (audit round 35 F2: a read-ahead charge can make
   the hand-over, and the model, adopting at every charge, could not show the
-  missing second adopt). The shared arm's nodes (vote 121) are charged the
-  same way, inside the install (next row), so it too adopts again after the
-  install.
-- **`Install(sp)`** -> the shared arm's `burrow_record_install(v, p->as, slot,
-  newpg, ..)` (`pagemap_install_paid` with the record as the node payer; an
-  image's fill passes `pagemap_install(.., NULL, ..)`): rc 0 the page is the
+  missing second adopt). The nodes (the shared arm's, vote 121; a private
+  image's, vote 124) are charged the same way, inside the install (next row),
+  so the shared arm and the image's single fill adopt again after the install
+  (the cluster's faulting slot is followed by its first adopt, and its
+  read-ahead slots lack no node).
+- **`Install(sp)`** -> `burrow_record_install(v, p->as, slot, newpg, ..)` in
+  the shared arm and in both image fills (`pagemap_install_paid` with the
+  record as the node payer; a cached image, which has no record, passes
+  `pagemap_install(.., NULL, ..)`): rc 0 the page is the
   Burrow's; rc 1 a peer won (in ANOTHER address space, possibly), so the loser
   frees its page and `burrow_mint_refund(v, 1)` refunds whoever pays NOW. Then
   the leaf, at step 5: charged (`addrspace_charge_pages`) iff
@@ -3705,8 +3708,8 @@ against that tree. The vault note is spec-payer.
 
 What the model cannot see, said so the green reads no larger: one Burrow; no
 cap, exemption or pool -- they bound how much is charged, never to whom (the
-shared arm's nodes ARE charged to whom the record says, vote 121, as the
-`Install` row maps them; an image's nodes are still the pool's); the
+shared arm's nodes ARE charged to whom the record says, vote 121, and so are
+a private image's, vote 124, as the `Install` row maps them); the
 descriptor's lifetime (the host fixture's); and no geometry below "which slots
 a space maps", so a split's carriage of the payer flag, the protect paths and
 the fixed overlay are the kernel tests'. A space's own steps are atomic in the

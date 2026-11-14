@@ -361,36 +361,47 @@ cover rule ([[sub-kernel-devproc]]); the flags union has three (the two seals'
 reads and the elevation check), all reading only restricting bits.
 
 **The image reaches into other spaces through shared anonymous memory (operator
-vote 120, 2026-11-14; DEBUG-FS-DESIGN 3.4).** A fork maps the parent's
+votes 120 + 122, 2026-11-14; DEBUG-FS-DESIGN 3.4).** A fork maps the parent's
 `ANON_SHARED` Burrow into the child's new space ([[sub-kernel-addrspace]]), so
 those bytes are part of two images in two spaces, and the RFMEM walk above
-cannot see across. Each such Burrow therefore carries a share record
-(`share_caps`, `share_guards`, `share_spaces`; [[sub-kernel-burrow]]), and the
-address space carries `xshare`. `proc_image_share_fork_locked` writes the record
-in `rfork_internal`'s publication hold: for every shared Burrow the child's space
-maps, it ORs in the parent's whole join, the parent's own word and the child's,
-sets `share_spaces`, and marks the parent's space. It is a no-op unless the
-clone marked the child's space. `proc_image_stamp_locked` ORs a seal or the taint
-into every such Burrow the stamped space maps. `proc_image_join_locked` visits
-them first (`proc_image_shared_visit`, a walk of the space's mappings under
-`as->lock`, only for an `xshare` space), ORs each record in and reports the image
-shared; then it reads the departed-holder record, and only after that takes the
-sole-owner fast path. One snapshot at the publication suffices because caps grow
-only by elevation, which the join now refuses for every sharer, and the snapshot
-is taken under the lock every elevation path holds. "Shared" means ever shared,
-while mapped: unmapping the Burrow lifts the elevation refusal.
+cannot see across. The spaces a chain of forks joins this way form a share
+family with one record, `struct ShareFamily` (`caps`, `guards`, a reference per
+member space; [[sub-kernel-addrspace]]); each member space points at it
+(`family`) and counts its shared anonymous mappings (`shared_maps`,
+[[sub-kernel-vma]]). The clone gives the child's space the parent's family or a
+new one. `proc_image_share_fork_locked`, in `rfork_internal`'s publication hold,
+links the parent's space to it (under the parent's `as->lock` as well, for the
+unmap fold) -- or, when a rival fork by a peer thread gave the parent a family
+after this clone, moves the child onto the parent's family and returns the
+spare, which `rfork_internal` puts after the hold -- and ORs in the parent's
+whole join, the parent's own word and the child's. `proc_image_stamp_locked` ORs
+a seal or the taint into the stamped space's family. `proc_image_join_locked`
+reads the records first, through `proc_image_record_locked`: in one hold of the
+space's `as->lock` (taken only for a space with a family) it reads
+`shared_maps`, the family record and the departed-holder record, ORs the family
+in and reports the image shared while the space maps shared anonymous memory,
+then takes the sole-owner fast path. O(1): the family replaced vote 120's walk
+of the space's mappings, which audit round 36 F1 showed unbounded under the
+global lock. One snapshot at the publication suffices because caps grow only by
+elevation, which the join refuses for every member Proc whose space maps shared
+anonymous memory, and the snapshot is taken under the lock every elevation path
+holds. "Shared" means in a family, while mapping: unmapping all shared anonymous
+memory lifts the elevation refusal. The family is coarser than the bytes, by
+vote: a member's restriction binds every member image that maps shared
+anonymous memory, and every such mapping in a member space counts.
 
 The taint needs more, because a stamp through one side cannot find the Procs in
 the other spaces to stamp their words. `proc_image_tainted_locked(p)` asks the
-word, the space's `guards_ever` and the share records, and every taint reader
+word and `proc_image_record_locked` (the space's `guards_ever` and, while it
+maps shared anonymous memory, the family's record), and every taint reader
 asks it: the fork's inheritance (the child inherits the parent's IMAGE taint),
 the exec swap (the image's taint goes on the word before the space is left), and
-the interaction bind ([[sub-kernel-pts]]). An unmap of a shared Burrow folds its
-record's taint into the space's `guards_ever` (`vma_remove_in`,
-[[sub-kernel-vma]]), and the visit runs before `guards_ever` is read, so a
-concurrent unmap cannot fall between the two. The lock edge is the established
-`g_proc_table_lock -> as->lock`; no caller of the join, the stamp or the taint
-query holds an `as->lock`.
+the interaction bind ([[sub-kernel-pts]]). An unmap of shared anonymous memory
+folds the family's taint into the space's `guards_ever` before `shared_maps`
+drops, in one `as->lock` hold (`vma_remove_in`, [[sub-kernel-vma]]), and the
+record read takes the same lock, so a concurrent unmap is seen whole. The lock
+edge is the established `g_proc_table_lock -> as->lock`; no caller of the join,
+the stamp or the taint query holds an `as->lock`.
 
 `shared` is **references minus the zombies the traversal saw**, and each half of
 that earns its place. It asks whether another Proc could still *use* the image,

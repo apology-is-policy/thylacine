@@ -134,8 +134,10 @@ interesting part of this file:
    `FAULT_UNHANDLED_USER`, and let a re-fault re-resolve against the new geometry.
 4. Install-once through `pagemap_install` (B-1a'), which takes the Burrow
    lock itself and allocates the map's missing nodes OUTSIDE it (uncharged
-   for FILE): if a sibling filled the slot, keep theirs and free ours; if the
-   nodes could not be had, free ours and refuse the fault. The cluster path
+   for a cached image; a private image's go through its payer record,
+   `burrow_record_install`, vote 124): if a sibling filled the slot, keep
+   theirs and free ours; if the nodes could not be had, free ours and refuse
+   the fault. The cluster path
    installs each slot the same way, and a node OOM midway leaves the earlier
    slots adopted (the bytes are the Burrow's) and the rest in `clpages` for
    the caller to free; the faulting slot decides the verdict as a lost race
@@ -259,9 +261,10 @@ install (`mmu_install_user_pte[_attr](p->as, proc_resource_exempt(p), ..)`)
 charges the hardware tables it grows ([[sub-kernel-mmu]]); a refused table --
 the cap or the pool -- returns -1 and every arm answers
 `FAULT_UNHANDLED_USER` with the data page already resident and charged in
-its slot, which the dying Proc's drain releases. The FILE arm installs with
-`as = NULL`: an Image-cached page is shared and charged to no address space,
-and so are its nodes -- but both are pool pages, counted.
+its slot, which the dying Proc's drain releases. The FILE arm installs a
+cached image's slot with `as = NULL`: an Image-cached page is shared and
+charged to no address space, and so are its nodes -- but both are pool pages,
+counted. A private image's nodes are its payer's (vote 124, below).
 
 ## The backing arms
 
@@ -280,7 +283,7 @@ now.
 | MMIO | device PA + offset, device attributes | |
 | DMA | every page resolved through `kobj_dma_pa_at` (a weave is a SKEIN of blocks since 2026-09-09; `Burrow.pa` is 0 for a DMA Burrow, deliberately), cacheable | coherent on this platform's transports |
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
-| file-backed | sparse per-slot pages in the pagemap, demand-read | the arm that sleeps; its nodes are uncharged (`as = NULL`); each LEAF it installs is charged to the holder (`addrspace_charge_file`; the round-2 close) |
+| file-backed | sparse per-slot pages in the pagemap, demand-read | the arm that sleeps; a cached image's nodes are uncharged (`as = NULL`), a private image's go through its payer record with its pages (vote 124); each LEAF it installs is charged to the holder unless the mapping is the payer's (`addrspace_charge_file`; the round-2 close) |
 | lazy-anonymous | allocate + zero + install-once under the lock; the map's nodes charged and allocated by the install outside `v->lock` | no backing read, so no slow path |
 | **shared anonymous** | allocate + zero + install-once like lazy-anonymous, but the mint, and the nodes its slot's path lacks, are charged to the Burrow's payer record (`burrow_record_install`, vote 121) | never COW; the install's loser branch is live (sharers in other spaces fault the slot under their own locks); a leaf is charged one page unless the mapping is the payer's (below) |
 
@@ -553,6 +556,24 @@ the lapse there through `g_cluster_readahead_probe_for_test`). A space that has 
 lapsed record (its payer died) turns its unflagged mappings of the image into
 payer mappings in that same hold of its lock: the leaves it had paid for are
 uninstalled and so refunded, and they re-fault free.
+
+The nodes moved with the pages (2026-11-14; operator vote 124). The pagemap
+nodes a private image's slot's path lacks are charged through the same record,
+all of them or none (`burrow_record_install`), in both fills: a payer with
+room for the page but not its node is refused the fault, and the page's charge
+is refunded. The single fill runs `payer_adopt_if_due` a second time after the
+install, because the node charge can make the hand-over too (the payer's space
+died after the page's charge; `demand_page.file_private_node_hand_over_adopts`
+lapses it there through `g_file_mint_probe_for_test`). In the cluster only the
+faulting slot can lack a node: the window lies inside one aligned
+`REVENANT_READAHEAD_PAGES` cluster, which divides a leaf's 512 slots (a
+`_Static_assert` pins it), and the faulting slot installs first; a refusal on a
+read-ahead slot would end the read-ahead, never the fault. The record's free
+refunds the nodes with the pages, and no path strips a private image's slots
+(it is never cached, so the image-cache strip never reaches it).
+`demand_page.file_private_single_fill_pays_its_node` is the all-or-none
+witness (refused with room for one, served and paid with room for two); the
+vote 118 witnesses below count the node too.
 Witnesses: `demand_page.file_private_single_fill_charges`,
 `demand_page.file_private_charges_its_payer`,
 `demand_page.file_private_readahead_clamps_to_headroom` (an unaligned fault, so

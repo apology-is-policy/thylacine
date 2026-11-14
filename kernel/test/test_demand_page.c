@@ -2133,15 +2133,15 @@ void test_demand_page_file_private_charges_its_payer(void) {
     TEST_ASSERT(flagged, "a fresh mapping into the payer's space is a payer mapping");
     TEST_EXPECT_EQ(r0, FAULT_HANDLED, "slot 0 faults in");
     TEST_EXPECT_EQ(res1, 64u, "the cluster minted 64 pages");
-    TEST_EXPECT_EQ(rec1, 64u, "the record is the resident count");
-    TEST_EXPECT_EQ(d1, d0 + 64u, "the payer paid every minted page and no leaf");
+    TEST_EXPECT_EQ(rec1, 65u, "the record: the resident count and the leaf node indexing it (vote 124)");
+    TEST_EXPECT_EQ(d1, d0 + 65u, "the payer paid every minted page, the node, and no leaf");
     TEST_EXPECT_EQ(f1, f0, "no file leaf was charged to the payer");
     TEST_EXPECT_EQ(r1, FAULT_HANDLED, "slot 1 resolves on a resident hit");
     TEST_EXPECT_EQ(d2, d1, "a payer's resident hit charges nothing");
     TEST_EXPECT_EQ(f2, f0, "and no leaf");
     TEST_EXPECT_EQ(drc1, 0, "detach slot 0");
     TEST_EXPECT_EQ(d3, d1, "a partial detach refunds nothing: the pages stay resident and paid");
-    TEST_EXPECT_EQ(rec3, 64u, "the record is unchanged");
+    TEST_EXPECT_EQ(rec3, 65u, "the record is unchanged");
     TEST_EXPECT_EQ(drc2, 0, "detach the rest");
     TEST_EXPECT_EQ(d4, d0, "the free refunded the record whole");
 }
@@ -2229,15 +2229,15 @@ void test_demand_page_file_private_readahead_clamps_to_headroom(void) {
     TEST_EXPECT_EQ(tables1, tables0, "the clamped fault built no table (the headroom is the pages')");
     TEST_EXPECT_EQ(r1, FAULT_HANDLED, "slot 80 faults in under five pages of headroom");
     TEST_EXPECT_EQ(res1, 69u, "the cluster minted five pages, not 64");
-    TEST_EXPECT_EQ(rec1, 69u, "the record follows");
+    TEST_EXPECT_EQ(rec1, 70u, "the record follows (and holds slot 0's node)");
     TEST_ASSERT(win_starts_at_fault, "the cut window runs from the faulting slot: 80..84, not the cluster's 64");
     TEST_ASSERT(at_cap, "the payer sits exactly at its cap");
     TEST_EXPECT_EQ(r2, FAULT_UNHANDLED_USER, "with no headroom the fault is refused");
     TEST_EXPECT_EQ(res2, 69u, "nothing was minted");
-    TEST_EXPECT_EQ(rec2, 69u, "nothing was charged");
+    TEST_EXPECT_EQ(rec2, 70u, "nothing was charged");
     TEST_EXPECT_EQ(r3, FAULT_HANDLED, "slot 100 faults in with the budget restored");
     TEST_EXPECT_EQ(res3, 128u, "the window 64..127 minted only its 59 missing pages");
-    TEST_EXPECT_EQ(rec3, 128u, "the record is the resident count");
+    TEST_EXPECT_EQ(rec3, 129u, "the record is the resident count and the node");
     TEST_EXPECT_EQ(d3, d3a + 59u, "the payer paid the 59 it minted, not the window's 64");
     TEST_EXPECT_EQ(drc, 0, "detach");
 }
@@ -2274,7 +2274,7 @@ void test_demand_page_file_private_read_holds_no_charge(void) {
     TEST_EXPECT_EQ(probe, 1, "a charge made while the read sleeps lands: the fill holds none");
     TEST_EXPECT_EQ(r1, FAULT_HANDLED, "slot 64 faults in");
     TEST_EXPECT_EQ(res1, 67u, "the window minted its three pages");
-    TEST_EXPECT_EQ(rec1, 67u, "and the record holds them");
+    TEST_EXPECT_EQ(rec1, 68u, "and the record holds them, with slot 0's node");
     TEST_EXPECT_EQ(drc, 0, "detach");
 }
 
@@ -2319,8 +2319,8 @@ void test_demand_page_file_private_exempt_payer_binds_holder(void) {
     TEST_ASSERT(child != NULL, "the fork");
     TEST_ASSERT(!q_exempt, "the holder is not exempt");
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "the holder's fault is served");
-    TEST_EXPECT_EQ(res, 2u, "its read-ahead is held to the payer's cap: two pages, not 64");
-    TEST_EXPECT_EQ(rec, 2u, "and the record holds them");
+    TEST_EXPECT_EQ(res, 1u, "its fill is held to the payer's cap: one page and its node, not 64 pages");
+    TEST_EXPECT_EQ(rec, 2u, "and the record holds the page and the node (vote 124)");
     TEST_EXPECT_EQ(drc, 0, "detach");
 }
 
@@ -2364,7 +2364,7 @@ void test_demand_page_file_private_holder_pays_leaves(void) {
     TEST_ASSERT(child != NULL, "the fork");
     TEST_ASSERT(!child_flagged, "a fork's child does not inherit the payer mapping");
     TEST_EXPECT_EQ(rq, FAULT_HANDLED, "the child's fault mints");
-    TEST_EXPECT_EQ(dp1, dp0 + 64u, "the payer paid the child's 64 mints");
+    TEST_EXPECT_EQ(dp1, dp0 + 65u, "the payer paid the child's 64 mints and their node");
     TEST_EXPECT_EQ(dq1, dq0 + 1u, "the child paid its one leaf");
     TEST_EXPECT_EQ(fq1, fq0 + 1u, "as a file leaf");
     TEST_EXPECT_EQ(rp, FAULT_HANDLED, "the payer's resident hit");
@@ -2427,14 +2427,14 @@ void test_demand_page_file_private_payer_death_hands_over(void) {
     TEST_EXPECT_EQ(r1, FAULT_HANDLED, "the child's resident hit");
     TEST_EXPECT_EQ(fq1, fq0 + 1u, "the child paid that leaf");
     TEST_ASSERT(lapsed, "the payer's death lapses the record");
-    TEST_EXPECT_EQ(rec_lapsed, 64u, "the lapsed record keeps the resident count");
+    TEST_EXPECT_EQ(rec_lapsed, 65u, "the lapsed record keeps the resident count and the node");
     TEST_EXPECT_EQ(r2, FAULT_HANDLED, "the child's mint is served");
     TEST_ASSERT(handed, "the minting faulter became the payer");
-    TEST_EXPECT_EQ(rec2, 128u, "the record: 64 inherited + 64 minted");
+    TEST_EXPECT_EQ(rec2, 129u, "the record: 65 inherited (64 pages, the node) + 64 minted");
     TEST_ASSERT(flagged, "the new payer's mapping became a payer mapping");
     TEST_ASSERT(old_leaf_gone, "the adoption uninstalled the leaf it had paid for");
     TEST_EXPECT_EQ(fq2, fq0, "and refunded it");
-    TEST_EXPECT_EQ(dq2, dq0 + 128u, "the new payer pays the whole residency, and no leaf");
+    TEST_EXPECT_EQ(dq2, dq0 + 129u, "the new payer pays the whole residency, and no leaf");
     TEST_EXPECT_EQ(r3, FAULT_HANDLED, "the refunded page re-faults");
     TEST_EXPECT_EQ(dq3, dq2, "as a payer leaf, free");
 }
@@ -2506,10 +2506,153 @@ void test_demand_page_file_private_readahead_hand_over_adopts(void) {
     TEST_EXPECT_EQ(r2, FAULT_HANDLED, "the child's fill is served");
     TEST_EXPECT_EQ(g_v118_lapse_fired, 1, "the lapse landed between the faulting slot and the read-ahead");
     TEST_ASSERT(handed, "a read-ahead mint handed the record to the faulter");
-    TEST_EXPECT_EQ(rec2, 128u, "the record: 65 the old payer paid + 63 read ahead");
+    TEST_EXPECT_EQ(rec2, 129u, "the record: 66 the old payer paid (65 pages, the node) + 63 read ahead");
     TEST_ASSERT(flagged, "the fault adopted before it decided the faulting leaf");
     TEST_EXPECT_EQ(fq2, fq0, "no leaf charged: the old one refunded, the faulting one free");
-    TEST_EXPECT_EQ(dq2, dq0 + 128u, "the new payer's count is the record");
+    TEST_EXPECT_EQ(dq2, dq0 + 129u, "the new payer's count is the record");
+}
+
+// Vote 124: a private image's pagemap nodes go through its payer record like
+// its pages, all of them or none. 33 pages is the smallest image whose map has
+// a node (one leaf). A fault at its last slot under less than 33 pages of
+// headroom cuts the window to that slot, so it takes the single fill. With one
+// page of headroom the page's charge lands and the node's cannot: the fault is
+// refused whole, and the record and the payer keep nothing. With two, the fill
+// pays the page and the node, and the free refunds both.
+#define V124_PAGES 33u
+
+static struct Burrow *v124_private_image(struct AddrSpace *payer) {
+    struct Spoor *s = spoor_alloc(&g_rev_private_dev);
+    if (!s) return NULL;
+    struct Burrow *v = image_lookup_or_create(s, 0, V124_PAGES * ONE_PAGE, /*exec=*/false,
+                                              BURROW_FILE_LIMIT_UNKNOWN, payer, false);
+    if (!v) spoor_clunk(s);
+    return v;
+}
+
+void test_demand_page_file_private_single_fill_pays_its_node(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail = false;
+    g_rev_read_eof  = -1;
+    struct Burrow *v = v124_private_image(p->as);
+    if (!v) { drop_proc(p); TEST_ASSERT(false, "a 33-page private image"); }
+    int mrc = burrow_map(p, v, USER_VA, V124_PAGES * ONE_PAGE, VMA_PROT_READ);
+    burrow_unref(v);                      // the mapping holds it now
+    const bool floored = v118_floor(p->as);
+    const u32 budget0 = p->as->page_budget;
+    const u32 d0 = v118_data(p->as);
+
+    p->as->page_budget = p->as->page_count + 1u;     // room for the page alone
+    int calls0 = g_rev_read_calls;
+    enum fault_result r1 = v118_fault(p, V124_PAGES - 1u);   // THE REGRESSION
+    int reads1 = g_rev_read_calls - calls0;
+    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_payer_charge_pages_for_test(v);
+    u32 nodes1 = pagemap_node_count(&v->pm), d1 = v118_data(p->as);
+
+    p->as->page_budget = p->as->page_count + 2u;     // the page and its node
+    calls0 = g_rev_read_calls;
+    enum fault_result r2 = v118_fault(p, V124_PAGES - 1u);
+    int reads2 = g_rev_read_calls - calls0;
+    u32 res2 = burrow_image_resident_count(v), rec2 = burrow_payer_charge_pages_for_test(v);
+    u32 nodes2 = pagemap_node_count(&v->pm), d2 = v118_data(p->as);
+    p->as->page_budget = budget0;
+
+    int drc = v118_detach(p, 0, V124_PAGES);          // the last mapping: the free
+    u32 d3 = v118_data(p->as);
+    v118_unfloor(p->as, floored);
+    drop_proc(p);
+    (void)image_cache_evict_idle_for_test();
+
+    TEST_ASSERT(floored, "the floor under the payer's count");
+    TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_EXPECT_EQ(reads1, 1, "premise: the single fill (one read, one slot)");
+    TEST_EXPECT_EQ(r1, FAULT_UNHANDLED_USER,
+                   "room for the page but not its node: the fault is refused");
+    TEST_EXPECT_EQ(res1, 0u, "nothing resident");
+    TEST_EXPECT_EQ(nodes1, 0u, "no node built");
+    TEST_EXPECT_EQ(rec1, 0u, "all or none: the record keeps nothing");
+    TEST_EXPECT_EQ(d1, d0, "and neither does the payer");
+    TEST_EXPECT_EQ(reads2, 1, "premise: the single fill again");
+    TEST_EXPECT_EQ(r2, FAULT_HANDLED, "control: room for both, the fault is served");
+    TEST_EXPECT_EQ(res2, 1u, "one page resident");
+    TEST_EXPECT_EQ(nodes2, 1u, "one node built");
+    TEST_EXPECT_EQ(rec2, 2u, "the record holds the page and the node");
+    TEST_EXPECT_EQ(d2, d0 + 2u, "the payer paid both");
+    TEST_EXPECT_EQ(drc, 0, "detach");
+    TEST_EXPECT_EQ(d3, d0, "the free refunded the page and the node");
+}
+
+// Vote 124: the node charge can make the hand-over. The payer's space dies --
+// the probe lapses its records, as its teardown on another CPU would --
+// between a holder's page charge, which the payer took, and the install, whose
+// node charge then makes the holder the payer. The fill adopts again before it
+// decides the leaf, so the holder's mapping becomes a payer mapping, its leaf
+// is free, and its count is the record (round 35 F2's shape, single fill).
+static struct AddrSpace *g_v124_lapse_as;
+static int               g_v124_lapse_fired;
+
+static void v124_lapse_probe(struct Proc *p, struct Burrow *v) {
+    (void)p; (void)v;
+    g_file_mint_probe_for_test = NULL;               // once
+    g_v124_lapse_fired++;
+    burrow_payers_lapse(g_v124_lapse_as);
+}
+
+void test_demand_page_file_private_node_hand_over_adopts(void) {
+    struct Proc *p = make_proc();
+    struct Proc *q = make_proc();
+    if (!p || !q) { drop_proc(q); drop_proc(p); TEST_ASSERT(false, "proc_alloc failed"); }
+    g_rev_read_fail = false;
+    g_rev_read_eof  = -1;
+    struct Burrow *v = v124_private_image(p->as);
+    if (!v) { drop_proc(q); drop_proc(p); TEST_ASSERT(false, "a 33-page private image"); }
+    int mrc = burrow_map(p, v, USER_VA, V124_PAGES * ONE_PAGE, VMA_PROT_READ);
+    burrow_unref(v);
+
+    struct AddrSpace *child = addrspace_clone(p->as, false);
+    struct AddrSpace *qown  = q->as;
+    bool cfl = false, handed = false, flagged = false, flagged_before = true;
+    u32 dq0 = 0, fq0 = 0, dq1 = 0, fq1 = 0, rec = 0;
+    enum fault_result r = FAULT_UNHANDLED_USER;
+    g_v124_lapse_fired = 0;
+    if (child) {
+        q->as = child;
+        cfl = v118_floor(child);
+        dq0 = v118_data(child); fq0 = child->file_pages;
+        struct Vma *cv = vma_lookup(q, USER_VA);
+        struct Burrow *cb = cv ? cv->burrow : NULL;
+        flagged_before = cv && (cv->flags & VMA_FLAG_PAYER);
+        const u32 budget0 = p->as->page_budget;
+        p->as->page_budget = p->as->page_count + 2u;  // a one-slot window: the single fill
+        g_v124_lapse_as = p->as;
+        g_file_mint_probe_for_test = v124_lapse_probe;
+        r = v118_fault(q, V124_PAGES - 1u);           // page to the payer, the lapse, the node
+        g_file_mint_probe_for_test = NULL;
+        g_v124_lapse_as = NULL;
+        p->as->page_budget = budget0;
+        handed  = cb && burrow_payer_for_test(cb) == child;
+        rec     = cb ? burrow_payer_charge_pages_for_test(cb) : 0;
+        flagged = cv && (cv->flags & VMA_FLAG_PAYER);
+        dq1 = v118_data(child); fq1 = child->file_pages;
+        v118_unfloor(child, cfl);
+        q->as = qown;
+        addrspace_unref(child);                       // the last mapping: the free
+    }
+    drop_proc(q);
+    drop_proc(p);
+    (void)image_cache_evict_idle_for_test();
+
+    TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_ASSERT(child != NULL && cfl, "the fork, and the floor under the child");
+    TEST_ASSERT(!flagged_before, "premise: the holder's mapping starts as no payer mapping");
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the holder's fill is served");
+    TEST_EXPECT_EQ(g_v124_lapse_fired, 1, "the lapse landed between the page's charge and the install");
+    TEST_ASSERT(handed, "the node charge handed the record to the holder");
+    TEST_EXPECT_EQ(rec, 2u, "the record: the page the old payer paid and the node");
+    TEST_ASSERT(flagged, "the fill adopted before it decided the leaf");
+    TEST_EXPECT_EQ(fq1, fq0, "no leaf charged: a payer's leaf is free");
+    TEST_EXPECT_EQ(dq1, dq0 + 2u, "the new payer's count is the record");
 }
 
 // The control: a cached image takes no payer and keeps the system cache's

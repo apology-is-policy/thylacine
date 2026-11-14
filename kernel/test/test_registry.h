@@ -447,6 +447,8 @@ void test_demand_page_file_private_exempt_payer_binds_holder(void);
 void test_demand_page_file_private_holder_pays_leaves(void);
 void test_demand_page_file_private_payer_death_hands_over(void);
 void test_demand_page_file_private_readahead_hand_over_adopts(void);
+void test_demand_page_file_private_single_fill_pays_its_node(void);
+void test_demand_page_file_private_node_hand_over_adopts(void);
 void test_demand_page_file_cached_image_takes_no_payer(void);
 // Votes 117 + 119: shared anonymous memory (test_shared_anon.c).
 void test_shared_anon_fork_shares_the_page(void);
@@ -1043,6 +1045,9 @@ void test_devproc_share_join_elevation(void);
 void test_devproc_share_join_seals(void);
 void test_devproc_share_join_taint(void);
 void test_devproc_share_join_fork_and_exec(void);
+void test_devproc_share_family_rival_fork(void);
+void test_devproc_share_family_counts_every_piece(void);
+void test_devproc_share_family_lifetime(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_birth_hold_ctl(void);

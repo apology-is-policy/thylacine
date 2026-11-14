@@ -1524,9 +1524,10 @@ static bool pti_share_fork(struct Proc *host, struct pti_share *s, bool shared) 
     s->other->principal_id = host->principal_id;
     s->other->state = PROC_STATE_ALIVE;
     irq_state_t st = proc_table_lock_acquire();
-    proc_image_share_fork_locked(host, s->other);
+    struct ShareFamily *spare = proc_image_share_fork_locked(host, s->other);
     proc_mark_debug_tainted_locked(s->other);           // a debugger on the far side
     proc_table_lock_release(st);
+    share_family_put(spare);
     return true;
 }
 

@@ -370,8 +370,10 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
 
     // The sparse per-page pagemap: page_count slots, none resident. The R-2
     // fault arm installs a slot on the first fault to that page (allocating
-    // the map's nodes on the way, uncharged for FILE -- the system cache's
-    // posture, cached or private image alike, bounded by EXEC_FILE_MAX); burrow_free_internal destroys it.
+    // the map's nodes on the way: a cached image's uncharged to any space --
+    // the system cache's posture, bounded by EXEC_FILE_MAX -- a private
+    // image's through its payer record, vote 124); burrow_free_internal
+    // destroys it. Either way the pool sponsor is the system cache's.
     if (pagemap_init(&v->pm, page_count) != 0) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;     // no ref taken: caller still owns `spoor`
@@ -746,7 +748,7 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // so one lock for the machine costs nothing that shows.
 //
 // The record's invariant: payer_charge_pages is the Burrow's resident page
-// count, plus a shared Burrow's linked pagemap nodes (vote 121), plus what each
+// count, plus its linked pagemap nodes (votes 121 + 124), plus what each
 // fill has charged and not yet installed -- at most one page per address space,
 // and with it the nodes its slot's path lacks: the cluster charges slot by slot
 // at its install, the single fill and the shared demand-zero fill their one
@@ -1034,7 +1036,9 @@ static void burrow_free_internal(struct Burrow *v) {
         if (!v->spoor)
             extinction("burrow_free_internal(FILE) with spoor already NULL (double-free)");
         // Vote 118: a private image's record is refunded whole, to whoever
-        // pays it now -- the last mapping to go may be any holder's.
+        // pays it now -- the last mapping to go may be any holder's. Its
+        // nodes are in the record (vote 124), so destroying them owes nothing
+        // more; no path strips a private image's slots (it is never cached).
         if (v->payer_record)
             burrow_payer_release(v);
         if (pagemap_live(&v->pm))
@@ -1793,7 +1797,8 @@ u32 burrow_image_resident_count(struct Burrow *v) {
 // (B-1a' audit F14). The take runs under v->lock and every free outside it
 // (leaf order: the buddy sits below v->lock). No address space is refunded:
 // a FILE page's holders were refunded when their leaves went, and an idle
-// image has none; the map's nodes were never charged to a space.
+// image has none; a cached image's nodes were never charged to a space (only
+// a private image's are, vote 124, and a private image is never cached).
 u32 burrow_image_strip(struct Burrow *v, u32 want) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
     if (v->type != BURROW_TYPE_FILE)        return 0;

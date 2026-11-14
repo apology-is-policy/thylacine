@@ -405,15 +405,16 @@ several spaces mid-mint at once), and a non-NULL `payer` has paid exactly
   page right before installing it, never across a read (round 34 F1).
 - `burrow_mint_headroom` answers how many of `want` the same charge could
   take now, charging nothing; the cluster sizes its window with it.
-- `burrow_record_install` (ANON_SHARED's fault) installs a minted page with
+- `burrow_record_install` (the ANON_SHARED fault, vote 121, and a private
+  image's FILE fills, vote 124) installs a minted page with
   the nodes its slot's path lacks charged through the record as well, all of
   them or none (`pagemap_install_paid` with the record as the node payer), on
   a mint's terms: the same payer choice, so a node charge can hand a lapsed
   record over and the caller adopts after it too; a node a racer made
   unnecessary is refunded like a loser's mint. No path takes a slot out of a
   record-paid Burrow, so its nodes live until `pagemap_destroy`, and the free
-  refunds them with the record. A private image's nodes are still the
-  pool's.
+  refunds them with the record. A private image is never cached, so the
+  image-cache strip never takes its slots either.
 - `burrow_mint_refund` takes back mints that did not end resident, from
   the record and from whoever pays now. A hand-over charged the new payer the
   whole record, so the refund always belongs to the current payer.
@@ -484,14 +485,14 @@ and neither the record nor the payer keeps a part) and
 the path in the first installer's window, and the first installer refunds the
 two nodes it no longer needs).
 
-**The share record (operator vote 120, 2026-11-14; DEBUG-FS-DESIGN 3.4).** An
-ANON_SHARED Burrow also carries `share_caps`, `share_guards` (the
-`PROC_IMAGE_GUARDS` bits) and `share_spaces`: the image guards of every Proc that
-maps it or ever has, from any address space, and whether a fork has mapped it
-into a second space. The fork's publication writes it and every image stamp on a
-space that maps it ORs into it, both with atomic ORs under `g_proc_table_lock`;
-the image join reads it, and `vma_remove_in` reads its taint to fold into the
-unmapping space. Nothing clears it. Its rules are [[sub-kernel-proc]]'s.
+**No share record on the Burrow (operator vote 122, 2026-11-14; DEBUG-FS-DESIGN
+3.4).** Vote 120's first build kept the image guards of every sharer on each
+ANON_SHARED Burrow (`share_caps`, `share_guards`, `share_spaces`), found by a walk
+of the target's mappings; audit round 36 F1 showed that walk unbounded, and the
+record moved to the share family of the address spaces
+([[sub-kernel-addrspace]], [[sub-kernel-proc]]). A Burrow carries nothing for the
+image join; its type alone (`BURROW_TYPE_ANON_SHARED`) is what `vma_insert_in`
+counts.
 
 ### The cross-Proc share
 
