@@ -3633,9 +3633,9 @@ when a mapping goes, and its free CAN refund (the record names who pays). The
 same record has carried a private image's pages since vote 118, which no model
 covered; this one covers both classes.
 
-The binding below names the code as the impl commit builds it (the record is
-renamed off its `file_` prefix there); that commit confirms each row against
-the tree.
+The binding below names the code as built (the record's rename off its
+`file_` prefix a718ffba8; the shared arm 4683127c2), each row confirmed
+against that tree. The vault note is spec-payer.
 
 - **`Fork(p, c)`** -> `kernel/addrspace.c::clone_one_vma`, the
   `BURROW_TYPE_ANON_SHARED` arm (and the FILE arm, for a private image): the
@@ -3676,8 +3676,10 @@ the tree.
   charged and its own pages free; the loser's refund; the hand-over at the
   creator's death charging the residency; the adopt) and the vote 118
   `demand_page.file_private_*` set for the image class.
-- **`NoFreedLeaf`** -> `shared_anon.unmap_keeps_the_page` (a child's unmap
-  leaves the parent reading its write) and the I-7 count witnesses.
+- **`NoFreedLeaf`** -> `shared_anon.unmap_keeps_the_page` (the payer unmaps
+  every mapping it has, and the child's leaf still names the page, its
+  contents intact) and `shared_anon.dontneed_keeps_contents` (a DONTNEED
+  uninstalls and releases nothing).
 - **`PayerIsLive` / `DeadUntouched`** -> the lapse in `addrspace_destroy`,
   witnessed by the host fixture `tools/host-tests/addrspace-lifetime.c` (the
   lapse after the drain, before the last lifetime drop) and

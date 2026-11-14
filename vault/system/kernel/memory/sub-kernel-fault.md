@@ -2,17 +2,17 @@
 id: sub-kernel-fault
 type: sub
 parent: moc-kernel-memory
-title: "The fault dispatcher — classification, demand paging, seven backing arms, and the COW break"
+title: "The fault dispatcher — classification, demand paging, eight backing arms, and the COW break"
 code: [arch/arm64/fault.c, arch/arm64/fault.h]
 audit: hard
 guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36, inv-i44]
-validated-by: [spec-cow, spec-capacity, prose, gate-smp]
+validated-by: [spec-cow, spec-capacity, spec-payer, prose, gate-smp]
 locks: []
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-11-03
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -265,10 +265,11 @@ and so are its nodes -- but both are pool pages, counted.
 
 ## The backing arms
 
-**Seven** since Warp-6 V-2 added the HOSTMEM arm. It read five until 2026-08-16
+**Eight** since shared anonymous memory added its arm (2026-11-14); seven since
+Warp-6 V-2 added the HOSTMEM arm. It read five until 2026-08-16
 (a miscount against a table in the same block, the second of that shape in one
 sweep — the notes dossier said "four families" over five rows), was corrected to
-six, and is now seven. A count no argument rests on is invisible to every reader,
+six, then seven. A count no argument rests on is invisible to every reader,
 its author included — which is exactly why it keeps drifting here, three times
 now.
 
@@ -281,6 +282,7 @@ now.
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
 | file-backed | sparse per-slot pages in the pagemap, demand-read | the arm that sleeps; its nodes are uncharged (`as = NULL`); each LEAF it installs is charged to the holder (`addrspace_charge_file`; the round-2 close) |
 | lazy-anonymous | allocate + zero + install-once under the lock; the map's nodes charged and allocated by the install outside `v->lock` | no backing read, so no slow path |
+| **shared anonymous** | allocate + zero + install-once like lazy-anonymous, but the mint is charged to the Burrow's payer record and the nodes to no space (`as = NULL`) | never COW; the install's loser branch is live (sharers in other spaces fault the slot under their own locks); a leaf is charged one page unless the mapping is the payer's (below) |
 
 **The install attribute widened from a bool to a MAIR index for HOSTMEM (V-2).**
 Every arm used to hand `mmu_install_user_pte` a `device_memory` bool — a two-way
@@ -556,6 +558,36 @@ the payer one page while it sleeps, under a three-page window: it lands),
 `demand_page.file_private_payer_death_hands_over`, and the control
 `demand_page.file_cached_image_takes_no_payer`.
 
+### Shared anonymous memory: the payer pays the mint, a sharer pays its leaf (2026-11-14; operator votes 117 + 119)
+
+The `BURROW_TYPE_ANON_SHARED` arm is demand-zero like lazy-anonymous and runs
+entirely under the held `as->lock` (no slow path), with three differences.
+It is never COW: a fork maps the Burrow itself ([[sub-kernel-addrspace]]), no
+shared VMA carries `VMA_FLAG_COW`, and a write lands in the page every sharer
+sees. Its page is paid by the Burrow's payer record, not the faulter: the miss
+runs `burrow_mint_charge(v, p->as, exempt, 1)` BEFORE allocating (a cap hit
+allocates nothing), then `payer_adopt_if_due` (a hand-over this charge made is
+adopted before anything can bail, the FILE fill's order), then the zeroed
+page from the requesting account's pool, then `pagemap_install` with no
+address space for the nodes -- the map outlives any one sharer and none of
+them owns it. And the install's loser branch is live: a sharer in ANOTHER
+space can fault the same slot under its own `as->lock`, so rc 1 frees our
+page and `burrow_mint_refund`s the mint to whoever pays now; a refused node
+install frees and refunds the same way. A hit reads the slot under `v->lock`,
+uses the page outside it -- a shared page lives until the Burrow does
+([[inv-i7]]), and the faulter's mapping holds the Burrow -- and runs
+`payer_adopt_if_due` first.
+
+The leaf follows vote 118's rule with anon accounting: `shared_charge` is set
+unless the mapping is the payer's, and step 5 charges one page
+(`addrspace_charge_pages`) before the install and takes it back on any
+nonzero rc (a sibling thread's leaf already there was paid by its install).
+The refund at an uninstall is `vma_uninstall_range_in`'s
+([[sub-kernel-vma]]). A tests-only probe, `g_shared_mint_probe_for_test`,
+fires between the charge and the install: `shared_anon.install_loser_refunds`
+runs the rival space's whole fault there, so the loser path is driven, not
+assumed ([[sub-kernel-burrow]] lists the set; the law is [[spec-payer]]).
+
 ## The permission a fault is checked against can now change (B-1a, 2026-09-23)
 
 Step 2 -- `vma->prot` against the access, before any Burrow is resolved -- did
@@ -629,7 +661,8 @@ either way.
 
 **A node OOM, a refused node charge, a refused pool allocation or a refused
 table charge refuses the fault** (B-1a'): `FAULT_UNHANDLED_USER` from the
-ANON_LAZY miss (the data page freed and uncharged first), the two FILE
+ANON_LAZY miss (the data page freed and uncharged first), the ANON_SHARED
+miss (the page freed and the mint refunded to the record's payer), the two FILE
 install paths and the PTE install of every arm -- the same per-Proc OOM
 policy as a refused page, never an extinction; a refused table install
 leaves the slot resident and charged for the drain, a refused node install

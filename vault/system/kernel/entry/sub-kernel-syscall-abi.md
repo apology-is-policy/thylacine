@@ -24,7 +24,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction, abi-memory
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-14
 ---
 ## Session registry factory ABI
 
@@ -1526,3 +1526,13 @@ carries the bits and a `t_wstat` without x6; the Rust mirror
 `t_wstat_times`, which sets x6 ([[sub-libthyla-rs]]). Pouch's front end is patch
 0063 and the vivarium's is Linux `utimensat` (88); go-thylacine follows in
 G12-d.
+
+## The shared anonymous cores are not ABI (2026-11-14, votes 117 + 119)
+
+`syscall.h` declares three more in-kernel cores, `sys_mmap_anon_core`,
+`sys_mmap_fixed_anon_core` and `sys_burrow_dontneed_core`, visible to the
+phenotype's shell and (through `VISIBLE_IF_KERNEL_TESTS`) to the kernel tests.
+None is a syscall: no number, native word or Linux row was added, and the
+native `SYS_BURROW_RESERVE` / `SYS_BURROW_DECOMMIT` keep their words and their
+-1 returns. Shared anonymous memory is reachable from the Linux phenotype only
+([[sub-kernel-syscall-dispatch]], [[sub-kernel-vivarium]]).

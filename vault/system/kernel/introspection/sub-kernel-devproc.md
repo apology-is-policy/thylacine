@@ -21,7 +21,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-11-12
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -331,6 +331,15 @@ the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
   `format_status` takes the caller to ask `devproc_owner_or_hostowner`, the
   predicate the `CPU_NS` column of `/ctl/procs` uses too ([[sub-kernel-devctl]]
   has the reasoning and the system-wide counters).
+- **A `maps` row's perms end in `s` for memory another address space may map
+  too** (`maps_class`'s share flag): a `SHARED_IN` mapping (another Proc's
+  memory) and, since 2026-11-14 (operator votes 117 + 119), an
+  `ANON_SHARED` one, the memory a fork shares, whose type word is `shared`.
+  Every other row ends in `p`. A Linux reader tells `MAP_SHARED` from
+  `MAP_PRIVATE` by that letter, so a shared mapping printed `p` would read as
+  copy-on-write memory. Witness: `devproc.maps_shared_anon` (a shared and a
+  private mapping side by side: `rw-s 0x0 shared - -` and the control
+  `rw-p 0x0 lazy - -`).
 - **`name` is unforgeable.** It is the basename of the *resolved* binary path
   (from the Spoor's #66 namespace name via `exec_setup_from_spoor`), never the
   caller-controlled `argv[0]` — so a process cannot spoof its own name in

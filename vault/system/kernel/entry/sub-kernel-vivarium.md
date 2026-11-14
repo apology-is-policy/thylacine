@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-11-04
+updated: 2026-11-14
 ---
 ## Native ceiling 141
 
@@ -222,8 +222,9 @@ touches EL0.
 | `vivarium_{sigaction,sigprocmask}_decide`, the note maps | verdict / mask | V-6 |
 | `vivarium_{openat_create,mkdirat,unlinkat,renameat}_decide` | verdict + params | #50 path-mutation family (the create/remove decisions) |
 | `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36; the fixed-anon arm admits PROT_NONE since B-1a; both fixed arms are confined to the burrow window since B-1a' (`fixed_addr_ok`) |
+| `vivarium_mmap_shared_anon_decide`, `vivarium_mmap_fixed_shared_anon_decide` | verdict | votes 117 + 119 (2026-11-14): exactly `MAP_SHARED\|MAP_ANONYMOUS` (and that with `MAP_FIXED`, window-confined by `fixed_addr_ok`), prot within READ\|WRITE, fd -1, offset 0; both are in `vivarium_mmap_arms_disjoint` |
 | `vivarium_mprotect_decide` | verdict | B-1a: the prot word alone; `addr` / `len` are the shell's (a zero length succeeds, an unaligned address is EINVAL) |
-| `vivarium_madvise_decide` | verdict + kind | B-1b: the advice word alone -- RELEASE (`DONTNEED` / `FREE`) over the decommit core, HINT (twelve) answers 0 / ENOMEM and changes nothing, everything else declines; `addr` / `len` are the shell's |
+| `vivarium_madvise_decide` | verdict + kind | B-1b: the advice word alone -- DONTNEED over the DONTNEED core (its own kind since 2026-11-14: it admits a shared range and only uninstalls there), FREE as RELEASE over the decommit core, HINT (twelve) answers 0 / ENOMEM and changes nothing, everything else declines; `addr` / `len` are the shell's |
 | `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths). A mask is served since vote 28: `ppoll`'s size is judged here beside a mask, `pselect6`'s pair in `viv_pselect6`, and the mask goes in right before the wait, with everything that could still refuse the call behind it. A note that interrupts a socket's readiness open fails the whole call with EINTR, as a shortage does, and does not pose as a broken fd ([[fnd-note-wait-r2-f2]]) |
 | `vivarium_clock_nanosleep_decide` | errno + clock + abstime | 6.29: EINVAL exactly where the gettime map refuses (derived), EOPNOTSUPP for MONOTONIC_RAW and both COARSE clocks; only `TIMER_ABSTIME` is read |
 | `vivarium_sleep_req_ns`, `vivarium_sleep_verdict` | bool / verdict | 6.29: the request's validity and saturation; at the deadline the clock beats every wait outcome |
@@ -366,8 +367,8 @@ same reason the anon arm is; `len` is still deliberately unjudged.
 **One descriptor lookup, in Linux's order; `/dev/zero` is anonymous memory
 (operator vote 115).** `viv_mmap` judges an unaligned offset (`EINVAL`) first;
 `MAP_ANONYMOUS` drops the descriptor and the offset; any other call takes ONE
-`sys_get_mapping_spoor` (`EBADF` for nothing or `O_PATH`; readability reported,
-not judged) and holds that Spoor through every arm, so the devzero decision and
+`sys_get_mapping_spoor` (`EBADF` for nothing or `O_PATH`; readability and,
+since 2026-11-14, writability reported, not judged) and holds that Spoor through every arm, so the devzero decision and
 the map are made on the same file. A zero length is `EINVAL` next. A readable
 devzero becomes the anonymous call (flags gain `MAP_ANONYMOUS`, `fd` -1, offset
 0, the Spoor released) and is served exactly where `MAP_ANONYMOUS` is, as
@@ -390,6 +391,36 @@ and `ENODEV`; write-only `EACCES`, `O_PATH` `EBADF`), and
 step later that answers the next step's errno, with the native door's
 length-first order as a control; its last pair is a call with no map type
 (`EINVAL`) beside the same descriptor in a served type (`EACCES`).
+
+**Shared anonymous memory (operator votes 117 + 119, 2026-11-14; VIVARIUM
+6.21).** `MAP_SHARED|MAP_ANONYMOUS` (and its `MAP_FIXED` form) mints a
+`BURROW_TYPE_ANON_SHARED` Burrow, the memory a fork shares, paid by its
+creator's payer record ([[sub-kernel-burrow]]); the two shared arms are judged
+after the private ones and are disjoint from them, so neither shadows the
+other. The anonymous call is judged on its map type before any arm, after the
+length: Linux's anonymous switch knows `MAP_SHARED` and `MAP_PRIVATE` only, so
+every other type -- `MAP_SHARED_VALIDATE|MAP_ANONYMOUS` among them -- is
+`EINVAL` (`ENOMEM` first for a length past the window, as `get_unmapped_area`
+answers first); a typeless anonymous call used to decline as `ENOSYS`.
+`/dev/zero` follows `do_mmap`'s file switch in its order:
+the type (not shared, shared-validate or private is `EINVAL`), then for a
+shared type the descriptor's write mode (`PROT_WRITE` through a descriptor not
+open for writing is `EACCES`), then readability for every type (`EACCES`).
+`sys_get_mapping_spoor` reports writability beside readability for this. A
+shared map through a writable descriptor is the shared anonymous call
+(`MAP_SHARED_VALIDATE` rewritten to `MAP_SHARED`: what reaches here carries
+only flags the anonymous arms judge exactly); one through a descriptor that
+is not writable is a PRIVATE map whose ceiling is READ, as Linux clears
+`VM_MAYWRITE` and `VM_SHARED`, so a later `mprotect` to RW is `EACCES`.
+Witnesses: `vivarium.mmap_shared_domain` (the arms' domains and the
+disjointness sweep, which gained the shared flag words),
+`vivarium.mmap_shared_anon` (the dispatcher's mint and its type),
+`vivarium.mmap_shared_dev_zero` (read-write shared mints shared memory;
+read-only with `PROT_WRITE` is `EACCES`; read-only `PROT_READ` is a private map
+with a READ ceiling), and pheno-probe legs L23u-L23zd on the device (a fork's
+child writes, the parent reads it in the shared map and not in the private
+control beside it; DONTNEED keeps the contents; FREE and
+`MAP_SHARED_VALIDATE|MAP_ANONYMOUS` are `EINVAL`).
 
 **The two anonymous arms changed at B-1a.** `vivarium_mmap_decide`'s allow-list
 (`VIV_MMAP_PROT_ADMITTED` = R|W) is unchanged, but `PROT_NONE` inside it is now
@@ -893,6 +924,17 @@ released and re-read zero; a hole ENOMEM for both kinds; DONTFORK ENOSYS; an
 unaligned start EINVAL; a zero length 0; the probe's own data page declined
 and intact). The sabotage `nodecommit` (the arm answers 0 without the core)
 reddens L23l.
+
+**DONTNEED split from FREE (2026-11-14, votes 117 + 119).** Linux's
+`MADV_DONTNEED` over `MAP_SHARED` memory drops the caller's view and keeps the
+contents; `MADV_FREE` refuses it. So `vivarium_madvise_decide` now answers
+`VIV_MADVISE_DONTNEED` for advice 4 and keeps RELEASE for 8, and the shell
+hands DONTNEED to `sys_burrow_dontneed_core` (the decommit core's shape checks,
+with shared ranges admitted: over a shared mapping it only uninstalls this
+space's leaves, releasing no page; [[sub-kernel-burrow]]) and FREE to the
+decommit core as before, which refuses a shared range (`EINVAL`).
+`vivarium.madvise_domain` expects the two kinds; `shared_anon.dontneed_keeps_contents`
+drives both cores and the native call over one shared range.
 
 ## Native ceiling 126 (2026-09-24, B-1d)
 
