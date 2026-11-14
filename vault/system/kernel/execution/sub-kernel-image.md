@@ -340,7 +340,11 @@ unversioned Dev apart, each clunking its Spoor at its last unref and keeping
 its own size, with the versioned fake caching the same identity as the
 control. The idle-evict
 helper exists both for test isolation and as a real regression on the
-detach-under-lock / unref-outside lifetime.
+detach-under-lock / unref-outside lifetime. That eviction can only take an
+idle entry, so every `image.*` test that takes a ref reads its values first,
+drops its refs, and asserts last: an assertion returns from the test, and a
+ref stranded by a failing one is a live entry no later eviction can take,
+which turns every later cache count red.
 `demand_page.idle_image_reclaimed_under_pressure` drives the reclaim end to
 end (the pool parked full; one allocation; the image stripped and still
 cached; the next lookup a hit) and `demand_page.file_pages_charge_the_holder`
