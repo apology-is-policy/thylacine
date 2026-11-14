@@ -48,7 +48,7 @@ stay on `Proc`.
 | `addrspace_alloc(page_budget)` | fresh L0 table, `ref = owners = 1`; **NULL on a 0 budget** |
 | `addrspace_ref(as)` (tests build only; production takes `addrspace_try_ref`) | +1 owner and total lifetime; requires a live owner |
 | `addrspace_unref(as)` | -1 owner; last owner drains VMAs while retaining its total reference, then releases that reference |
-| `addrspace_pin/unpin(as)` | kernel descriptor lifetime only, taken from a live owner or pin; final total drop destroys page tables and descriptor, never drains VMAs, so an unpin is never under `as->lock`. Production caller: the `/proc/<pid>/maps` render ([[sub-kernel-devproc]]), which pins under `g_proc_table_lock` and renders after it |
+| `addrspace_pin/unpin(as)` | kernel descriptor lifetime only, taken from a live owner or pin; final total drop destroys page tables and descriptor, never drains VMAs, so an unpin is never under `as->lock`. Production callers: the `/proc/<pid>/maps` render ([[sub-kernel-devproc]]), which pins under `g_proc_table_lock` and renders after it, and the weft orphan reaper ([[sub-kernel-weft]]), which pins there and unmaps after it, dropping the pin outside every lock |
 | `addrspace_clone(src, exempt)` | the COW fork; a fresh space, or NULL having freed everything |
 | `addrspace_owner_count(as)` | constructor/Proc ownership snapshot for sharing and last-driver predicates; not a lock |
 | `addrspace_ref_count(as)` | total lifetime including kernel pins; diagnostic only, not a mapping count |
@@ -305,10 +305,14 @@ counts the space's shared anonymous mappings, kept by `vma_insert_in` /
 the family joins the image only while it is nonzero, [[sub-kernel-proc]]) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4)
 / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
+`quiesced` (set under `lock` by `addrspace_quiesce_mapped_devices` before its
+lock-free walk, never cleared: from then the list is the death path's, and the
+weft reaper, which reads it under `lock`, unmaps nothing more here;
+[[sub-kernel-death]]) /
 `paid_burrows` (the record-paid Burrows whose payer record names this space --
 private images since vote 118, shared anonymous memory since vote 119 -- under
 `g_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
-The struct is 96 bytes. `addrspace_destroy` calls
+The struct is 112 bytes (`quiesced` sits in the tail padding after `shared_maps`). `addrspace_destroy` calls
 `burrow_payers_lapse` after `vma_drain_in`: the record-paid Burrows only this
 space held were freed by the drain (refunding a count that dies with the
 space), and every record left -- an image or a shared region surviving in a

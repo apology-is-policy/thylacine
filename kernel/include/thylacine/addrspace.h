@@ -198,6 +198,12 @@ struct AddrSpace {
     // read by the join without it: the family joins this image only while it
     // is nonzero.
     u32            shared_maps;
+
+    // Set under lock by the device quiesce, which then walks `vmas` WITHOUT the
+    // lock: from here the list is that death path's until its drain, and the
+    // weft reaper, the one cross-Proc writer, no longer unmaps in it. Never
+    // cleared.
+    bool           quiesced;
 };
 
 _Static_assert(sizeof(struct AddrSpace) == 112,
@@ -206,7 +212,7 @@ _Static_assert(sizeof(struct AddrSpace) == 112,
                "page_budget + page_peak + pgtable_pages + file_pages + "
                "guards_ever (32) + id (8) + caps_ever (8) + owners + "
                "private_rings (8) + paid_burrows (8) + family (8) + "
-               "shared_maps (4, padded to 8). "
+               "shared_maps (4) + quiesced (1, padded to 8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Vote 122 (I-39; DEBUG-FS-DESIGN 3.4): the record of a share family, the
