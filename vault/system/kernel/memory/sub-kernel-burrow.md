@@ -453,7 +453,9 @@ The witnesses are `kernel/test/test_shared_anon.c`, each driving the real
 paths (the phenotype's mint core, the fault arm, `addrspace_clone`, the munmap
 and madvise cores) and taking a floor under every count it compares back to a
 baseline: `shared_anon.fork_shares_the_page` (one physical page behind both
-leaves; the private map beside it, one variable away, gets a copy),
+leaves; the private map beside it, one variable away, gets a copy; the fork
+charges the child the private clone's footprint and nothing for the shared
+page),
 `creator_pays_every_mint`, `unmap_keeps_the_page`, `creator_death_hands_over`,
 `install_loser_refunds` (a probe runs the rival's fault between the loser's
 charge and its install), `protect_split_keeps_payer` and

@@ -121,10 +121,14 @@ void test_shared_anon_fork_shares_the_page(void) {
     bool same = false, child_plain = false, parent_payer = false, parent_rw = false;
     paddr_t ps = 0, cs = 0, cp = 0;
     enum fault_result rs1 = FAULT_UNHANDLED_USER, rp1 = FAULT_UNHANDLED_USER;
-    u32 resident = 0;
+    u32 resident = 0, cdata = 0, cfoot = 0;
     if (c) {
         struct Vma *cv = vma_lookup(q, sva);
         struct Vma *sv = vma_lookup(p, sva);
+        // Read before the child faults: what the fork itself charged it.
+        struct Vma *cpv = vma_lookup(q, pva);
+        cdata = sa_data(c);
+        cfoot = (cpv && cpv->burrow) ? burrow_lazy_footprint(cpv->burrow) : 0;
         same         = cv && cv->burrow == sb;
         child_plain  = cv && !(cv->flags & (VMA_FLAG_COW | VMA_FLAG_PAYER)) &&
                        vma_prot_max(cv) == VMA_PROT_RW;
@@ -152,6 +156,8 @@ void test_shared_anon_fork_shares_the_page(void) {
     TEST_ASSERT(child_plain, "the child's mapping: no COW routing, no payer flag, the RW ceiling");
     TEST_ASSERT(parent_payer, "the parent's mapping stays the payer's, never COW");
     TEST_ASSERT(parent_rw, "the fork left the parent's writable leaf in place");
+    TEST_ASSERT(cfoot > 0, "control: the private clone has a footprint the fork charges");
+    TEST_EXPECT_EQ(cdata, cfoot, "the fork charged the child the private clone, nothing for the shared page");
     TEST_EXPECT_EQ(rs1, FAULT_HANDLED, "the child's write to the shared page");
     TEST_EXPECT_EQ(rp1, FAULT_HANDLED, "and to the private one");
     TEST_EXPECT_EQ((u64)cs, (u64)ps0, "the child's write lands in the parent's page");

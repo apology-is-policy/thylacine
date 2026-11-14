@@ -2489,7 +2489,8 @@ zero length `-T_E_INVAL`, a length past `BURROW_RESERVE_MAX` `-T_E_NOMEM`), and
 `MAP_FIXED` overlay's, which `sys_mmap_fixed_anon_for_proc` (the native door's
 arm 3) wraps at `(VMA_PROT_RW, false)`. `sys_get_mapping_spoor` reports the
 descriptor's write right beside its read right, for `viv_mmap`'s `/dev/zero`
-rules ([[sub-kernel-vivarium]] has the order and the mapping of each case).
+rules, which answer a length past the window (`ENOMEM`) before any of them
+([[sub-kernel-vivarium]] has the order and the mapping of each case).
 
 The madvise row's release split in two: `advise_release_core(p, vaddr, length,
 shared_ok)` is the shape-checking body, `sys_burrow_decommit_core` its

@@ -15854,8 +15854,11 @@ static s64 viv_mmap(struct Proc *p, const u64 *args) {
     if (sp && sp->dev == &devzero) {
         spoor_clunk(sp);                             // an anonymous mapping holds no file
         sp = NULL;
-        // do_mmap's file switch: the type first (round 34 F5's order), then
-        // the shared types' FMODE_WRITE test, then FMODE_READ for every type.
+        // get_unmapped_area's ENOMEM comes before do_mmap's file switch, as
+        // on the anonymous side below. Then the switch: the type first (round
+        // 34 F5's order), the shared types' FMODE_WRITE test, then FMODE_READ
+        // for every type.
+        if (a[1] > BURROW_RESERVE_MAX)               return -(s64)T_E_NOMEM;
         u32 mtype  = (u32)a[3] & (u32)VIV_MAP_TYPE;
         bool share = mtype == (u32)VIV_MAP_SHARED ||
                      mtype == (u32)VIV_MAP_SHARED_VALIDATE;

@@ -306,6 +306,16 @@ void test_vivarium_mmap_shared_anon(void) {
     bool fxs = fx == (s64)fixed && viv_shared_at(p, fx, VRW);
     bool priv = viv_anon_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW,
                                              VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS, ANY, 0), VRW);
+    // A shared call never extends a neighbour: a private call placed beside a
+    // private mapping is served from that mapping's Burrow (the premise), and a
+    // shared call placed beside the same mapping mints its own.
+    s64 pa = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS, ANY, 0);
+    s64 pb = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS, ANY, 0);
+    s64 sc = viv_mmap_args(p, 0, PAGE_SIZE, RW, SH, ANY, 0);
+    struct Vma *vpa = pa > 0 ? vma_lookup(p, (u64)pa) : NULL;
+    struct Vma *vpb = pb > 0 ? vma_lookup(p, (u64)pb) : NULL;
+    bool merged = vpa && vpb && pb == pa + (s64)PAGE_SIZE && vpa->burrow == vpb->burrow;
+    bool beside = sc == pb + (s64)PAGE_SIZE && viv_shared_at(p, sc, VRW);
     s64 sv     = viv_mmap_args(p, 0, PAGE_SIZE, RW, SV, ANY, 0);
     s64 svbig  = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, SV, ANY, 0);
     s64 notype = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_ANONYMOUS, ANY, 0);
@@ -321,6 +331,8 @@ void test_vivarium_mmap_shared_anon(void) {
     TEST_ASSERT(none, "PROT_NONE: shared, minted at none");
     TEST_ASSERT(fxs,  "MAP_FIXED: the fixed overlay mints shared memory at the address");
     TEST_ASSERT(priv, "control: the private call mints private memory");
+    TEST_ASSERT(merged, "control: a private call beside a private mapping is served from its Burrow");
+    TEST_ASSERT(beside, "a shared call beside the same mapping mints its own shared memory");
     TEST_EXPECT_EQ(sv, -(s64)T_E_INVAL, "MAP_SHARED_VALIDATE|MAP_ANONYMOUS: EINVAL");
     TEST_EXPECT_EQ(svbig, -(s64)T_E_NOMEM, "past the window first: ENOMEM");
     TEST_EXPECT_EQ(notype, -(s64)T_E_INVAL, "an anonymous call with no map type: EINVAL");
@@ -347,7 +359,7 @@ void test_vivarium_mmap_shared_dev_zero(void) {
     const u32 VRW = (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
     bool ok = rwfd >= 0 && rofd >= 0 && wofd >= 0;
     bool s_rw = false, sv_rw = false, fx_rw = false, ro_priv = false, priv_rw = false;
-    s64 ro_w = 0, raise = 0, wo_r = 0, wo_w = 0, notype = 0;
+    s64 ro_w = 0, raise = 0, wo_r = 0, wo_w = 0, notype = 0, big_w = 0, big_t = 0;
     if (ok) {
         s_rw  = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED, (u64)rwfd, 0), VRW);
         sv_rw = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED_VALIDATE,
@@ -365,6 +377,11 @@ void test_vivarium_mmap_shared_dev_zero(void) {
         wo_r   = viv_mmap_args(p, 0, PAGE_SIZE, R, VIV_MAP_SHARED, (u64)wofd, 0);
         wo_w   = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED, (u64)wofd, 0);
         notype = viv_mmap_args(p, 0, PAGE_SIZE, R, 0, (u64)rofd, 0);
+        // The window first, as get_unmapped_area answers before the file
+        // switch: two of the refusals above, past the window, are ENOMEM.
+        big_w  = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, VIV_MAP_SHARED,
+                               (u64)rofd, 0);
+        big_t  = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, R, 0, (u64)rofd, 0);
     }
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
@@ -381,6 +398,8 @@ void test_vivarium_mmap_shared_dev_zero(void) {
     TEST_EXPECT_EQ(wo_r, -(s64)T_E_ACCES, "write-only, no PROT_WRITE: EACCES (FMODE_READ)");
     TEST_EXPECT_EQ(wo_w, -(s64)T_E_ACCES, "write-only, PROT_WRITE: EACCES");
     TEST_EXPECT_EQ(notype, -(s64)T_E_INVAL, "no map type: EINVAL, before the access mode");
+    TEST_EXPECT_EQ(big_w, -(s64)T_E_NOMEM, "the EACCES call past the window: ENOMEM first");
+    TEST_EXPECT_EQ(big_t, -(s64)T_E_NOMEM, "the typeless call past the window: ENOMEM first");
 }
 
 // The phenotype judges an mmap in Linux's order -- arm64 sys_mmap's offset

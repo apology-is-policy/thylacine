@@ -402,7 +402,8 @@ length: Linux's anonymous switch knows `MAP_SHARED` and `MAP_PRIVATE` only, so
 every other type -- `MAP_SHARED_VALIDATE|MAP_ANONYMOUS` among them -- is
 `EINVAL` (`ENOMEM` first for a length past the window, as `get_unmapped_area`
 answers first); a typeless anonymous call used to decline as `ENOSYS`.
-`/dev/zero` follows `do_mmap`'s file switch in its order:
+`/dev/zero` follows `do_mmap`'s order: a length past the window is `ENOMEM`
+first (`get_unmapped_area` answers ahead of the file switch), then the switch,
 the type (not shared, shared-validate or private is `EINVAL`), then for a
 shared type the descriptor's write mode (`PROT_WRITE` through a descriptor not
 open for writing is `EACCES`), then readability for every type (`EACCES`).
@@ -414,10 +415,13 @@ is not writable is a PRIVATE map whose ceiling is READ, as Linux clears
 `VM_MAYWRITE` and `VM_SHARED`, so a later `mprotect` to RW is `EACCES`.
 Witnesses: `vivarium.mmap_shared_domain` (the arms' domains and the
 disjointness sweep, which gained the shared flag words),
-`vivarium.mmap_shared_anon` (the dispatcher's mint and its type),
+`vivarium.mmap_shared_anon` (the dispatcher's mint and its type; a shared call
+placed beside a private mapping mints its own Burrow, where a private call
+beside the same mapping is served from it -- `lazy_reserve_core` never extends
+for a shared call),
 `vivarium.mmap_shared_dev_zero` (read-write shared mints shared memory;
 read-only with `PROT_WRITE` is `EACCES`; read-only `PROT_READ` is a private map
-with a READ ceiling), and pheno-probe legs L23u-L23zd on the device (a fork's
+with a READ ceiling; past the window, `ENOMEM` ahead of both), and pheno-probe legs L23u-L23zd on the device (a fork's
 child writes, the parent reads it in the shared map and not in the private
 control beside it; DONTNEED keeps the contents; FREE and
 `MAP_SHARED_VALIDATE|MAP_ANONYMOUS` are `EINVAL`).

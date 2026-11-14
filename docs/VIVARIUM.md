@@ -2504,6 +2504,7 @@ creator dies the next process to create a page takes the residency over
 | `MAP_SHARED` or `MAP_SHARED_VALIDATE` of `/dev/zero` open for writing | as the anonymous shared call |
 | the same, the descriptor not open for writing, `PROT_WRITE` asked | `EACCES` (do_mmap's `FMODE_WRITE` test) |
 | the same, the descriptor not open for writing, no `PROT_WRITE` | a PRIVATE anonymous mapping whose ceiling is READ: Linux clears `VM_MAYWRITE` and `VM_SHARED` for a descriptor not open for writing, so `mmap_zero` sets up a private mapping that `mprotect` can never make writable (`EACCES`) |
+| any `/dev/zero` call past the window | `ENOMEM`, ahead of the map type and the access-mode tests above, as `get_unmapped_area` answers ahead of `do_mmap`'s file switch |
 | `PROT_EXEC` in any of them | declined, as every anonymous executable map is (I-42) |
 | `MAP_SHARED` of any other file | declined, as before: a shared file mapping is write-back, and the phenotype has none |
 
