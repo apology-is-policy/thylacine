@@ -1614,6 +1614,18 @@ static struct Spoor *sys_lookup_spoor(struct Proc *p, hidx_t h, rights_t require
     return (struct Spoor *)hh.obj;                   // ref TRANSFERRED to caller
 }
 
+// sys_lookup_spoor where any one of the rights in `any` suffices. Same
+// ref-transfer contract.
+static struct Spoor *sys_lookup_spoor_any(struct Proc *p, hidx_t h, rights_t any) {
+    struct Handle hh;
+    if (handle_get(p, h, &hh) < 0)                   return NULL;
+    if (hh.kind != KOBJ_SPOOR || (hh.rights & any) == 0) {
+        handle_put(&hh);                             // drop the ref handle_get took
+        return NULL;
+    }
+    return (struct Spoor *)hh.obj;                   // ref TRANSFERRED to caller
+}
+
 // Helper: look up an open r/w-capable handle (KOBJ_SPOOR only) + validate
 // rights. Returns the slot pointer or NULL. Post-stalk-3c the only
 // readable/writable handle kind is KOBJ_SPOOR -- a /srv connection endpoint
@@ -5001,23 +5013,24 @@ static s64 sys_open_create_handler(u64 start_fd_raw, u64 path_va,
 
 // =============================================================================
 // SYS_FSYNC — durability barrier (FS-mutation foundation; IDENTITY-DESIGN.md
-// §9.2). RIGHT_WRITE (fsync is the write-side flush), else -T_E_BADF; a Dev
-// with a NULL .fsync slot -> -T_E_OPNOTSUPP.
+// §9.2). Either right, as POSIX fsync works on a descriptor opened only for
+// reading -- a directory's included, which is how a rename becomes durable
+// (vote M22); neither -> -T_E_BADF. A navigation (T_OPATH) handle is born R|W
+// with no check on its target and opens nothing at the server, so it answers
+// -T_E_BADF, as Linux's O_PATH does (#81: it is no I/O channel). A Dev with a
+// NULL .fsync slot -> -T_E_OPNOTSUPP.
 // =============================================================================
 
-static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_fsync_for_proc(struct Proc *p, hidx_t h, u64 datasync_raw) {
     // #844: c is REF-HELD (borrow); spoor_clunk on every exit (fsync may block).
     // Errno rollout (the getdents64/fsync chunk): the two rejects flattened to
     // -1 until the phenotype rows arrived, and a bare -1 crossing the viv
     // boundary reads as Linux EPERM -- the wrong claim twice over. BADF for a
     // missing/underqualified handle; OPNOTSUPP for a Dev with no .fsync slot.
-    struct Spoor *c = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);
+    struct Spoor *c = sys_lookup_spoor_any(p, h, RIGHT_READ | RIGHT_WRITE);
     if (!c)                                          return -T_E_BADF;
+    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -T_E_BADF; }
     if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
     // Normalize datasync to 0/1 (any non-zero is "data only").
@@ -5027,6 +5040,14 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
     // Area-F errno rollout: propagate the Dev's real -errno (dev9p returns
     // -(T_E_*)); a legacy Dev's bare -1 stays the generic sentinel.
     return (s64)rc;
+}
+
+static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return sys_fsync_for_proc(p, sys_hidx_arg(fd_raw), datasync_raw);
 }
 
 // =============================================================================
@@ -15895,12 +15916,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // for one load-bearing reason: Linux passes ONE argument, so x1 is
         // whatever the caller left there -- and SYS_FSYNC reads x1 as
         // datasync, so a T1 verbatim copy would let register garbage flip a
-        // full fsync into data-only, a silent wrong answer. DEGRADATION
-        // (documented, loud): the native core gates RIGHT_WRITE, so fsync
-        // on an O_RDONLY fd answers EBADF where Linux permits it (git
-        // fsyncs directory fds when core.fsync is enabled; milestone A runs
-        // core.fsync=none). Relaxing the native gate is an ABI change --
-        // signoff-gated, not this chunk's call to make silently.
+        // full fsync into data-only, a silent wrong answer. The native core
+        // takes either right (vote M22), so fsync on an O_RDONLY fd -- git
+        // fsyncs directory fds when core.fsync is enabled -- works as on
+        // Linux, and an O_PATH fd answers EBADF as on Linux.
         // fsync/fdatasync(unsigned int fd).
         return sys_fsync_handler((u64)(u32)args[0],
                                  (linux_nr == VIV_LINUX_FDATASYNC) ? 1 : 0);

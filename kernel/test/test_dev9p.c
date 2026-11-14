@@ -160,6 +160,7 @@ static void wb_wire_reset(void) {
 // qid.version / qid.type (the canonical body is size 0x200+e / vers 0 / FILE).
 static u32  g_wga_seen, g_lopen_seen, g_clunk_seen;
 static u32  g_wga_newfid, g_tlopen_fid, g_tread_fid, g_setattr_fid;   // which fid each op named
+static u32  g_tfsync_seen, g_tfsync_fid;   // Tfsyncs since a test zeroed it; the last one's fid
 static u64  g_wga_mask;                 // the last Twalkgetattr's request mask
 static u32  g_clunk_fids[4], g_clunk_fid_n;   // the first Tclunks' fids since a reset
 static u64  g_wga_path_base = 0x20;  // Rwalkgetattr qid.path = base + component
@@ -505,6 +506,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TFSYNC) {
         g_tfsync_last_seq = g_wire_seq;   // F1 wb ordering witness
+        g_tfsync_seen++;
+        if (req_len >= (size_t)P9_HDR_LEN + 4) g_tfsync_fid = le32_at(req + 7);
         // Rfsync = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -3790,7 +3793,12 @@ void test_dev9p_cached_open(void) {
     TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fstat after the wstat");
     TEST_EXPECT_EQ(g_tgetattr_seen, ga0 + 1u, "asks the server");
     TEST_EXPECT_EQ(st.size, 0x200ull, "with the snapshot's size, not the server's 0x100");
-    TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync no-ops 0 (read-only fd)");
+    // A read-only fsync reaches the server (vote M22): what the open read may
+    // sit uncommitted there.
+    g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
+    TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync on a read-only cached open");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 1ull, "sends one Tfsync");
+    TEST_EXPECT_EQ((u64)g_tfsync_fid, (u64)cp->fid, "on the kept fid");
     TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
     TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");
     TEST_ASSERT(dev9p.walk(co, NULL, names, 1) == NULL,
@@ -6974,6 +6982,78 @@ void test_dev9p_cached_open_loose_wstat(void) {
     lock_wire_reset();
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// A loose cached open owns no fid until it needs one: its fsync binds the one
+// its fstat and wstat would (vote M22), and a name that no longer reaches the
+// file answers ESTALE with nothing sent.
+void test_dev9p_cached_open_loose_fsync(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 9 + 2);
+    struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL && cp->co_kfid == P9_NOFID, "with no fid bound");
+    lock_wire_reset();
+    g_ga_gen = 0x77;
+    g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
+    g_wga_lerror_ecode = T_E_NOENT;
+    TEST_EXPECT_EQ((s64)dev9p.fsync(co, 0), (s64)-T_E_STALE,
+                   "fsync when the name is gone: ESTALE");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 0ull, "and no Tfsync");
+    TEST_EXPECT_EQ((s64)dev9p.fsync(co, 0), 0ll, "fsync when it resolves");
+    TEST_ASSERT(cp->co_kfid != P9_NOFID, "binds");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 1ull, "and sends one Tfsync");
+    TEST_EXPECT_EQ((u64)g_tfsync_fid, (u64)cp->co_kfid, "on that fid");
+    spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+    lock_wire_reset();
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// SYS_FSYNC's gate (vote M22): either right reaches the Dev, as POSIX fsync
+// works on a descriptor opened only for reading; a handle with neither, and a
+// navigation (CWALKONLY) handle whatever its rights, answer EBADF with nothing
+// sent. Each refusal sits one variable from a leg that reaches the server.
+void test_dev9p_fsync_rights(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    static const rights_t rts[4] = {
+        RIGHT_READ, RIGHT_WRITE, RIGHT_TRANSFER, RIGHT_READ | RIGHT_WRITE,
+    };
+    hidx_t fd[4];
+    for (int i = 0; i < 4; i++) {
+        spoor_ref(root);                        // each slot consumes a reference
+        fd[i] = handle_alloc(p, KOBJ_SPOOR, rts[i], root);
+        TEST_ASSERT(fd[i] >= 0, "handle_alloc");
+    }
+    g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
+    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[0], 0), 0ll, "a read-only handle syncs");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 1ull, "with one Tfsync");
+    TEST_EXPECT_EQ((u64)g_tfsync_fid, 0ull, "on the root's fid");
+    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[1], 1), 0ll, "a write-only handle syncs");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 2ull, "with a second");
+    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[2], 0), -(s64)T_E_BADF,
+                   "a handle with neither right: EBADF");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 2ull, "and nothing sent");
+    root->flag |= CWALKONLY;
+    s64 nav = sys_fsync_for_proc(p, fd[3], 0);
+    u32 nav_seen = g_tfsync_seen;
+    root->flag &= ~CWALKONLY;
+    TEST_EXPECT_EQ(nav, -(s64)T_E_BADF, "a navigation handle, born R|W: EBADF");
+    TEST_EXPECT_EQ((u64)nav_seen, 2ull, "and nothing sent");
+    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[3], 0), 0ll,
+                   "the same handle, not a navigation one, syncs");
+    TEST_EXPECT_EQ((u64)g_tfsync_seen, 3ull, "with a third");
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
     teardown(root);
 }
 

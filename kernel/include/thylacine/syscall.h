@@ -4573,6 +4573,7 @@ void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
 s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
 s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
 s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k);
+s64 sys_fsync_for_proc(struct Proc *p, hidx_t h, u64 datasync_raw);
 s64 sys_getppid_for_test(struct Proc *p);
 s64 sys_getppid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
 s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags);

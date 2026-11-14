@@ -1553,7 +1553,8 @@ void test_9p_client_pump_ready_eof_is_dead(void) {
 // Loom-3 engine-driven tests: the full SYS_LOOM_ENTER path against the loopback
 // 9P client -- register a dev9p Spoor in a Loom, stage an FSYNC SQE, loom_enter
 // submits (Tfsync via the submit-time pin) + pumps the reply (Rfsync) + posts a
-// CQE. Plus the I-30 rights gate (a read-only handle denies fsync) and the #898
+// CQE. Plus the I-30 rights gate (a handle with neither right denies fsync; a
+// read-only one syncs, vote M22; a navigation one answers EBADF) and the #898
 // quiesce (a loom torn down with an op in flight abandons it cleanly).
 // =============================================================================
 
@@ -1609,9 +1610,9 @@ void test_9p_client_loom_fsync_e2e(void) {
 }
 
 // I-30 submit-time rights pin: an FSYNC against a registered handle whose rights
-// snapshot lacks RIGHT_WRITE is denied at submit (-EACCES CQE) and NEVER
-// dispatched -- the op does not go in flight, so the gate cannot be bypassed by
-// a later re-resolve at completion.
+// snapshot holds neither RIGHT_READ nor RIGHT_WRITE is denied at submit (-EACCES
+// CQE) and NEVER dispatched -- the op does not go in flight, so the gate cannot
+// be bypassed by a later re-resolve at completion.
 void test_9p_client_loom_rights_deny(void) {
     drive_client_open(&g_client, &g_loopback);
 
@@ -1620,8 +1621,8 @@ void test_9p_client_loom_rights_deny(void) {
 
     struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
-    rights_t rt = RIGHT_READ;       // NO RIGHT_WRITE -> fsync denied
-    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
+    rights_t rt = RIGHT_TRANSFER;   // neither RIGHT_READ nor RIGHT_WRITE -> fsync denied
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register a handle with neither right");
 
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -1633,8 +1634,50 @@ void test_9p_client_loom_rights_deny(void) {
     TEST_EXPECT_EQ(n, 1, "SQE consumed");
     TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one (error) CQE");
     TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_ACCES),
-                   "read-only handle -> fsync -EACCES (I-30 rights pin)");
+                   "neither right -> fsync -EACCES (I-30 rights pin)");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "denied at submit -> never dispatched");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Vote M22: a read-only registered handle's FSYNC dispatches, as SYS_FSYNC's
+// does; the same handle as a navigation (CWALKONLY) one answers EBADF at submit
+// and is never dispatched -- EBADF, not the rights gate's EACCES, so the
+// navigation gate is the one that fired.
+void test_9p_client_loom_fsync_read_only(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register a read-only handle");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 0, 0xAAAA0001u);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "a read-only handle's fsync succeeds");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "dispatched, completed, reaped");
+
+    sp->flag |= CWALKONLY;
+    cl_stage_sqe(l, 1, LOOM_OP_FSYNC, 0, 0, 0xAAAA0002u);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, 1, 0);
+    sp->flag &= ~CWALKONLY;
+    TEST_EXPECT_EQ(n, 1, "second SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "a second CQE");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_BADF),
+                   "a navigation handle's fsync: EBADF");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "never dispatched");
 
     loom_unref(l);
     p9_client_destroy(&g_client);

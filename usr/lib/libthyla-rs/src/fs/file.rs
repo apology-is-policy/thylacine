@@ -162,7 +162,9 @@ impl File {
     }
 
     /// Flush the file's data and metadata to stable storage (SYS_FSYNC). A write
-    /// the server had not taken fails here.
+    /// the server had not taken fails here. A handle opened only for reading
+    /// will do, a directory's included: syncing one makes a rename in it
+    /// durable.
     pub fn sync_all(&self) -> Result<()> {
         // SAFETY: a live handle; datasync 0 asks for the metadata too.
         let rc = unsafe { crate::t_fsync(self.handle.raw() as i64, 0) };

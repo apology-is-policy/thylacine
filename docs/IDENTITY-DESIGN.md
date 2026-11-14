@@ -1231,16 +1231,24 @@ SYS_WALK_CREATE(parent_fd, name_va, name_len, omode, perm) -> opened_fd / -1
 
 ```
 SYS_FSYNC(fd, datasync) -> 0 / -1
-  x0 = fd          hidx_t; KOBJ_SPOOR with RIGHT_WRITE.
+  x0 = fd          hidx_t; KOBJ_SPOOR with RIGHT_READ or RIGHT_WRITE.
   x1 = datasync    u32; 0 = full fsync (data + metadata), 1 = datasync.
 ```
 
 - **Mechanism:** new `Dev.fsync(struct Spoor *c, u32 datasync) -> int` vtable
   slot. `dev9p_fsync` -> `p9_client_fsync(fid, datasync)` -> Stratum `Tsync`.
   In-memory Devs (`devramfs`) implement `.fsync` as no-op success (nothing to
-  flush). A Dev with no `.fsync` slot -> -1.
-- **Error cases (-1):** fd not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; no `.fsync`
-  slot; server Rlerror.
+  flush). A Dev with no `.fsync` slot -> -1. A cached read-only open
+  (FID-LIFECYCLE) sends its `Tfsync` on the fid its fstat and wstat address.
+- **Rights (vote M22, 2026-11-14):** either right, as POSIX `fsync` works on a
+  descriptor opened only for reading -- a directory's included, which is how a
+  rename becomes durable (`mv` across devices syncs the destination directory).
+  A navigation (`T_OPATH`) handle answers `EBADF` whatever its rights, as
+  Linux's `O_PATH` does: it is born R|W with no check on its target and opens
+  nothing at the server. `LOOM_OP_FSYNC` asks the same (`EACCES` for neither
+  right, its rights gate's errno; `EBADF` for a navigation handle).
+- **Error cases:** fd not `KOBJ_SPOOR`, holding neither right, or a navigation
+  handle (`EBADF`); no `.fsync` slot (`EOPNOTSUPP`); server Rlerror.
 
 **`SYS_READDIR = 56`** -- directory enumeration. Needed for A-1b load-time user
 enumeration and for the A-2 coreutils `ls`.

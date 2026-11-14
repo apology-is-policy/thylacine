@@ -797,6 +797,7 @@ int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fi
 }
 
 static int co_read_live(struct dev9p_priv *p);
+static int co_bind(struct dev9p_priv *p);
 
 int dev9p_loom_register(struct Spoor *c) {
     // A Loom op drives the fid straight to the wire, past every write-behind
@@ -2431,9 +2432,17 @@ static long dev9p_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
-    // FID-LIFECYCLE cached-open: fsync on a read-only fd is a POSIX-legal
-    // no-op success (nothing to flush; no fid to Tsync).
-    if (p->cached_open) return 0;
+    // FID-LIFECYCLE cached-open: a read-only open reaches here (fsync takes
+    // either right, vote M22). Nothing is staged and no fid is opened, but the
+    // server may hold the file's content uncommitted, so the Tfsync goes on the
+    // fid its fstat and wstat address: a strict open's kept fid, or the one a
+    // loose open binds now. A cached open exists only on a server that walks
+    // with Twalkgetattr (Stratum), whose Tfsync takes an unopened fid.
+    if (p->cached_open) {
+        int br = co_bind(p);
+        if (br != 0) return br;
+        return p9_client_fsync(p->client, lock_fid(p), datasync);
+    }
     // F1 write-behind: flush the staged run FIRST -- fsync is the reliable
     // error channel (the voted NFS model), so a latched flush error
     // surfaces here even when the run itself is already gone; a live run
