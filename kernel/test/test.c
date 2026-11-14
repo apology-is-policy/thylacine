@@ -1007,6 +1007,7 @@ struct test_case g_tests[] = {
     { "shared_anon.fork_shares_the_page", test_shared_anon_fork_shares_the_page, false, NULL },
     { "shared_anon.creator_pays_every_mint", test_shared_anon_creator_pays_every_mint, false, NULL },
     { "shared_anon.unmap_keeps_the_page", test_shared_anon_unmap_keeps_the_page, false, NULL },
+    { "shared_anon.detach_keeps_the_page", test_shared_anon_detach_keeps_the_page, false, NULL },
     { "shared_anon.creator_death_hands_over", test_shared_anon_creator_death_hands_over, false, NULL },
     { "shared_anon.install_loser_refunds", test_shared_anon_install_loser_refunds, false, NULL },
     { "shared_anon.protect_split_keeps_payer", test_shared_anon_protect_split_keeps_payer, false, NULL },

@@ -457,6 +457,7 @@ void test_demand_page_file_cached_image_takes_no_payer(void);
 void test_shared_anon_fork_shares_the_page(void);
 void test_shared_anon_creator_pays_every_mint(void);
 void test_shared_anon_unmap_keeps_the_page(void);
+void test_shared_anon_detach_keeps_the_page(void);
 void test_shared_anon_creator_death_hands_over(void);
 void test_shared_anon_install_loser_refunds(void);
 void test_shared_anon_protect_split_keeps_payer(void);

@@ -280,6 +280,61 @@ void test_shared_anon_unmap_keeps_the_page(void) {
     TEST_EXPECT_EQ(dc2, c0, "and the child's leaf to the child");
 }
 
+// The whole-mapping detach (burrow_unmap: SYS_BURROW_DETACH, the weave unmaps)
+// keeps a shared page as the munmap does. It reaches the release with no type
+// check of its own -- the release's admission is the only thing between it and
+// freeing a page a sharer still maps -- where the munmap's range detach checks
+// the type itself first.
+void test_shared_anon_detach_keeps_the_page(void) {
+    struct Proc *p = proc_alloc(), *q = proc_alloc();
+    if (!p || !q) { sa_drop(q); sa_drop(p); TEST_ASSERT(false, "proc_alloc"); }
+    u64 sva = sa_map(p, true);
+    struct Burrow *sb = sva ? sa_burrow(p, sva) : NULL;
+    const bool pfl = sa_floor(p->as);
+    const u32 d0 = sa_data(p->as);
+    enum fault_result r0 = sva ? sa_fault(p, sva, true) : FAULT_UNHANDLED_USER;
+    struct page *pg = sb ? burrow_lazy_slot_for_test(sb, 0) : NULL;
+    if (pg) *(volatile u64 *)pa_to_kva(page_to_pa(pg)) = SA_PATTERN;
+    struct AddrSpace *qown = NULL;
+    struct AddrSpace *c = pg ? sa_fork(p, q, &qown) : NULL;
+    bool cfl = false, still_payer = false, kept = false;
+    u32 rec1 = 0, res1 = 0, dp1 = 0;
+    int d1 = -1;
+    s64 m2 = -1;
+    enum fault_result r1 = FAULT_UNHANDLED_USER;
+    if (c) {
+        cfl = sa_floor(c);
+        r1 = sa_fault(q, sva, false);                   // the child's hit: its own leaf
+        d1 = burrow_unmap(p, sva, SA_LEN);              // the payer detaches the whole mapping
+        still_payer = burrow_payer_for_test(sb) == p->as;
+        rec1 = burrow_payer_charge_pages_for_test(sb);
+        res1 = burrow_lazy_resident_count(sb);
+        dp1 = sa_data(p->as);
+        paddr_t cpa = sa_leaf_pa(sa_leaf(c->pgtable_root, sva));
+        kept = cpa == page_to_pa(pg) &&
+               *(volatile u64 *)pa_to_kva(cpa) == SA_PATTERN;
+        m2 = sys_munmap_range_for_proc(q, sva, SA_LEN); // the last mapping: the free
+        sa_unfloor(c, cfl);
+    }
+    sa_unfork(q, qown, c);
+    sa_unfloor(p->as, pfl);
+    sa_drop(q);
+    sa_drop(p);
+
+    TEST_ASSERT(sva != 0 && pg != NULL, "the shared mint and its page");
+    TEST_ASSERT(pfl && cfl, "the floors under both counts");
+    TEST_EXPECT_EQ(r0, FAULT_HANDLED, "the payer mints");
+    TEST_ASSERT(c != NULL, "the fork");
+    TEST_EXPECT_EQ(r1, FAULT_HANDLED, "the child's hit");
+    TEST_EXPECT_EQ(d1, 0, "the payer's whole-mapping detach");
+    TEST_ASSERT(still_payer, "a detach does not lapse the record");
+    TEST_EXPECT_EQ(rec1, 1u, "the record keeps the page");
+    TEST_EXPECT_EQ(res1, 1u, "the page stays resident: a detach never releases it");
+    TEST_EXPECT_EQ(dp1, d0 + 1u, "and the payer still pays for it");
+    TEST_ASSERT(kept, "the child's leaf still names the page, the contents intact");
+    TEST_EXPECT_EQ(m2, (s64)0, "the child's munmap, the last mapping");
+}
+
 // The payer's death lapses the record; the next sharer to mint becomes the
 // payer, charged the whole residency plus its mint, and its mapping becomes a
 // payer mapping (its charged leaf uninstalled and refunded, then re-faulted
