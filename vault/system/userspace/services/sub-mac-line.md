@@ -106,14 +106,22 @@ measured.
 `macline` 13 host tests, `virtio-serial`'s pure half 22; 47 mutants of the three modules each
 turn a test red (aux-gate resid/r6-mut.py, `R6-MUT DONE bad=0`). `tools/mac-app-fake.py`, the
 app's end written from 4.4 rather than from `macline`, passes a scripted driver end (aux-gate
-resid/r6-fake-check.py, 45 checks). The guest build checks. `ls-mac-line` (the line up, a
-session's walk of the tree with ownership checked against `id`, the app going away under a held
-connection, a new app) is written and NOT YET RUN IN A GUEST. Not yet audited (round R5).
+resid/r6-fake-check.py, 45 checks). The guest build checks. `ls-mac-line` covers five legs:
+- the line up;
+- the session's own mount, attached at login as the user `id` names;
+- a program's walk of the tree, with ownership checked against `id`;
+- the app going away under a held connection and the session's mount;
+- a new app.
+
+It passes against a scripted guest that plays the driver's end, with the fake app as the app
+(aux-gate `scendry-mac`: 2 runs green, 11 faults red, each at its own check). It has NOT YET
+RUN IN A GUEST. Not yet audited (round R5).
 
 ## Seams
 
-- **newns** (vote M13): login starts each session's program through it; it opens `/srv/mac` as
-  the user and mounts `/mnt/mac`. Not yet built, so no session mounts the line yet.
+- **newns** ([[sub-newns]], vote M13): login starts each session's program through it; it opens
+  `/srv/mac` as the user, mounts `/mnt/mac` and execs the program in place. login routes `mac` as
+  a resident name and makes the mount point ([[sub-stratum-session]]).
 - The app's end (`macrunner/app`): the mac1 line and its 9P server. Not yet built.
 
 ## Caveats

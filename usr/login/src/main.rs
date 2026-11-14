@@ -69,6 +69,9 @@ const FD_IN: i64 = 0; // the tty (or seeded creds pipe)
 const FD_OUT: i64 = 1; // the tty (or capture pipe)
 const MAX_LINE: usize = 256;
 const SHELL: &str = "/bin/ut"; // #58: resolved via joey's post-pivot /bin bind
+// Every session program starts through newns, which mounts the session's /mnt/mac as the user
+// and then execs the program in place (MAC-RUNNER 4.4, vote M13).
+const NEWNS: &str = "/bin/newns";
 
 // The user shell runs as the authenticated user with NO elevation/identity/grant
 // caps -- a shell is not an identity-stamper. It keeps the two benign
@@ -820,6 +823,19 @@ unsafe fn mkdir_or_open(parent_fd: i64, name: &[u8]) -> i64 {
     t_walk_open(parent_fd, name.as_ptr(), name.len(), T_OPATH)
 }
 
+// The empty directory /<dir>/<name> a session program mounts onto. login owns the pool root, so
+// it makes the directory for a program that runs as the user; idempotent, as the pool persists.
+unsafe fn make_mount_point(dir: &[u8], name: &[u8]) {
+    let d = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, dir);
+    if d >= 0 {
+        let n = mkdir_or_open(d, name);
+        if n >= 0 {
+            let _ = t_close(n);
+        }
+        let _ = t_close(d);
+    }
+}
+
 // Drain whatever is currently readable on the proxy's captured stderr to the
 // boot log (UART), strictly non-blocking (poll timeout 0). Mirrors joey's
 // stratumd stderr drain: surfaces the proxy's startup diagnostics AND keeps the
@@ -1097,7 +1113,7 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 // session, and neither the boot source nor the factory role goes to children.
 unsafe fn private_service_registry(console_place: bool) -> i64 {
     use libthyla_rs::{t_srv_registry_new, SrvRoute};
-    const RESIDENT: [&[u8]; 12] = [
+    const RESIDENT: [&[u8]; 13] = [
         b"corvus",
         b"net",
         b"nocturne",
@@ -1110,6 +1126,8 @@ unsafe fn private_service_registry(console_place: bool) -> i64 {
         b"ptyfs",
         b"diorama",
         b"tapestry-interaction",
+        // The line to the Mac (MAC-RUNNER 4.4): newns opens it in the session.
+        b"mac",
     ];
     // The console renderer's place channel (HALCYON.md 14.7.2), unless this login would start
     // the session compositor on a successful authentication: on the console its shell is the
@@ -1122,7 +1140,7 @@ unsafe fn private_service_registry(console_place: bool) -> i64 {
         name_len: 0,
         reserved: 0,
         name: [0; 32],
-    }; 13];
+    }; RESIDENT.len() + 1];
     let names = RESIDENT
         .iter()
         .copied()
@@ -1417,8 +1435,16 @@ pub extern "C" fn rs_main() -> i64 {
     // Ctrl-C. login holds the session factory's role (SESSION_REGISTRY, from joey),
     // which is the gate for CONSOLE_OWNER; the owner bit never confers console-attach
     // (I-27 untouched).
-    let mut shell_cmd = Command::new(SHELL);
+    //
+    // The shell starts through newns (vote M13): the spawn below makes the Proc newns, with all of
+    // the shell's identity, caps, perms and descriptors, and newns execs ut in place once it has
+    // mounted /mnt/mac. exec keeps the perm bits, the console owner (the Proc) and every spawned
+    // descriptor (none is close-on-exec), so ut holds what it held when login spawned it.
+    // A failure to make the mount point is newns's to report, and only where there is a line.
+    unsafe { make_mount_point(b"mnt", b"mac") };
+    let mut shell_cmd = Command::new(NEWNS);
     shell_cmd
+        .arg(SHELL)
         .identity(pid, gid, &supp)
         .account(session_account.0, session_account.1)
         .caps(SHELL_CAPS)
@@ -1462,8 +1488,9 @@ pub extern "C" fn rs_main() -> i64 {
         // every cap, and login holds CAP_SET_IDENTITY -- unmasked, every
         // program in every tile could spawn as any principal. Its exit IS
         // logout, exactly as the shell's is.
-        let mut hal = Command::new("/bin/halcyond");
-        hal.arg("--session")
+        let mut hal = Command::new(NEWNS);
+        hal.arg("/bin/halcyond")
+            .arg("--session")
             .identity(pid, gid, &supp)
             .account(session_account.0, session_account.1)
             .caps(SHELL_CAPS)

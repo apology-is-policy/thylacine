@@ -22,6 +22,82 @@ needed the operator.
 
 
 ---
+## 2026-11-14 (aux): the line to the Mac, built to the session's mount
+
+Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throughout.
+
+### What it is
+
+- **The identity gap, voted (M13).** MAC-RUNNER 4.4 had login mount `/srv/mac` with the attach
+  carrying the session user. The kernel stamps a `/srv` attach with the opener's principal
+  (kernel/9p_attach.c:406) and login is SYSTEM (usr/login/src/main.rs:24), so the voted design
+  could not work as written. Three options went to the operator with Plan 9's newns as the
+  heritage answer. The operator took the session starter (06:22Z), and the scripture landed in
+  d0f4ec812 (MAC-RUNNER 4.4, dec-2026-11-14-mac-session-starter).
+- **The line's first build** (7584af216):
+  - `usr/lib/macline`, the mac1 framing, which the driver and the app both build;
+  - `usr/virtio-serial`, a warden-bound driver that takes the port `org.thylacine.mac`, posts
+    `/srv/mac` and relays every guest connection as a channel under 4.4's rules;
+  - `usr/mac-line-probe`, a fake app (`tools/mac-app-fake.py`), the scenario `ls-mac-line`, and
+    `run-vm.sh`'s `THYLACINE_MAC_LINE`.
+- **The session starter** (this entry's commit). `usr/newns` opens `/srv/mac` as the user,
+  mounts it at `/mnt/mac` in its own namespace, and execs the session program in place.
+  - login spawns `newns /bin/ut ...` and `newns /bin/halcyond --session ...` with the same
+    identity, caps, perms and descriptors as before.
+  - login routes `mac` as a resident name, and makes the empty `/mnt/mac`.
+  - Before writing it, the kernel was read for what exec keeps. It keeps every `proc_flags` bit
+    but the two note bits, every descriptor spawn installed (none is close-on-exec), the Proc
+    (so the console owner, the session and the pid), and the account.
+  - `ls-mac-line` gained the session's leg: the attach made at login carries the principal `id`
+    names, `cat /mnt/mac/snarf` reads the app's text, `stat` shows the user as owner, and with
+    the app gone the session's mount fails.
+
+### Wrong turns, and what caught each
+
+- **The mount point.** The plan had newns make `/mnt/mac` if it was missing. newns runs as the
+  user and the pool root is SYSTEM's, so it could not. login's own comment at its `/home` mkdir
+  ("login runs as SYSTEM and owns the boot-pool root") caught it before the step was written, and
+  login makes the directory, as it makes `/home/<user>`.
+- **A harness timeout, not a scenario fault.** The scripted guest's first green runs failed
+  waiting for the held probe's end. The harness waited 10 s where the real lib waits 30, and the
+  hold lasts 12 s. Its transcript showed the fake behaving as designed: the held connection stays
+  dead after a new app comes. The harness now uses the real value.
+- **In the driver's build** (7584af216), each caught before its commit:
+  - the fake app's pre-lease check failed twice, and both were the check's own mistakes: a walk
+    from an already-opened fid, and a U+FFFD counted as one byte instead of three;
+  - mutant C10 (a name for a port never added) survived until a test named an unadded port;
+  - quaestor's render wanted an abi-boot-banner line for the new scenario;
+  - the dossier gate wanted sub-warden beside the warden manifest.
+
+### Evidence
+
+- 7584af216: `macline` 13 host tests, `virtio-serial`'s pure half 22, 47 mutants red (aux-gate
+  resid/r6-mut.py); the fake app passes 45 checks against a scripted driver end
+  (resid/r6-fake-check.py); the guest build checks.
+- newns and login: the guest check is clean; clippy has no finding in newns or login's changed
+  lines; newns is rustfmt-clean.
+- `ls-mac-line` against a scripted guest that plays QEMU, the driver's end and the guest's 9P
+  client, with the real fake app on the other end (aux-gate scendry-mac/run.sh): 2 runs green
+  with all five legs passing, and 11 faults red, each at its own check. The faults were: no
+  HELLO, a wrong maxframe, no mount, a wrong principal at the attach, a wrong owner in `stat`,
+  a mount that still reads with the app gone, the probe's walk wrong, the probe's owner wrong,
+  held reads that still succeed, no HELLO on the new line, and no write.
+
+### Decided by the operator
+
+- M13 (2026-11-14, 06:22Z): login starts every session program through newns, as recommended.
+
+### What "shown" covers
+
+Host-side only. No guest has run the driver, newns or login's change yet, and `ls-mac-line` has
+run only against a scripted guest. None of it is audited (round R5).
+
+### Open
+
+- Guest run 6 under the mac's lease: `ls-mac-line` green, with red controls (no HELLO at the
+  app's arrival, the app's departure not hanging connections up, newns not mounting).
+- I-c: the app's mac1 line and 9P2000.L server; I-d: the power key and Quit; then round R5.
+
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor
 
 Stamped 2026-11-13T22:11Z. Branch aux-3-mac after 5d674a326's entry: 39d8ca95b (the input witnesses), 24890b0ab (the /mnt/mac scripture), a1ca01f53 (R4-F3's code), and this entry's commit (R4-F3's scenario, dossiers and Astra's handoff 057).
@@ -60,7 +136,7 @@ R4-F3 on the host: the rule and the wire. In a guest (run 5): the count in `Devi
 
 - Round R5 over R4's fixes, 39d8ca95b, R4-F3, d585b24f1, bcad0f8d0 and the interop drivers.
 - d585b24f1's GL witness (warp-host.sh composed-stall) wants a GL host.
-- **A gap in the voted interop design, for the operator** (found 22:50Z): MAC-RUNNER 4.4 says login mounts `/srv/mac` and the attach carries the session user. The kernel stamps a `/srv` attach with the OPENING Proc's principal (kernel/9p_attach.c:406), and login runs as SYSTEM, so a mount login makes would show every file owned by SYSTEM. Asked as a question; login's mount waits on it.
+- **A gap in the voted interop design, for the operator** (found 22:50Z): MAC-RUNNER 4.4 says login mounts `/srv/mac` and the attach carries the session user. The kernel stamps a `/srv` attach with the OPENING Proc's principal (kernel/9p_attach.c:406), and login runs as SYSTEM, so a mount login makes would show every file owned by SYSTEM. Asked as a question; answered 2026-11-14 as vote M13 (the 2026-11-14 entry).
 - The interop build: the virtio-serial driver, login's mount, the app's 9P server, the power-key driver, each with its audit row.
 - HALCYON_SCALE and HALCYON_MOTION have no guest scenario; #880; Control-Command-G never pressed; one `--stats` run is asked of the operator; QEMU's `max_hostmem` default of 256 MiB against M9. The full CI gate is held. Codeberg is behind.
 

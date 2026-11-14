@@ -15,17 +15,17 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-11-12
+updated: 2026-11-14
 ---
 ## Route to the console renderer's place channel
 
 login routes `halcyon`, the console renderer's inline-media place channel
-(HALCYON.md 14.7.2), beside the twelve resident names unless it would start
+(HALCYON.md 14.7.2), beside the thirteen resident names unless it would start
 the session compositor on a successful authentication, that is unless the
 image has the session lever and login was not passed `--no-session`
 (`private_service_registry(console_place)`). The lever and the flag are read
 before the view is made and before anyone authenticates, so a login that
-would start the compositor routes the twelve only whatever happens next: when
+would start the compositor routes the thirteen only whatever happens next: when
 authentication fails, when it serves `!recover`, and when the compositor
 fails and it runs its fallback shell. Among the routed logins are the console
 getty's on an image without the session lever and joey's seeded boot logins
@@ -54,6 +54,17 @@ image it SKIPs and names its bake; docs/agent/GATES.md lists the images a
 whole-fleet run needs. This is a login-policy
 update the operator ratified on November 13
 (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
+
+## The session starter and the line to the Mac (November 14)
+
+login starts every session's program, ut or `halcyond --session`, through newns
+([[sub-newns]], vote M13). The spawn is unchanged but for its program: newns is born with the
+user's identity, the shell's cap mask, the session's perms and descriptors (consctl at fd 3 on
+the ut path). It mounts `/srv/mac` at `/mnt/mac` as the user, then execs the program in place,
+and the exec keeps all of that. Before the spawn login makes the empty directory `/mnt/mac`,
+since it owns the pool root and newns cannot create there. `mac` is the thirteenth resident
+name, so the session's open reaches the driver's post ([[sub-mac-line]]) and no session program
+can shadow it.
 
 ## Resident cancellation route (October 2)
 
@@ -170,8 +181,9 @@ At login, in order:
    **The lease is conn-bound**, so login's `/ctl` attach must stay open for
    the whole session.
 4. spawn the per-user proxy, attach `ds:<user>`, mount at `/home/<user>`.
-5. … session …
-6. `evict-dek` — zero and remove. Conn-destroy auto-evicts too; explicit
+5. make `/mnt/mac` and start the session's program through newns (above).
+6. … session …
+7. `evict-dek` — zero and remove. Conn-destroy auto-evicts too; explicit
    eviction zeroes promptly.
 
 Each `/ctl` verb is **one Twrite of an exact-length payload**. A partial

@@ -1,0 +1,11 @@
+[package]
+name = "newns"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# The session starter (docs/MAC-RUNNER.md 4.4, vote M13): login spawns it as the user; it mounts
+# /srv/mac at /mnt/mac in its own namespace, then execs the session program in place.
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -6,14 +6,17 @@
 #
 #   1. The line comes up: the fake read the driver's HELLO (maxframe 16384, the driver's) and
 #      sent its own; the driver posted /srv/mac.
-#   2. A session uses the tree: `mac-line-probe once` as michael reads snarf (the fake's text),
+#   2. The session has its own mount (vote M13): login started ut through newns, whose attach
+#      the fake logged with michael's principal, the one `id` names; in the session
+#      `cat /mnt/mac/snarf` reads the fake's text and `stat` shows michael as its owner.
+#   3. A program uses the tree: `mac-line-probe once` as michael reads snarf (the fake's text),
 #      sees O_RDWR refused and folders/ an empty directory, and writes snarf (the fake logs the
 #      bytes). Ownership is checked against a THIRD source: the probe's stat and the fake's
 #      logged n_uname are both what `id` says michael is -- two sources alone would agree on a
 #      wrong principal too.
-#   3. The app goes away while a connection is held: the driver says every channel closed, the
-#      held connection's reads fail, and a new connect fails at once.
-#   4. A new app connects: the driver sends HELLO again and a new connect works.
+#   4. The app goes away while a connection is held: the driver says every channel closed, the
+#      held connection's reads fail, the session's mount fails, and a new connect fails at once.
+#   5. A new app connects: the driver sends HELLO again and a new connect works.
 #
 # Uses the --config ci image (a serial-console login).
 
@@ -93,13 +96,15 @@ proc probe {cmd final phase} {
 
 fake_start
 lc_boot
+# Every boot-time login ran before the prompt, so an attach logged past this mark is the session's.
+set login_mark [fake_count]
 lc_login michael correct-horse-battery-staple-v1
 
 # ---- 1. the line is up.
 fake_wait 0 {hello maxframe=16384} 30 "the driver's HELLO, with the driver's maxframe, reached the fake"
 fake_never 0 {line malformed|discarded} "nothing malformed or stale on a fresh line"
 
-# ---- 2. a session uses the tree.
+# ---- 2. the session's own mount.
 lc_send "id"
 lc_within $lc_cmd_timeout {
     -re {uid=([0-9]+) gid=} { set me $expect_out(1,string) }
@@ -108,6 +113,34 @@ lc_within $lc_cmd_timeout {
     eof                   { lc_fail "unexpected EOF at id" }
 }
 lc_step "michael is principal $me"
+set att [fake_wait $login_mark {attach n_uname=([0-9]+) uname='' aname=''} 10 "the attach newns made at login"]
+regexp {n_uname=([0-9]+)} $att - sess
+if {$sess != $me} {
+    lc_fail "the session's attach carried principal $sess; id says michael is $me"
+}
+lc_send "cat /mnt/mac/snarf"
+lc_within $lc_cmd_timeout {
+    -re "hello from the mac"                 { lc_step "the session read /mnt/mac/snarf" }
+    -re {cat: /mnt/mac/snarf: ([^\r\n]*)}    { lc_fail "the session has no /mnt/mac: $expect_out(1,string)" }
+    -re {newns: ([^\r\n]*)}                 { lc_fail "newns said: $expect_out(1,string)" }
+    -re {EXTINCTION:}                        { lc_extinction_fail "kernel extinction at cat /mnt/mac/snarf" }
+    timeout                                  { lc_fail "cat /mnt/mac/snarf printed neither the text nor an error" }
+    eof                                      { lc_fail "unexpected EOF at cat /mnt/mac/snarf" }
+}
+lc_send "stat /mnt/mac/snarf"
+lc_within $lc_cmd_timeout {
+    -re {Uid:(?:\x1b\[[0-9;]*m)? *([0-9]+|system)} { set suid $expect_out(1,string) }
+    -re {stat: ([^\r\n]*)}                         { lc_fail "stat /mnt/mac/snarf failed: $expect_out(1,string)" }
+    -re {EXTINCTION:}                               { lc_extinction_fail "kernel extinction at stat /mnt/mac/snarf" }
+    timeout                                         { lc_fail "stat /mnt/mac/snarf printed no Uid" }
+    eof                                             { lc_fail "unexpected EOF at stat /mnt/mac/snarf" }
+}
+if {$suid != $me} {
+    lc_fail "/mnt/mac/snarf is owned by $suid in the session; id says michael is $me"
+}
+lc_pass "ls-mac-line: the session's /mnt/mac was attached as michael ($me) and reads the Mac's snarf"
+
+# ---- 3. a program uses the tree.
 set mark [fake_count]
 set out [probe "mac-line-probe once from-the-guest" {^once: } "the probe's walk of the tree"]
 if {![string match "*once: every step as the tree says*" $out]} {
@@ -129,20 +162,28 @@ fake_wait $mark {snarf set 14 bytes 'from-the-guest'} 10 "the guest's write reac
 fake_wait $mark {close chan [0-9]+} 10 "the probe's connection closed its channel"
 lc_pass "ls-mac-line: snarf read the Mac's text and a write set it; O_RDWR refused; folders/ empty"
 
-# ---- 3. the app goes away under a held connection.
+# ---- 4. the app goes away under a held connection.
 lc_send "mac-line-probe hold 12 &"
 lc_expect "mac-line-probe: hold: connected" "a connection is held"
 lc_expect_re {mac-line-probe: hold [0-9]+: snarf read [0-9]+ bytes} "the held connection reads"
 fake_stop
 lc_expect "virtio-serial: the Mac app went away; every channel is closed" "the driver saw the app go"
 lc_expect_re {mac-line-probe: hold [0-9]+: snarf read failed: } "the held connection's read fails"
+lc_send "cat /mnt/mac/snarf"
+lc_within $lc_cmd_timeout {
+    -re {cat: /mnt/mac/snarf: ([^\r\n]*)}     { lc_step "the session's mount fails: $expect_out(1,string)" }
+    -re "hello from the mac|from-the-guest"   { lc_fail "the session's mount still reads with the app gone" }
+    -re {EXTINCTION:}                         { lc_extinction_fail "kernel extinction at cat /mnt/mac/snarf (app gone)" }
+    timeout                                   { lc_fail "cat /mnt/mac/snarf with the app gone printed nothing" }
+    eof                                       { lc_fail "unexpected EOF at cat /mnt/mac/snarf (app gone)" }
+}
 set out [probe "mac-line-probe once nobody-there" {^(once: |connect /srv/mac failed)} "a connect with no app"]
 if {![string match "*connect /srv/mac failed*" $out]} {
     lc_fail "a connect with no app on the line did not fail: $out"
 }
-lc_pass "ls-mac-line: with the app gone the held connection fails and a new connect is refused"
+lc_pass "ls-mac-line: with the app gone the held connection and the session's mount fail, and a new connect is refused"
 
-# ---- 4. a new app.
+# ---- 5. a new app.
 set mark [fake_count]
 fake_start
 lc_expect "virtio-serial: the Mac app is on the line" "the driver saw the new app"
