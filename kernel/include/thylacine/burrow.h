@@ -166,6 +166,20 @@ enum burrow_type {
     // a shared-memory window is device-passive DATA, not a command/register
     // surface the device interprets.
     BURROW_TYPE_HOSTMEM = 7,
+    // Operator votes 117 + 119 (ARCH 28 I-44 + I-32; VIVARIUM 6.21): the
+    // anonymous memory a fork SHARES -- Linux's MAP_SHARED|MAP_ANONYMOUS and a
+    // shared map of /dev/zero. Backing is ANON_LAZY's (the sparse pagemap, each
+    // page demand-zeroed on first touch); the type differs in what happens at
+    // fork, where the child maps this same Burrow instead of a COW clone, so a
+    // write by either side is the other's. A separate TYPE rather than a flag
+    // because every private-lazy mechanism tests `type == BURROW_TYPE_ANON_LAZY`
+    // (the COW routing, the clone, the swap, the release, the extension, the
+    // populate), so each one refuses this Burrow without having to remember
+    // to. Its pages are never COW-shared (a plain free), never released while
+    // the Burrow lives (I-7: another space may map them), and paid by a payer
+    // record (vote 119: the creating space pays every mint, whoever faults).
+    // Never executable: no path mints it with an X ceiling.
+    BURROW_TYPE_ANON_SHARED = 8,
 };
 
 struct page;
@@ -255,9 +269,11 @@ struct Burrow {
     u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
-    // Vote 118 (I-32): a PRIVATE image's pages are its payer's. payer_record
+    // Votes 118 + 119 (I-32): the pages of a PRIVATE image (FILE) or of a
+    // shared anonymous Burrow (ANON_SHARED) are their payer's. payer_record
     // is fixed before the Burrow is published (image_lookup_or_create's
-    // private arm, or the cache's bypass) and read without a lock. The rest
+    // private arm or the cache's bypass; burrow_create_anon_shared) and read
+    // without a lock. The rest
     // is the payer record, read and written only under g_payer_lock
     // (burrow.c): payer is the address space charged for every resident
     // page -- NULL once it has died (lapsed) -- and payer_charge_pages is the
@@ -271,7 +287,7 @@ struct Burrow {
     struct AddrSpace *payer;
     struct Burrow    *paid_next;
     struct Burrow    *paid_prev;
-    struct pagemap    pm;           // FILE / ANON_LAZY / CODE: the sparse slot table; not live for other types
+    struct pagemap    pm;           // FILE / ANON_LAZY / CODE / ANON_SHARED: the sparse slot table; not live for other types
 
     // #131/#132: WHO PAID the I-32 page_count for this region, and how much.
     // A Burrow's `type` tells you the region's SHAPE; it has never told you who
@@ -487,6 +503,14 @@ static inline bool burrow_file_limit_known(u64 lim) {
 // Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, SLUB
 // OOM, or pagemap OOM.
 struct Burrow *burrow_create_anon_lazy(size_t size);
+
+// Votes 117 + 119: burrow_create_anon_shared -- the anonymous Burrow a fork
+// shares (BURROW_TYPE_ANON_SHARED). Allocation is burrow_create_anon_lazy's;
+// the record is set before return, `payer` the creating space (exempt: its
+// I-32 verdict), so the first mapping into that space is a payer mapping.
+// NULL as burrow_create_anon_lazy.
+struct Burrow *burrow_create_anon_shared(size_t size, struct AddrSpace *payer,
+                                         bool exempt);
 
 // I-42 / CL-7k: burrow_create_code — the dual-mappable CODE Burrow, the only
 // backing object from which userspace may hold an executable mapping
@@ -757,12 +781,13 @@ struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
                                                        const struct AddrSpace *payer,
                                                        u32 *out_refund);
 
-// Vote 118: the payer record of a PRIVATE FILE Burrow (ARCH 25.4 REVENANT
-// row, the private-page charge addendum). Every function takes
+// Votes 118 + 119: the payer record of a PRIVATE FILE Burrow (ARCH 25.4
+// REVENANT row, the private-page charge addendum) or of an ANON_SHARED one
+// (the LINEAGE row's shared anonymous memory addendum). Every function takes
 // g_payer_lock, a leaf: callable under as->lock or v->lock, never
 // across a sleep.
 //
-// burrow_payer_set: mark `v` private and, for a non-NULL `as`, make it
+// burrow_payer_set: give `v` (FILE or ANON_SHARED) its record and, for a non-NULL `as`, make it
 // the payer (an empty record). Called once, before `v` is published; `as`
 // must have a live owner. A NULL `as` leaves the record lapsed, so the first
 // mint makes its faulter the payer.
@@ -954,6 +979,14 @@ int burrow_unmap_in(struct AddrSpace *as, u64 vaddr, size_t length);
 // as->lock -> v->lock for the per-slot take.
 int burrow_decommit(struct Proc *p, u64 vaddr, size_t length);
 
+// burrow_dontneed: the phenotype's madvise(MADV_DONTNEED) (votes 117 + 119;
+// VIVARIUM 6.21). burrow_decommit, except that a shared anonymous mapping in
+// the range is admitted too, and only unmapped: its pages stay in the Burrow
+// (another space may map them, I-7), its leaves are refunded if this space is
+// not the payer, and the next touch reads what is there -- Linux's zap. Same
+// errnos, same precondition.
+int burrow_dontneed(struct Proc *p, u64 vaddr, size_t length);
+
 // The per-mapping half of the above, for vma.c's range detach: release the
 // resident slots of ONE plain ANON_LAZY mapping `v` over [lo, hi) (within it;
 // PTEs already uninstalled by the caller), freeing + uncharging pages and the
@@ -964,9 +997,9 @@ u32 burrow_release_lazy_range_in(struct AddrSpace *as, const struct Vma *v,
 
 #ifdef KERNEL_TESTS
 // burrow_lazy_resident_count: the number of resident (faulted-in, not-decommitted)
-// pages in a BURROW_TYPE_ANON_LAZY Burrow — O(1) since B-1a' (the pagemap keeps
+// pages in a lazy Burrow (ANON_LAZY, CODE or ANON_SHARED) — O(1) since B-1a' (the pagemap keeps
 // the count). Read under v->lock (lock order as->lock -> v->lock; the caller
-// holds as->lock). Returns 0 for a NULL / corrupted / non-ANON_LAZY Burrow.
+// holds as->lock). Returns 0 for a NULL / corrupted / other-type Burrow.
 u32 burrow_lazy_resident_count(struct Burrow *v);
 #endif // KERNEL_TESTS
 // burrow_lazy_footprint: resident pages PLUS the pagemap's node pages -- what a
@@ -1074,7 +1107,8 @@ void   burrow_file_install_page_for_test(struct Burrow *v, size_t idx);
 struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx);
 // Overcommit: the page resident in an ANON_LAZY Burrow's pagemap at idx (NULL if
 // not faulted in / decommitted / out of range) -- lets the lazy-fault tests verify
-// the demand-zero install + the decommit release. Extincts on a non-ANON_LAZY Burrow.
+// the demand-zero install + the decommit release. Extincts on a Burrow that is
+// not ANON_LAZY, CODE or ANON_SHARED.
 struct page *burrow_lazy_slot_for_test(const struct Burrow *v, size_t idx);
 #endif
 

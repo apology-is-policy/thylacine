@@ -69,8 +69,9 @@
 _Static_assert(sizeof(((struct Burrow *)0)->file_devno) == sizeof(((struct Spoor *)0)->devno),
                "a FILE Burrow's key copy carries the whole devno");
 
-// B-1a': the pagemap's per-page hooks. A FILE slot's page is its Burrow's alone,
-// never COW-shared (a plain free); an ANON_LAZY slot's page may be COW-shared with a
+// B-1a': the pagemap's per-page hooks. A FILE or ANON_SHARED slot's page is its
+// Burrow's alone, never COW-shared (a plain free; a shared Burrow is shared by
+// mapping it, never by cloning it); an ANON_LAZY slot's page may be COW-shared with a
 // fork sibling's Burrow, so it leaves through its share count (the buddy gets
 // it only from the last holder); a clone takes one share per page it mirrors.
 static void file_put_page(struct page *pg, void *ctx) {
@@ -444,6 +445,18 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     return v;
 }
 
+// Votes 117 + 119: the anonymous Burrow a fork shares. Its backing is the lazy
+// one above; the type and the record are set while this is the only reference,
+// so no mapping, fault or free can see the Burrow without both.
+struct Burrow *burrow_create_anon_shared(size_t size, struct AddrSpace *payer,
+                                         bool exempt) {
+    struct Burrow *v = burrow_create_anon_lazy(size);
+    if (!v) return NULL;
+    v->type = BURROW_TYPE_ANON_SHARED;
+    burrow_payer_set(v, payer, exempt);
+    return v;
+}
+
 // I-42 / CL-7k, B-2a: the dual-mappable CODE Burrow (docs/JIT-ON-WX-DESIGN.md).
 // Backing is byte-identical to burrow_create_anon_lazy -- the sparse pagemap,
 // every page demand-zeroed on first touch -- and deliberately so: the type is an
@@ -719,23 +732,27 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 }
 
 // =============================================================================
-// Vote 118: the payer record of a PRIVATE FILE Burrow (burrow.h; ARCH 25.4,
-// the REVENANT row's private-page charge addendum).
+// Votes 118 + 119: the payer record of a PRIVATE FILE Burrow or an ANON_SHARED
+// one (burrow.h; ARCH 25.4, the REVENANT row's private-page charge addendum and
+// the LINEAGE row's shared anonymous memory addendum; specs/payer.tla).
 //
 // One global leaf lock rather than v->lock: the record names an ADDRESS SPACE,
 // and the space's teardown must reach every record that names it (its
 // paid_burrows list) without holding the Burrows' own locks in some order. Taken
 // with nothing acquired inside it -- the charge and refund are lock-free CAS
 // loops on the space's counter -- so it nests under as->lock or v->lock and
-// never the other way round. A mint is a 9P read away, so one lock for the
-// machine costs nothing that shows.
+// never the other way round. A FILE mint is a 9P read away and a shared
+// anonymous one a page allocation away, and the hold is a few loads and a CAS,
+// so one lock for the machine costs nothing that shows.
 //
 // The record's invariant: payer_charge_pages is the Burrow's resident page
-// count plus the one page a fill may have charged and not yet installed (the
-// cluster charges slot by slot at its install, the single fill its one page,
-// each under the faulting space's as->lock with no sleep between the charge
-// and the install), and a non-NULL payer has paid exactly
-// payer_charge_pages. Every transition below keeps both halves.
+// count plus one page for each fill that has charged and not yet installed --
+// at most one per address space: the cluster charges slot by slot at its
+// install, the single fill and the shared demand-zero fill their one page, each
+// under the faulting space's as->lock with no sleep between the charge and the
+// install, and a shared Burrow's sharers each fault under their own -- and a
+// non-NULL payer has paid exactly payer_charge_pages. Every transition below
+// keeps both halves.
 // =============================================================================
 
 static spin_lock_t g_payer_lock = SPIN_LOCK_INIT;
@@ -761,8 +778,8 @@ static void paid_unlink_locked(struct Burrow *v) {
 }
 
 void burrow_payer_set(struct Burrow *v, struct AddrSpace *as, bool exempt) {
-    if (!v || v->type != BURROW_TYPE_FILE)
-        extinction("burrow_payer_set on a non-FILE Burrow");
+    if (!v || (v->type != BURROW_TYPE_FILE && v->type != BURROW_TYPE_ANON_SHARED))
+        extinction("burrow_payer_set on a Burrow that is neither FILE nor ANON_SHARED");
     spin_lock(&g_payer_lock);
     if (v->payer_record || v->payer)
         extinction("burrow_payer_set twice on one Burrow");
@@ -871,8 +888,9 @@ void burrow_payers_lapse(struct AddrSpace *as) {
     spin_unlock(&g_payer_lock);
 }
 
-// The FILE free arm's half: {h:0,m:0}, so no mint is in flight (a faulter
-// holds a handle pin across its fill).
+// The free arms' half (FILE and ANON_SHARED): {h:0,m:0}, so no mint is in
+// flight (a FILE faulter holds a handle pin across its fill; a shared one
+// faults through a mapping, which holds the Burrow).
 static void burrow_payer_release(struct Burrow *v) {
     spin_lock(&g_payer_lock);
     if (v->payer) {
@@ -1022,6 +1040,21 @@ static void burrow_free_internal(struct Burrow *v) {
         // detach arrives empty.
         pagemap_destroy(&v->pm, lazy_put_page, NULL);
         break;
+    case BURROW_TYPE_ANON_SHARED:
+        // Votes 117 + 119: the last mapping in any space is gone, so the
+        // pages go now and not before (I-7) -- no unmap released one, since a
+        // sharer's unmap cannot know whether another space still maps the
+        // page. The record is refunded whole, to whoever pays it now (the
+        // last mapping may be any sharer's). The pages are this Burrow's
+        // alone (a fork shares the Burrow, never clones it), so the free is
+        // plain; the map's nodes were charged to no address space (the fault
+        // installs with none), so destroying them owes no refund.
+        if (!pagemap_live(&v->pm))
+            extinction("burrow_free_internal(ANON_SHARED) with the pagemap already destroyed (double-free)");
+        if (v->payer_record)
+            burrow_payer_release(v);
+        pagemap_destroy(&v->pm, file_put_page, NULL);
+        break;
     case BURROW_TYPE_INVALID:
     default:
         extinction("burrow_free_internal: invalid burrow type");
@@ -1136,13 +1169,15 @@ void burrow_acquire_mapping(struct Burrow *v) {
         break;
     case BURROW_TYPE_ANON_LAZY:
     case BURROW_TYPE_CODE:
+    case BURROW_TYPE_ANON_SHARED:
         // Overcommit: liveness is the pagemap. It MAY be empty (no page faulted
         // in yet, or fully decommitted) -- the normal state, not a UAF (mirror
         // FILE). Not live only post-free (the {0,0} resurrection guard above
-        // already covers the freed case). I-42: CODE has the same backing.
+        // already covers the freed case). I-42: CODE has the same backing, and
+        // so does ANON_SHARED (votes 117 + 119), whose second mapping is a fork's.
         if (!pagemap_live(&v->pm)) {
             spin_unlock(&v->lock);
-            extinction("burrow_acquire_mapping of ANON_LAZY/CODE BURROW with a dead pagemap (UAF)");
+            extinction("burrow_acquire_mapping of ANON_LAZY/CODE/ANON_SHARED BURROW with a dead pagemap (UAF)");
         }
         break;
     case BURROW_TYPE_INVALID:
@@ -1607,12 +1642,26 @@ u32 burrow_release_lazy_range_in(struct AddrSpace *as, const struct Vma *v,
     return freed;
 }
 
-// burrow_decommit_in: the madvise(MADV_DONTNEED) analog (SYS_BURROW_DECOMMIT).
-// See burrow_decommit in burrow.h for the contract. B-1a': the range may span the pieces a protect
+// What madvise(MADV_DONTNEED) applies to beyond the decommit's plain lazy
+// mappings: shared anonymous memory (votes 117 + 119), whose pages it only
+// unmaps -- they stay in the Burrow, so the next touch reads what is there, as
+// Linux's zap over shmem does.
+static bool dontneed_admits(const struct Vma *v) {
+    if (lazy_release_admits(v))                             return true;
+    if (!v || !v->burrow || v->burrow->magic != VMO_MAGIC) return false;
+    if (v->flags & VMA_FLAG_SHARED_IN)                      return false;
+    return v->burrow->type == BURROW_TYPE_ANON_SHARED;
+}
+
+// burrow_advise_release_in: the madvise(MADV_DONTNEED) analog (SYS_BURROW_DECOMMIT).
+// See burrow_decommit and burrow_dontneed in burrow.h for the contracts. B-1a': the range may span the pieces a protect
 // cut, so it is walked as a range -- one scan from the head, then successors
 // (the B-1a audit's F2 shape) -- with every refusal decided before the first
-// PTE goes, so a refused call changes nothing.
-static int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
+// PTE goes, so a refused call changes nothing. `shared_ok` is the phenotype's
+// MADV_DONTNEED, which admits shared anonymous ranges too and releases only
+// the private ones (burrow_release_lazy_range_in refuses the rest).
+static int burrow_advise_release_in(struct AddrSpace *as, u64 vaddr, size_t length,
+                                    bool shared_ok) {
     if (!as)                         return -(int)T_E_INVAL;
     if (length == 0)                 return -(int)T_E_INVAL;
     if (vaddr & (PAGE_SIZE - 1))     return -(int)T_E_INVAL;
@@ -1628,7 +1677,8 @@ static int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
     for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
          v && v->vaddr_start < end; v = v->next) {
         if (v->vaddr_start > cur)          return -(int)T_E_NOMEM;   // a hole
-        if (!lazy_release_admits(v))       return -(int)T_E_INVAL;   // not ours to release
+        if (!(shared_ok ? dontneed_admits(v) : lazy_release_admits(v)))
+            return -(int)T_E_INVAL;                                  // not ours to release
         cur = v->vaddr_end;
     }
     if (cur < end)                         return -(int)T_E_NOMEM;   // a hole at the tail
@@ -1641,6 +1691,9 @@ static int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
 
     // 3. Release each mapping's overlap: pages + emptied nodes freed, page_count
     //    uncharged for both. A later touch re-faults a fresh zero page + re-charges.
+    //    A shared overlap is not released (another space may map its pages,
+    //    I-7): step 2's uninstall was the whole of its advice, and refunded
+    //    a sharer's leaves.
     for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
          v && v->vaddr_start < end; v = v->next) {
         u64 lo = v->vaddr_start > vaddr ? v->vaddr_start : vaddr;
@@ -1652,7 +1705,12 @@ static int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
 
 int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
     if (!p || !p->as) return -(int)T_E_INVAL;
-    return burrow_decommit_in(p->as, vaddr, length);
+    return burrow_advise_release_in(p->as, vaddr, length, false);
+}
+
+int burrow_dontneed(struct Proc *p, u64 vaddr, size_t length) {
+    if (!p || !p->as) return -(int)T_E_INVAL;
+    return burrow_advise_release_in(p->as, vaddr, length, true);
 }
 
 #ifdef KERNEL_TESTS
@@ -1663,7 +1721,8 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
 u32 burrow_lazy_resident_count(struct Burrow *v) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
     if (v->type != BURROW_TYPE_ANON_LAZY &&
-        v->type != BURROW_TYPE_CODE)        return 0;
+        v->type != BURROW_TYPE_CODE &&
+        v->type != BURROW_TYPE_ANON_SHARED) return 0;
     spin_lock(&v->lock);
     u32 n = pagemap_live(&v->pm) ? (u32)pagemap_resident(&v->pm) : 0;
     spin_unlock(&v->lock);
@@ -1997,8 +2056,9 @@ struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx) {
 struct page *burrow_lazy_slot_for_test(const struct Burrow *v, size_t idx) {
     if (!v || v->magic != VMO_MAGIC)
         extinction("burrow_lazy_slot_for_test: bad Burrow");
-    if (v->type != BURROW_TYPE_ANON_LAZY && v->type != BURROW_TYPE_CODE)
-        extinction("burrow_lazy_slot_for_test: not an ANON_LAZY or CODE Burrow");
+    if (v->type != BURROW_TYPE_ANON_LAZY && v->type != BURROW_TYPE_CODE &&
+        v->type != BURROW_TYPE_ANON_SHARED)
+        extinction("burrow_lazy_slot_for_test: not an ANON_LAZY, CODE or ANON_SHARED Burrow");
     return pagemap_get(&v->pm, idx);
 }
 #endif

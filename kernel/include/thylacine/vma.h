@@ -67,10 +67,11 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // setup path may stamp it, never registration of an ordinary user I/O buffer.
 #define VMA_FLAG_PRIVATE_RING (1u << 2)
 
-// VMA_FLAG_PAYER (vote 118; ARCH 25.4, the REVENANT private-page charge
-// addendum): this VMA maps a PRIVATE FILE Burrow into the space that pays for
-// its pages, so its leaves are not charged (the mint was) and their uninstall
-// refunds nothing. Set on a FRESH mapping into the payer's own space
+// VMA_FLAG_PAYER (votes 118 + 119; ARCH 25.4, the REVENANT private-page charge
+// addendum and the LINEAGE shared anonymous memory addendum): this VMA maps a
+// Burrow with a payer record -- a PRIVATE FILE one or an ANON_SHARED one --
+// into the space that pays for its pages, so its leaves are not charged (the
+// mint was) and their uninstall refunds nothing. Set on a FRESH mapping into the payer's own space
 // (vma_payer_mark_fresh) or by vma_payer_adopt_in, which first
 // uninstalls -- and so refunds -- every leaf the space holds into the Burrow.
 // A split piece copies it (the piece's leaves were installed under it); a

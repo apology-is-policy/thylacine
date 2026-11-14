@@ -220,10 +220,11 @@ void addrspace_destroy(struct AddrSpace *as) {
     // potentially sleeping FILE clunks, so a concurrent kernel unpin cannot
     // free the descriptor under it.
     vma_drain_in(as);
-    // Vote 118: after the drain, so the private images only this space held
-    // were freed (refunding a count that dies here anyway); what is left
-    // survives in another space's mapping, and its record lapses now, before
-    // a pin could let the descriptor outlive every owner.
+    // Votes 118 + 119: after the drain, so the private images and shared
+    // anonymous Burrows only this space held were freed (refunding a count
+    // that dies here anyway); what is left survives in another space's
+    // mapping, and its record lapses now, before a pin could let the
+    // descriptor outlive every owner.
     burrow_payers_lapse(as);
     addrspace_lifetime_put(as);
 }
@@ -334,6 +335,16 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
         // addrspace_clone refuses every REAL fork and succeeds only on the
         // synthetic spaces the unit tests build for themselves.
         if (vma_prot_max(src_vma) & VMA_PROT_WRITE) return false;
+        break;
+    case BURROW_TYPE_ANON_SHARED:
+        // Votes 117 + 119 (ARCH 28 I-44): shared, writable or not -- sharing
+        // IS this Burrow's contract, so the child maps the same Burrow and a
+        // write by either side is the other's. No COW routing (the flags stay
+        // the ceiling alone, so the child's writes go straight to the page) and
+        // no payer flag (the child is not the payer: its leaves are charged to
+        // it at fault, the mints to the payer). Nothing is charged here: the
+        // child holds no page until it faults one, and a fault is where the
+        // charge is decided and can fail clean.
         break;
     default:
         // MMIO and DMA (I-5 / I-34 hardware). Refused whatever the prot: mapping

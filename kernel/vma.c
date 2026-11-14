@@ -580,9 +580,15 @@ long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
         if (a >= b) continue;
         long n = mmu_uninstall_user_range(as, a, b);
         if (n <= 0) continue;
-        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE &&
-            !(v->flags & VMA_FLAG_PAYER))
-            addrspace_uncharge_file(as, (u32)n);
+        // The leaves the fault charged per leaf, refunded per leaf: a FILE
+        // mapping's (audit F8) and a shared anonymous one's (votes 117 + 119),
+        // each unless it is the payer's mapping, whose mints paid instead.
+        if (v->burrow && !(v->flags & VMA_FLAG_PAYER)) {
+            if (v->burrow->type == BURROW_TYPE_FILE)
+                addrspace_uncharge_file(as, (u32)n);
+            else if (v->burrow->type == BURROW_TYPE_ANON_SHARED)
+                addrspace_uncharge_pages(as, (u32)n);
+        }
         total += n;
     }
     return total;
@@ -590,8 +596,7 @@ long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
 
 void vma_payer_mark_fresh(struct AddrSpace *as, struct Vma *v) {
     struct Burrow *b = v ? v->burrow : NULL;
-    if (b && b->type == BURROW_TYPE_FILE && b->payer_record &&
-        burrow_payer_is(b, as))
+    if (b && b->payer_record && burrow_payer_is(b, as))
         v->flags |= VMA_FLAG_PAYER;
 }
 
@@ -677,11 +682,14 @@ int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
 
 // The backing kinds a protect may touch. CODE is the I-42 pair (one charge, two
 // aliases: neither is a plain mapping); MMIO / DMA / HOSTMEM are I-34 hardware
-// windows whose permissions were conferred, not chosen.
+// windows whose permissions were conferred, not chosen. A shared anonymous
+// mapping's prot is its own space's view (each sharer's VMA is separate, its
+// leaves are its own), under a ceiling that never carries X.
 static bool reprotect_admits(const struct Burrow *b) {
     switch (b->type) {
     case BURROW_TYPE_ANON:
     case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_ANON_SHARED:
     case BURROW_TYPE_FILE:
         return true;
     default:

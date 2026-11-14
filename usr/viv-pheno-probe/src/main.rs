@@ -556,11 +556,14 @@ const PROT_NONE: u64 = 0;
 const PROT_READ: u64 = 1;
 const PROT_WRITE: u64 = 2;
 const PROT_EXEC: u64 = 4;
+const MAP_SHARED: u64 = 0x01;
 const MAP_PRIVATE: u64 = 0x02;
+const MAP_SHARED_VALIDATE: u64 = 0x03;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANON: u64 = 0x20;
 const MADV_WILLNEED: u64 = 3;
 const MADV_DONTNEED: u64 = 4;
+const MADV_FREE: u64 = 8;
 const MADV_DONTFORK: u64 = 10;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
@@ -1445,6 +1448,51 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_MADVISE, bw as u64, 4096, MADV_DONTNEED) == NEG_ENOSYS, b"L23s\n");
     leg!(rep, bw.read_volatile() == 0x5a, b"L23t\n");
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
+
+    // Shared anonymous memory (votes 117 + 119, VIVARIUM 6.21): MAP_SHARED|
+    // MAP_ANONYMOUS is one object a fork shares, so the child's write is the
+    // parent's to read. The private map beside it is the control, one variable
+    // away: the same write in the child never reaches the parent. DONTNEED over
+    // the shared range drops this process's view and keeps the contents; FREE
+    // there is EINVAL, as Linux answers for anything but private anonymous
+    // memory; and the anonymous switch has no shared-validate case.
+    let sh = svc6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON,
+                  (-1i64) as u64, 0);
+    leg!(rep, sh > 0 && !(-4095..0).contains(&sh), b"L23u\n");
+    let pv = svc6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON,
+                  (-1i64) as u64, 0);
+    leg!(rep, pv > 0 && !(-4095..0).contains(&pv), b"L23v\n");
+    (sh as *mut u64).write_volatile(0x1111);
+    (pv as *mut u64).write_volatile(0x1111);
+    let sk = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if sk == 0 {
+        // The parent's write is visible before the child writes its own.
+        let seen = (sh as *const u64).read_volatile() == 0x1111;
+        (sh as *mut u64).write_volatile(0x2222);
+        (pv as *mut u64).write_volatile(0x2222);
+        linux_exit(if seen { 0 } else { 3 })
+    }
+    leg!(rep, sk > 0, b"L23w\n");
+    let mut shs: i32 = -1;
+    leg!(
+        rep,
+        wait4_r(sk as u64, &mut shs as *mut i32 as u64, 0) == sk
+            && (shs & 0x7f) == 0 && ((shs >> 8) & 0xff) == 0,
+        b"L23x\n"
+    );
+    leg!(rep, (sh as *const u64).read_volatile() == 0x2222, b"L23y\n");   // the child's write
+    leg!(rep, (pv as *const u64).read_volatile() == 0x1111, b"L23z\n");   // control: still private
+    leg!(rep, svc3(NR_MADVISE, sh as u64, 4096, MADV_DONTNEED) == 0, b"L23za\n");
+    leg!(rep, (sh as *const u64).read_volatile() == 0x2222, b"L23zb\n");  // the contents kept
+    leg!(rep, svc3(NR_MADVISE, sh as u64, 4096, MADV_FREE) == NEG_EINVAL, b"L23zc\n");
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED_VALIDATE | MAP_ANON,
+             (-1i64) as u64, 0) == NEG_EINVAL,
+        b"L23zd\n"
+    );
+    let _ = svc3(NR_MUNMAP, sh as u64, 4096, 0);
+    let _ = svc3(NR_MUNMAP, pv as u64, 4096, 0);
 
     // --- L24-L31: signals (V-6b) --------------------------------------------
     // musl calls BOTH of these before main(): __init_tls / pthread_create go

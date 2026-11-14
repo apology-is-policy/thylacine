@@ -100,7 +100,7 @@ struct AddrSpace {
     // I-32 resource axes. All three are charged/uncharged under `lock` so they
     // are exact, and stored with __atomic_store_n so lockless /proc readers get
     // a coherent snapshot.
-    u32            page_count;         // the HOLDER count: anon + mapped file pages, and the nodes + tables that map them
+    u32            page_count;         // the HOLDER count: anon + mapped file pages, the nodes + tables that map them, and the pages its payer records charge it (votes 118 + 119)
     u32            vma_count;          // VMA-slab bound
     u32            shared_map_pages;   // pages shared IN from other Procs (G-2)
 
@@ -321,6 +321,13 @@ void addrspace_destroy(struct AddrSpace *as);
 //                          vDSO clock page is this case, and it is in EVERY
 //                          address space, so without the read-only arm no real
 //                          fork clones at all (#136).
+//   BURROW_TYPE_ANON_SHARED  SHARED, writable or not (votes 117 + 119): the
+//                          child maps the SAME Burrow, with no COW flag and no
+//                          payer flag, so a write by either side is the other's
+//                          -- the one writable share across fork (I-44). Its
+//                          pages are paid by the Burrow's payer record, so the
+//                          fork charges nothing; the child pays its own leaves
+//                          as it faults them.
 //   several VMAs, ONE      a lazy Burrow a protect has split into pieces is
 //   ANON_LAZY Burrow       cloned ONCE (the clone_cursor dedupe, B-1a); every
 //                          piece maps that one clone. cow.tla's

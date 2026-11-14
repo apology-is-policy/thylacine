@@ -4394,6 +4394,7 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
 s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
 s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_burrow_dontneed_core(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
                                  u64 length_raw, u64 prot_raw, u64 flags_raw,
@@ -4424,6 +4425,10 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 int sys_mlockall_for_proc(struct Proc *p, u32 flags);
 s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
                            bool exec, u64 offset);
+s64 sys_mmap_anon_core(struct Proc *p, u64 length_raw, u32 prot, u32 ceiling,
+                       bool shared);
+s64 sys_mmap_fixed_anon_core(struct Proc *p, u64 addr, u64 length_raw, u32 pr,
+                             u32 ceiling, bool shared);
 s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
                                  u32 pr);
 s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,

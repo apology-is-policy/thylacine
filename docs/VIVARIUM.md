@@ -2500,7 +2500,7 @@ creator dies the next process to create a page takes the residency over
 |---|---|
 | `MAP_SHARED\|MAP_ANONYMOUS`, any subset of `PROT_READ\|PROT_WRITE` | a shared mapping at the requested prot under an RW ceiling (the private arm's prot rule). The descriptor and the offset are ignored, as Linux ignores them; the length rules are the private arm's (`EINVAL` for 0, `ENOMEM` past the cap) |
 | the same with `MAP_FIXED` | the fixed overlay, with the private fixed arm's window and rules, minting a shared mapping |
-| `MAP_SHARED_VALIDATE\|MAP_ANONYMOUS` | `EINVAL`: Linux's anonymous switch has no shared-validate case |
+| an anonymous call whose map type is neither `MAP_SHARED` nor `MAP_PRIVATE`, `MAP_SHARED_VALIDATE\|MAP_ANONYMOUS` among them | `EINVAL`: Linux's anonymous switch knows only those two types (a length past the window is `ENOMEM` first, as `get_unmapped_area` answers ahead of the switch); until this chunk a typeless anonymous call was declined (`ENOSYS`) |
 | `MAP_SHARED` or `MAP_SHARED_VALIDATE` of `/dev/zero` open for writing | as the anonymous shared call |
 | the same, the descriptor not open for writing, `PROT_WRITE` asked | `EACCES` (do_mmap's `FMODE_WRITE` test) |
 | the same, the descriptor not open for writing, no `PROT_WRITE` | a PRIVATE anonymous mapping whose ceiling is READ: Linux clears `VM_MAYWRITE` and `VM_SHARED` for a descriptor not open for writing, so `mmap_zero` sets up a private mapping that `mprotect` can never make writable (`EACCES`) |

@@ -446,6 +446,14 @@ void test_demand_page_file_private_exempt_payer_binds_holder(void);
 void test_demand_page_file_private_holder_pays_leaves(void);
 void test_demand_page_file_private_payer_death_hands_over(void);
 void test_demand_page_file_cached_image_takes_no_payer(void);
+// Votes 117 + 119: shared anonymous memory (test_shared_anon.c).
+void test_shared_anon_fork_shares_the_page(void);
+void test_shared_anon_creator_pays_every_mint(void);
+void test_shared_anon_unmap_keeps_the_page(void);
+void test_shared_anon_creator_death_hands_over(void);
+void test_shared_anon_install_loser_refunds(void);
+void test_shared_anon_protect_split_keeps_payer(void);
+void test_shared_anon_dontneed_keeps_contents(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
 void test_demand_page_alignment_abort_is_bus_not_handled(void);
@@ -985,6 +993,7 @@ void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_maps_shared_anon(void);      // votes 117 + 119
 void test_devproc_maps_code_visible(void);     // B-2b audit F2
 void test_devproc_maps_code_redacted(void);    // B-2b audit F2
 void test_devproc_maps_code_truncated(void);   // B-2b audit F2
@@ -1160,6 +1169,8 @@ void test_cons_drain_tap_mirrors_output(void);       // G-4
 void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
 void test_vivarium_mmap_dev_zero_is_anonymous(void);
+void test_vivarium_mmap_shared_anon(void);              // votes 117 + 119
+void test_vivarium_mmap_shared_dev_zero(void);
 void test_vivarium_mmap_descriptor_errnos(void);
 void test_vivarium_mmap_order_is_linux(void);
 void test_vivarium_rejects_are_deliberate(void);
@@ -1177,6 +1188,7 @@ void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
 void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
+void test_vivarium_mmap_shared_domain(void);            // votes 117 + 119
 void test_vivarium_mprotect_domain(void);                // B-1a
 void test_vivarium_madvise_domain(void);                 // B-1b
 void test_vivarium_nanosleep_domain(void);               // VIVARIUM 6.29

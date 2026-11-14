@@ -37,6 +37,7 @@
 
 #ifdef KERNEL_TESTS
 void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+void (*g_shared_mint_probe_for_test)(struct Proc *p, struct Burrow *v, size_t slot);
 u64 g_file_fill_syncs_for_test;
 #endif
 
@@ -535,6 +536,9 @@ static enum fault_result demand_page_locked(struct Proc *p,
     // install (step 5), whichever arm resolved the page -- the resident hit
     // below, or the slow path's own install tails.
     bool    file_charge  = false;
+    // Votes 117 + 119: a shared anonymous leaf in a space that is not the
+    // Burrow's payer is charged to that space at the install, one page.
+    bool    shared_charge = false;
     // B-1a' audit F12: the page a copy-on-write COPY replaced, whose share is
     // released only after step 5 -- while this space's own read-only leaf can
     // still translate to it, that share is what keeps the other holder from
@@ -787,8 +791,9 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         // the whole demand_page_locked) no sibling faulter of this address space
         // can touch the map -- they serialize on as->lock -- so the slot is still
         // empty here. The install's own re-check + loser-free is the audited
-        // FILE-arm install-once shape, defensive against a future shared-lazy
-        // mapping; the loser branch is unreachable today. B-1a': the install
+        // FILE-arm install-once shape, defensive here: the loser branch is
+        // unreachable for a Burrow one address space maps (shared anonymous
+        // memory has its own arm below, where it is live). B-1a': the install
         // also allocates the map's missing nodes -- outside v->lock, charged to
         // this address space BEFORE they are allocated -- so a cap hit or a
         // node OOM installs nothing and takes the same graceful per-Proc
@@ -811,6 +816,74 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         mair_idx = MAIR_IDX_NORMAL_WB;
         break;                              // -> step-5 PTE install at vma->prot
     }
+    case BURROW_TYPE_ANON_SHARED: {
+        // Votes 117 + 119 (ARCH 28 I-44 + I-32; specs/payer.tla): the
+        // anonymous memory a fork shares. Demand-zero like ANON_LAZY, entirely
+        // under the held as->lock (no slow path), but with three differences.
+        // (1) It is never COW: a fork maps this Burrow itself, so a write lands
+        // in the page every sharer sees, and the COW branch above is never
+        // reached (no shared VMA carries VMA_FLAG_COW). (2) The page is paid
+        // by the Burrow's payer record, not by the faulter: the mint is
+        // charged to the payer (the creating space; after its death, the next
+        // minting faulter, which takes the residency over), and a leaf costs
+        // one page only in a space that is not the payer (step 5). (3) Sharers
+        // in OTHER address spaces fault the same slot under their OWN
+        // as->lock, so the install's loser branch is live here: the loser
+        // frees its page and refunds its mint to whoever pays now.
+        struct Burrow *v = vma->burrow;
+        size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
+        bool exempt = proc_resource_exempt(p);
+
+        spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
+        struct page *resident = pagemap_get(&v->pm, slot);
+        spin_unlock(&v->lock);
+        if (resident) {
+            // A page lives until the Burrow does (I-7: no path releases one
+            // while any space maps the Burrow), so the hit may use it outside
+            // v->lock. A space that took the record over turns its mappings
+            // into payer mappings before this leaf is decided.
+            payer_adopt_if_due(p, vma, v);
+        } else {
+            // The charge BEFORE the page, so a cap hit allocates nothing; a
+            // hand-over this charge made is adopted before anything below can
+            // bail (the FILE fill's order).
+            if (!burrow_mint_charge(v, p->as, exempt, 1))
+                return FAULT_UNHANDLED_USER;    // the payer has no headroom
+            payer_adopt_if_due(p, vma, v);
+            // The pool charge is the requesting account's (alloc_user_pages;
+            // SHARED-MEMORY-ACCOUNTING 3), whoever the record charges.
+            struct page *newpg = alloc_user_pages(0, KP_ZERO, exempt);
+            if (!newpg) {
+                burrow_mint_refund(v, 1);
+                return FAULT_UNHANDLED_USER;    // OOM -> graceful per-Proc terminate
+            }
+#ifdef KERNEL_TESTS
+            if (g_shared_mint_probe_for_test)
+                g_shared_mint_probe_for_test(p, v, slot);
+#endif
+            // The nodes are charged to no address space (as for a FILE fill):
+            // the map outlives any one sharer, and none of them owns it.
+            int irc = pagemap_install(&v->pm, &v->lock, slot, newpg, NULL,
+                                      exempt, &resident);
+            if (irc < 0) {
+                free_pages(newpg, 0);
+                burrow_mint_refund(v, 1);
+                return FAULT_UNHANDLED_USER;    // node OOM -> graceful per-Proc terminate
+            }
+            if (irc == 1) {
+                // Another sharer won the slot: its page is the one every
+                // sharer sees; ours never reached a slot, so a plain free.
+                free_pages(newpg, 0);
+                burrow_mint_refund(v, 1);
+            } else {
+                resident = newpg;
+            }
+        }
+        page_pa       = page_to_pa(resident);
+        mair_idx      = MAIR_IDX_NORMAL_WB;
+        shared_charge = !(vma->flags & VMA_FLAG_PAYER);
+        break;                              // -> step-5 PTE install at vma->prot
+    }
     case BURROW_TYPE_INVALID:
     default:
         return FAULT_UNHANDLED_USER;
@@ -824,6 +897,11 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
     // charge goes back. Audit F9: the copy-on-write break replaces in place.
     if (file_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
+    // Votes 117 + 119: a sharer's leaf is anon data in its pages -- no file
+    // telemetry -- and goes back the same way (rc 1: a sibling thread's leaf
+    // is already there, paid for by its install).
+    if (shared_charge && !addrspace_charge_pages(p->as, 1, proc_resource_exempt(p)))
+        return FAULT_UNHANDLED_USER;
 #ifdef KERNEL_TESTS
     // The F12 witness fires at the last instant the original's share must
     // still be held: the leaf write is next (audit F20).
@@ -836,6 +914,7 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
            : mmu_install_user_pte_attr(p->as, proc_resource_exempt(p),
                                        page_va, page_pa, install_prot, mair_idx);
     if (rc != 0 && file_charge)          addrspace_uncharge_file(p->as, 1);
+    if (rc != 0 && shared_charge)        addrspace_uncharge_pages(p->as, 1);
     // B-1a' audit F12: the copy's original is released only now, when no leaf
     // of this space can translate to it (on a failed replace too: the Proc
     // dies, and the share must not leak). If that was the last share (the

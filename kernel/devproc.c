@@ -592,6 +592,7 @@ static const char *maps_type_name(const struct Vma *v) {
     // (rw-p vs r-xp).
     case BURROW_TYPE_CODE:      return "code";
     case BURROW_TYPE_HOSTMEM:   return "hostmem";
+    case BURROW_TYPE_ANON_SHARED: return "shared";
     default:                    return "?";
     }
 }
@@ -638,13 +639,17 @@ static bool maps_is_code(const struct Vma *v) {
 }
 
 // A row's permission class: r, w, x and the share flag as four bits, so the
-// class names the perms column exactly and nothing else about the row.
+// class names the perms column exactly and nothing else about the row. The
+// share flag is Linux's 's': another space's memory mapped in here, or shared
+// anonymous memory, which a fork's other side sees written.
 enum { MAPS_CLASSES = 16 };
 static u32 maps_class(const struct Vma *v) {
+    bool shared = (v->flags & VMA_FLAG_SHARED_IN) ||
+                  (v->burrow && v->burrow->type == BURROW_TYPE_ANON_SHARED);
     return ((v->prot & VMA_PROT_READ)  ? 1u : 0u) |
            ((v->prot & VMA_PROT_WRITE) ? 2u : 0u) |
            ((v->prot & VMA_PROT_EXEC)  ? 4u : 0u) |
-           ((v->flags & VMA_FLAG_SHARED_IN) ? 8u : 0u);
+           (shared ? 8u : 0u);
 }
 
 static void maps_class_perms(u32 cls, char perms[5]) {

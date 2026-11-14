@@ -3616,6 +3616,42 @@ void test_devproc_maps(void) {
 // B-2b: who may see where a Proc's code aliases lie. Driven with synthetic
 // (caller, target) pairs, the prowl-5-F4 precedent; the read path that consults it
 // is pinned end to end by test_devproc_maps_code_redacted.
+// Votes 117 + 119: a shared anonymous mapping renders as Linux's does -- the
+// share flag and its own type -- beside a private lazy mapping one variable
+// away (the same mint, not shared), which stays 'p' and "lazy".
+void test_devproc_maps_shared_anon(void) {
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+    const u64 sva = 0x0000000010000000ull, pva = 0x0000000010002000ull;
+    struct Burrow *bs = burrow_create_anon_shared(PAGE_SIZE, tgt->as, false);
+    int rcs = bs ? burrow_map(tgt, bs, sva, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bs) burrow_unref(bs);
+    struct Burrow *bp = burrow_create_anon_lazy(PAGE_SIZE);
+    int rcp = bp ? burrow_map(tgt, bp, pva, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bp) burrow_unref(bp);
+
+    char buf[1024];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    long n = -999;
+    struct Spoor *c = open_pidfile_for(tgt->pid, "maps", 0);
+    if (c) { n = devproc.read(c, buf, (long)sizeof(buf) - 1, 0); spoor_clunk(c); }
+    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)rcs, 0L, "mapped the shared mapping");
+    TEST_EXPECT_EQ((long)rcp, 0L, "mapped the private one");
+    TEST_ASSERT(n > 0, "/proc/<pid>/maps reads non-empty");
+    TEST_ASSERT(contains(buf, (size_t)n, "0x10000000-0x10001000 rw-s 0x0 shared - -\n"),
+                "the shared row: rw-s, type shared");
+    TEST_ASSERT(contains(buf, (size_t)n, "0x10002000-0x10003000 rw-p 0x0 lazy - -\n"),
+                "control: the private row stays rw-p, type lazy");
+}
+
 void test_devproc_maps_code_visible(void) {
     struct Proc *caller = proc_alloc();
     struct Proc *target = proc_alloc();

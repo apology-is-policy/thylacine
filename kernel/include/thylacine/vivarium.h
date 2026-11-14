@@ -1040,14 +1040,19 @@ enum {
     VIV_MADV_POPULATE_WRITE = 23,
 };
 
-// What a translated madvise does: RELEASE = the decommit core (DONTNEED and
-// FREE -- a MADV_FREE page is one Linux may take at any moment, so taking it
-// now is inside the contract); HINT = answer 0 over a mapped range, ENOMEM
-// over a hole, and change nothing (Linux's own effect for these, minus the
-// readahead / THP / dump-filter policy Thylacine has no counterpart for).
+// What a translated madvise does: RELEASE = the decommit core (FREE -- a
+// MADV_FREE page is one Linux may take at any moment, so taking it now is
+// inside the contract; Linux refuses it, EINVAL, over anything but private
+// anonymous memory, and so does the core); DONTNEED = the same release over
+// private anonymous memory, which also admits a shared anonymous range and
+// only unmaps it, the contents kept (votes 117 + 119: Linux's zap over shmem);
+// HINT = answer 0 over a mapped range, ENOMEM over a hole, and change nothing
+// (Linux's own effect for these, minus the readahead / THP / dump-filter
+// policy Thylacine has no counterpart for).
 enum viv_madvise_kind {
-    VIV_MADVISE_RELEASE = 0,
-    VIV_MADVISE_HINT    = 1,
+    VIV_MADVISE_RELEASE  = 0,
+    VIV_MADVISE_HINT     = 1,
+    VIV_MADVISE_DONTNEED = 2,
 };
 
 // Linux `flags` bits (generic musl `include/sys/mman.h`).
@@ -1203,10 +1208,27 @@ enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
 enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
                                                  u64 fd, u64 offset);
 
+// Votes 117 + 119 (VIVARIUM 6.21): shared anonymous memory, the private anon
+// arms (1) and (3) with MAP_SHARED for MAP_PRIVATE. The shell mints a
+// BURROW_TYPE_ANON_SHARED Burrow, which a fork shares rather than copies, at
+// the Linux prot under an RW ceiling. A shared /dev/zero map through a
+// descriptor open for writing reaches these as the anonymous call does.
+#define VIV_MMAP_SHARED_ANON_FLAGS_ADMITTED \
+    ((u32)(VIV_MAP_SHARED | VIV_MAP_ANONYMOUS))
+#define VIV_MMAP_FIXED_SHARED_ANON_FLAGS_ADMITTED \
+    ((u32)(VIV_MAP_SHARED | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS))
+#define VIV_MMAP_SHARED_ANON_PROT_ADMITTED \
+    ((u32)(VIV_PROT_READ | VIV_PROT_WRITE))
+
+enum viv_verdict vivarium_mmap_shared_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                  u64 fd, u64 offset);
+enum viv_verdict vivarium_mmap_fixed_shared_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                        u64 fd, u64 offset);
+
 #ifdef KERNEL_TESTS
 // True iff no argument tuple is admitted by more than ONE mmap arm. Pure; exists
 // so the disjointness the arms' comments CLAIM is a checked fact rather than a
-// set of assertions that agree with each other. Covers all four arms pairwise --
+// set of assertions that agree with each other. Covers all six arms pairwise --
 // they separate on the flags word alone (each arm demands EXACT equality against
 // a distinct value), so this also fails loudly if a future edit relaxes any of
 // those equalities into a mask test.

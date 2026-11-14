@@ -184,6 +184,16 @@ static bool viv_anon_at(struct Proc *p, s64 va, u32 prot) {
     return v && v->burrow && v->burrow->type == BURROW_TYPE_ANON_LAZY && v->prot == prot;
 }
 
+// Votes 117 + 119: a shared anonymous mint at `prot` under an RW ceiling, paid
+// by the space that made it.
+static bool viv_shared_at(struct Proc *p, s64 va, u32 prot) {
+    if (va <= 0 || ((u64)va & (PAGE_SIZE - 1))) return false;
+    struct Vma *v = vma_lookup(p, (u64)va);
+    return v && v->burrow && v->burrow->type == BURROW_TYPE_ANON_SHARED &&
+           v->prot == prot && vma_prot_max(v) == VMA_PROT_RW &&
+           (v->flags & VMA_FLAG_PAYER) && burrow_payer_for_test(v->burrow) == p->as;
+}
+
 static hidx_t viv_opath_handle(struct Proc *p, struct Dev *d) {
     struct Spoor *sp = d->attach("");
     if (!sp) return -1;
@@ -274,6 +284,103 @@ static s64 viv_mmap_args(struct Proc *p, u64 addr, u64 len, u64 prot, u64 flags,
     bool native = viv_linux_dispatch_for_test(&c, p);
     current_thread()->note_interruptible = false;
     return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
+}
+
+// Votes 117 + 119 (VIVARIUM 6.21): MAP_SHARED|MAP_ANONYMOUS mints shared
+// anonymous memory at the asked prot under an RW ceiling, paid by the caller,
+// MAP_FIXED too; the private call one variable away mints private memory.
+// Linux's anonymous switch knows only shared and private: shared-validate and
+// no type at all are EINVAL (ENOMEM past the window first); PROT_EXEC declines.
+void test_vivarium_mmap_shared_anon(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    const u64 R = VIV_PROT_READ, RW = VIV_PROT_READ | VIV_PROT_WRITE, ANY = (u64)(u32)-1;
+    const u64 SH = VIV_MAP_SHARED | VIV_MAP_ANONYMOUS;
+    const u64 SV = VIV_MAP_SHARED_VALIDATE | VIV_MAP_ANONYMOUS;
+    const u64 fixed = EXEC_USER_BURROW_BASE + 0x400000ull;
+    const u32 VRW = (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
+    bool rw = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, SH, ANY, 0), VRW);
+    bool ro = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, R, SH, ANY, 0), (u32)VMA_PROT_READ);
+    bool none = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, 0, SH, ANY, 0), 0);
+    s64 fx = viv_mmap_args(p, fixed, PAGE_SIZE, RW, SH | VIV_MAP_FIXED, ANY, 0);
+    bool fxs = fx == (s64)fixed && viv_shared_at(p, fx, VRW);
+    bool priv = viv_anon_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW,
+                                             VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS, ANY, 0), VRW);
+    s64 sv     = viv_mmap_args(p, 0, PAGE_SIZE, RW, SV, ANY, 0);
+    s64 svbig  = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, SV, ANY, 0);
+    s64 notype = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_ANONYMOUS, ANY, 0);
+    s64 big    = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, SH, ANY, 0);
+    s64 zero   = viv_mmap_args(p, 0, 0, RW, SH, ANY, 0);
+    s64 ex     = viv_mmap_args(p, 0, PAGE_SIZE, R | VIV_PROT_EXEC, SH, ANY, 0);
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(rw,   "MAP_SHARED|MAP_ANONYMOUS RW: shared memory, RW, RW ceiling, the caller pays");
+    TEST_ASSERT(ro,   "PROT_READ: shared, R, under the RW ceiling");
+    TEST_ASSERT(none, "PROT_NONE: shared, minted at none");
+    TEST_ASSERT(fxs,  "MAP_FIXED: the fixed overlay mints shared memory at the address");
+    TEST_ASSERT(priv, "control: the private call mints private memory");
+    TEST_EXPECT_EQ(sv, -(s64)T_E_INVAL, "MAP_SHARED_VALIDATE|MAP_ANONYMOUS: EINVAL");
+    TEST_EXPECT_EQ(svbig, -(s64)T_E_NOMEM, "past the window first: ENOMEM");
+    TEST_EXPECT_EQ(notype, -(s64)T_E_INVAL, "an anonymous call with no map type: EINVAL");
+    TEST_EXPECT_EQ(big, -(s64)T_E_NOMEM, "the shared mint's length rule: ENOMEM past the window");
+    TEST_EXPECT_EQ(zero, -(s64)T_E_INVAL, "and EINVAL for 0");
+    TEST_EXPECT_EQ(ex, -(s64)T_E_NOSYS, "PROT_EXEC declines");
+}
+
+// Votes 117 + 119 (VIVARIUM 6.21): a shared /dev/zero map is shared anonymous
+// memory through a descriptor open for writing (MAP_SHARED and
+// MAP_SHARED_VALIDATE alike); through one that is not it is EACCES when it asks
+// PROT_WRITE, and otherwise a private map whose ceiling is READ, which a
+// protect cannot raise. A write-only descriptor is EACCES either way
+// (FMODE_READ). The control: a private map of the read-only descriptor may
+// write, as Linux's private /dev/zero may.
+void test_vivarium_mmap_shared_dev_zero(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t rwfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, devzero.attach(""));
+    hidx_t rofd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, devzero.attach(""));
+    hidx_t wofd = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, devzero.attach(""));
+    const u64 R = VIV_PROT_READ, RW = VIV_PROT_READ | VIV_PROT_WRITE;
+    const u64 fixed = EXEC_USER_BURROW_BASE + 0x400000ull;
+    const u32 VRW = (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
+    bool ok = rwfd >= 0 && rofd >= 0 && wofd >= 0;
+    bool s_rw = false, sv_rw = false, fx_rw = false, ro_priv = false, priv_rw = false;
+    s64 ro_w = 0, raise = 0, wo_r = 0, wo_w = 0, notype = 0;
+    if (ok) {
+        s_rw  = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED, (u64)rwfd, 0), VRW);
+        sv_rw = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED_VALIDATE,
+                                               (u64)rwfd, 0), VRW);
+        s64 f = viv_mmap_args(p, fixed, PAGE_SIZE, RW, VIV_MAP_SHARED | VIV_MAP_FIXED, (u64)rwfd, 0);
+        fx_rw = f == (s64)fixed && viv_shared_at(p, f, VRW);
+        ro_w  = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED, (u64)rofd, 0);
+        s64 r = viv_mmap_args(p, 0, PAGE_SIZE, R, VIV_MAP_SHARED, (u64)rofd, 0);
+        struct Vma *v = r > 0 ? vma_lookup(p, (u64)r) : NULL;
+        ro_priv = v && v->burrow && v->burrow->type == BURROW_TYPE_ANON_LAZY &&
+                  v->prot == (u32)VMA_PROT_READ && vma_prot_max(v) == (u32)VMA_PROT_READ;
+        raise = r > 0 ? sys_burrow_protect_for_proc(p, (u64)r, PAGE_SIZE,
+                                                    BURROW_PROT_READ | BURROW_PROT_WRITE, 0) : 0;
+        priv_rw = viv_anon_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_PRIVATE, (u64)rofd, 0), VRW);
+        wo_r   = viv_mmap_args(p, 0, PAGE_SIZE, R, VIV_MAP_SHARED, (u64)wofd, 0);
+        wo_w   = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED, (u64)wofd, 0);
+        notype = viv_mmap_args(p, 0, PAGE_SIZE, R, 0, (u64)rofd, 0);
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(ok, "handle_alloc");
+    TEST_ASSERT(s_rw,  "MAP_SHARED of /dev/zero open for writing: shared anonymous memory");
+    TEST_ASSERT(sv_rw, "MAP_SHARED_VALIDATE: the same");
+    TEST_ASSERT(fx_rw, "MAP_FIXED: the same, at the address");
+    TEST_EXPECT_EQ(ro_w, -(s64)T_E_ACCES, "not open for writing, PROT_WRITE asked: EACCES");
+    TEST_ASSERT(ro_priv, "not open for writing, no PROT_WRITE: private, ceiling READ");
+    TEST_EXPECT_EQ(raise, -(s64)T_E_ACCES, "and a protect cannot make it writable");
+    TEST_ASSERT(priv_rw, "control: a private map of the read-only descriptor may write");
+    TEST_EXPECT_EQ(wo_r, -(s64)T_E_ACCES, "write-only, no PROT_WRITE: EACCES (FMODE_READ)");
+    TEST_EXPECT_EQ(wo_w, -(s64)T_E_ACCES, "write-only, PROT_WRITE: EACCES");
+    TEST_EXPECT_EQ(notype, -(s64)T_E_INVAL, "no map type: EINVAL, before the access mode");
 }
 
 // The phenotype judges an mmap in Linux's order -- arm64 sys_mmap's offset
@@ -1336,11 +1443,11 @@ void test_vivarium_mmap_domain(void) {
                                              (u64)-1, 0),
                    (int)VIV_TRANSLATED, "a bare addr hint is admitted and ignored");
 
-    // MAP_SHARED has no anonymous counterpart to share.
+    // MAP_SHARED is the shared arm's (votes 117 + 119), never this one's.
     TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw,
                                              (u64)(VIV_MAP_SHARED | VIV_MAP_ANONYMOUS),
                                              (u64)-1, 0),
-                   (int)VIV_FORWARD, "MAP_SHARED declines");
+                   (int)VIV_FORWARD, "MAP_SHARED declines on the private arm");
 
     // Exact flags equality, not a mask test. MAP_STACK and MAP_NORESERVE are
     // arguably honourable, but MEASURED musl sends neither -- admitting a flag
@@ -1584,6 +1691,9 @@ void test_vivarium_mmap_arms_disjoint(void) {
         VIV_MAP_PRIVATE | VIV_MAP_FIXED,
         VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS | VIV_MAP_FIXED,
         VIV_MAP_PRIVATE | VIV_MAP_FIXED_NOREPLACE,
+        VIV_MAP_SHARED | VIV_MAP_ANONYMOUS,
+        VIV_MAP_SHARED | VIV_MAP_ANONYMOUS | VIV_MAP_FIXED,
+        VIV_MAP_SHARED_VALIDATE | VIV_MAP_ANONYMOUS,
     };
     const u64 fds[]  = { 0, 3, (u64)-1, 0xFFFFFFFFull };
     const u64 offs[] = { 0, 1, 0x1000 };
@@ -1594,6 +1704,7 @@ void test_vivarium_mmap_arms_disjoint(void) {
     const u64 addrs[] = { 0, 0x1000, 0x1001, 0x40000000ull, 0x100001000ull };
 
     int adm_file = 0, adm_anon = 0, adm_fixed_file = 0, adm_fixed_anon = 0;
+    int adm_shared = 0, adm_fixed_shared = 0;
     for (unsigned ai = 0; ai < sizeof(addrs) / sizeof(addrs[0]); ai++)
     for (unsigned pi = 0; pi < sizeof(prots) / sizeof(prots[0]); pi++)
     for (unsigned fi = 0; fi < sizeof(flags) / sizeof(flags[0]); fi++)
@@ -1611,6 +1722,10 @@ void test_vivarium_mmap_arms_disjoint(void) {
             adm_fixed_file++;
         if (vivarium_mmap_fixed_anon_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
             adm_fixed_anon++;
+        if (vivarium_mmap_shared_anon_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_shared++;
+        if (vivarium_mmap_fixed_shared_anon_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_shared++;
     }
 
     // Disjointness is satisfiable by admitting NOTHING, so the sweep proves
@@ -1622,6 +1737,43 @@ void test_vivarium_mmap_arms_disjoint(void) {
     TEST_ASSERT(adm_anon       > 0, "the sweep must reach the anon arm's domain");
     TEST_ASSERT(adm_fixed_file > 0, "the sweep must reach the FIXED FILE domain");
     TEST_ASSERT(adm_fixed_anon > 0, "the sweep must reach the FIXED anon domain");
+    TEST_ASSERT(adm_shared       > 0, "the sweep must reach the shared anon domain");
+    TEST_ASSERT(adm_fixed_shared > 0, "the sweep must reach the FIXED shared anon domain");
+}
+
+// Votes 117 + 119: the shared anonymous arms' domains -- the private anon arms'
+// with MAP_SHARED for MAP_PRIVATE. Each decline is asserted beside the admitted
+// call one variable away.
+void test_vivarium_mmap_shared_domain(void) {
+    const u64 rw = VIV_PROT_READ | VIV_PROT_WRITE, m1 = (u64)-1;
+    const u64 sh = VIV_MAP_SHARED | VIV_MAP_ANONYMOUS;
+    const u64 at = EXEC_USER_BURROW_BASE + 0x1000ull;
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, rw, sh, m1, 0),
+                   (int)VIV_TRANSLATED, "MAP_SHARED|MAP_ANONYMOUS RW is admitted");
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, 0, sh, m1, 0),
+                   (int)VIV_TRANSLATED, "and PROT_NONE");
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, rw | VIV_PROT_EXEC, sh, m1, 0),
+                   (int)VIV_FORWARD, "PROT_EXEC declines (I-42)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, rw, VIV_MAP_SHARED, m1, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED without MAP_ANONYMOUS declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, rw,
+                                                         VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS, m1, 0),
+                   (int)VIV_FORWARD, "the private call is the private arm's");
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, rw, sh | VIV_MAP_FIXED, m1, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED is the fixed arm's");
+    TEST_EXPECT_EQ((int)vivarium_mmap_shared_anon_decide(0, rw, sh, 3, 0),
+                   (int)VIV_FORWARD, "an unnormalized descriptor declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_shared_anon_decide(at, rw, sh | VIV_MAP_FIXED, m1, 0),
+                   (int)VIV_TRANSLATED, "the fixed shared call inside the window is admitted");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_shared_anon_decide(0, rw, sh | VIV_MAP_FIXED, m1, 0),
+                   (int)VIV_FORWARD, "at NULL it declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_shared_anon_decide(at + 1, rw, sh | VIV_MAP_FIXED, m1, 0),
+                   (int)VIV_FORWARD, "misaligned it declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_shared_anon_decide(0x40000000ull, rw,
+                                                               sh | VIV_MAP_FIXED, m1, 0),
+                   (int)VIV_FORWARD, "below the burrow window it declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_shared_anon_decide(at, rw, sh, m1, 0),
+                   (int)VIV_FORWARD, "without MAP_FIXED it is the other arm's");
 }
 
 // The clone argument domain (LINEAGE L-3d). This row hands a guest a second
@@ -3971,7 +4123,8 @@ void test_vivarium_madvise_domain(void) {
     k = (enum viv_madvise_kind)77;
     TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)VIV_MADV_DONTNEED, &k),
                    (int)VIV_TRANSLATED, "MADV_DONTNEED translates");
-    TEST_EXPECT_EQ((int)k, (int)VIV_MADVISE_RELEASE, "MADV_DONTNEED is a release");
+    TEST_EXPECT_EQ((int)k, (int)VIV_MADVISE_DONTNEED,
+                   "MADV_DONTNEED is its own kind: it also admits a shared range (votes 117 + 119)");
     k = (enum viv_madvise_kind)77;
     TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)VIV_MADV_FREE, &k),
                    (int)VIV_TRANSLATED, "MADV_FREE translates");
