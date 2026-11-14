@@ -161,6 +161,85 @@ impl File {
         Error::from_syscall_return(rc).map(|_| ())
     }
 
+    /// Flush the file's data and metadata to stable storage (SYS_FSYNC). A write
+    /// the server had not taken fails here.
+    pub fn sync_all(&self) -> Result<()> {
+        // SAFETY: a live handle; datasync 0 asks for the metadata too.
+        let rc = unsafe { crate::t_fsync(self.handle.raw() as i64, 0) };
+        Error::from_syscall_return(rc).map(|_| ())
+    }
+
+    // Descriptor-relative operations. `self` is a directory handle (`T_OPATH`
+    // carries the write right `unlink_at` and `rename_at` need); `name` is
+    // resolved from it, never from a path walked again, so a link swapped in
+    // above the directory cannot redirect the operation.
+
+    /// Open `name` relative to this directory with `omode`; `T_OPATH |
+    /// T_ONOFOLLOW` opens a final link itself.
+    pub fn open_at(&self, name: &str, omode: u32) -> Result<File> {
+        // SAFETY: name is a valid &str (ptr+len); self is a live handle.
+        let rc = unsafe { t_open(self.handle.raw() as i64, name.as_ptr(), name.len(), omode) };
+        let fd = Error::from_syscall_return(rc)?;
+        Ok(File {
+            handle: Handle::from_raw(fd as i32, Rights::READ | Rights::WRITE | Rights::TRANSFER),
+        })
+    }
+
+    /// Create `name` in this directory, which must not exist (one atomic create
+    /// at the server), opened for writing, `perm & 0o777` under the umask. A
+    /// final link is not followed.
+    pub fn create_new_at(&self, name: &str, perm: u32) -> Result<File> {
+        let omode = T_OWRITE | crate::T_OEXCL | T_ONOFOLLOW;
+        // SAFETY: name is a valid &str (ptr+len); self is a live handle.
+        let rc = unsafe {
+            crate::t_open_create(self.handle.raw() as i64, name.as_ptr(), name.len(), omode, perm & 0o777)
+        };
+        let fd = Error::from_syscall_return(rc)?;
+        Ok(File {
+            handle: Handle::from_raw(fd as i32, Rights::READ | Rights::WRITE | Rights::TRANSFER),
+        })
+    }
+
+    /// Create the directory `name` in this directory, which must not exist,
+    /// `perm & 0o777` under the umask.
+    pub fn create_dir_at(&self, name: &str, perm: u32) -> Result<()> {
+        let perm = crate::T_WALK_CREATE_DMDIR | (perm & 0o777);
+        // SAFETY: name is a valid &str (ptr+len); self is a live handle.
+        let rc = unsafe {
+            crate::t_open_create(self.handle.raw() as i64, name.as_ptr(), name.len(), T_OREAD, perm)
+        };
+        let fd = Error::from_syscall_return(rc)?;
+        // SAFETY: the create returned a live handle this function owns.
+        drop(unsafe { File::from_raw_fd(fd as i32, Rights::READ) });
+        Ok(())
+    }
+
+    /// Remove the entry `name` from this directory: an empty directory when
+    /// `dir`, otherwise anything that is not a directory (a link itself).
+    pub fn unlink_at(&self, name: &str, dir: bool) -> Result<()> {
+        let flags = if dir { crate::T_UNLINK_REMOVEDIR } else { 0 };
+        // SAFETY: name is a valid &str (ptr+len); self is a live handle.
+        let rc = unsafe { crate::t_unlink(self.handle.raw() as i64, name.as_ptr(), name.len(), flags) };
+        Error::from_syscall_return(rc).map(|_| ())
+    }
+
+    /// Rename `old` in this directory to `new` in `to`, replacing what `new`
+    /// names atomically. One device only: two answer `CrossesDevices`.
+    pub fn rename_at(&self, old: &str, to: &File, new: &str) -> Result<()> {
+        // SAFETY: both names are valid &str (ptr+len); both handles are live.
+        let rc = unsafe {
+            crate::t_rename(
+                self.handle.raw() as i64,
+                old.as_ptr(),
+                old.len(),
+                to.handle.raw() as i64,
+                new.as_ptr(),
+                new.len(),
+            )
+        };
+        Error::from_syscall_return(rc).map(|_| ())
+    }
+
     /// The underlying raw handle index. For interop with code that
     /// passes raw `fd`s through other syscalls; libthyla-rs callers
     /// should prefer `Read`/`Write`/`Seek`.
