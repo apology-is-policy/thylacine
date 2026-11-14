@@ -294,11 +294,15 @@ record of the `caps` and `guards` of every Proc that has held a member image,
 NULL until the space's first sharing fork; `addrspace_clone` gives a child that
 maps shared anonymous memory the parent's family or a new one
 (`share_family_new`; OOM fails the fork), the publication sets the parent's
-under `g_proc_table_lock` and `as->lock`; never cleared on a published space; the
+under `g_proc_table_lock` alone with a release store (the clone, under `lock`,
+reads it with acquire and is sound on either value: NULL gives its child a new
+family that its publication moves onto the parent's; audit round 37 P2-1); a
+second fork's clone takes the family's reference (`share_family_get`); never
+cleared on a published space; the
 final lifetime put drops the reference (`share_family_put`). `shared_maps`
 counts the space's shared anonymous mappings, kept by `vma_insert_in` /
-`vma_remove_in` under `lock`, [[sub-kernel-vma]]; the family joins the image only
-while it is nonzero, [[sub-kernel-proc]]) / `id` (a u64
+`vma_remove_in` under `lock` and read by the join without it, [[sub-kernel-vma]];
+the family joins the image only while it is nonzero, [[sub-kernel-proc]]) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4)
 / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
 `paid_burrows` (the record-paid Burrows whose payer record names this space --

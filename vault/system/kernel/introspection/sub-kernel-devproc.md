@@ -653,16 +653,22 @@ still refuses its elevation). `devproc.share_join_fork_and_exec` runs the
 fork's taint inheritance and the exec swap on a kernel-thread child's own
 thread: its grandchild is born tainted and its exec puts the taint on its word,
 and over a private map neither happens. `pts.bind_weighs_shared_taint`
-([[sub-kernel-pts]]) is the interaction gate's witness. Three cover the family
+([[sub-kernel-pts]]) is the interaction gate's witness. Five cover the family
 itself: `devproc.share_family_rival_fork` (two clones before either publication;
 the second publication moves its child onto the parent's family and hands its
-spare back, so a stamp through that child reaches the parent; one live record
-after), `devproc.share_family_counts_every_piece` (an `mprotect` split counts
+spare back and records its child's caps in the parent's family, so a stamp
+through that child reaches the parent; one live record after), `devproc.share_family_counts_every_piece` (an `mprotect` split counts
 three pieces; with two left the parent does not elevate, with none it does) and
 `devproc.share_family_lifetime` (one record per sharing fork, kept by the parent
-after the child's space goes, freed with the parent's; none for a private fork).
-Only a fork from EL0 clones a space, so the publication's call site in
-`rfork_internal` is checked by review alone. The join reads the family in O(1);
+after the child's space goes, freed with the parent's; none for a private fork),
+`devproc.share_family_second_fork_adopts` (a second fork's clone takes the
+parent's family and its reference; the publication hands nothing back) and
+`devproc.share_family_fork_in_flight` (audit round 37 P1-1: a clone, then the
+parent's unmap, a stamp through the first child and a propagating elevation;
+the carve with the caps read before the clone carries none of it, the carve of
+a fork begun after the elevation does). Only a fork from EL0 clones a space, so
+the publication's call site, the spare put after the hold and the caps read
+before the clone in `rfork_internal` are checked by review alone. The join reads the family in O(1);
 vote 120's walk of the space's mappings, unbounded under the global lock (audit
 round 36 F1), is gone.
 

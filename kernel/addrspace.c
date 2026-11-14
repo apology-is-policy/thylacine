@@ -496,12 +496,15 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
 
     // Vote 122 (I-39; DEBUG-FS-DESIGN 3.4): a child that maps shared anonymous
     // memory is in its parent's share family -- the parent's own, or a new one
-    // the publication links the parent to. src->family is stable under
-    // src->lock (the publication writes it under this lock too). The child is
-    // unpublished, so its pointer needs no lock; a failed fork's last unref
-    // drops the reference with the space.
+    // the publication links the parent to. A concurrent publication may be
+    // linking src right now (it writes src->family without this lock): read
+    // NULL, this child gets a new family that its own publication moves onto
+    // src's; read a family, src holds a reference to it for its life, so the
+    // get below cannot meet a dead one. The child is unpublished, so its
+    // pointer needs no lock; a failed fork's last unref drops the reference
+    // with the space.
     if (ok && dst->shared_maps) {
-        struct ShareFamily *f = src->family;
+        struct ShareFamily *f = __atomic_load_n(&src->family, __ATOMIC_ACQUIRE);
         if (f) share_family_get(f);
         else   f = share_family_new();
         if (f) dst->family = f;

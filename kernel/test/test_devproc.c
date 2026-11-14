@@ -5500,13 +5500,17 @@ void test_devproc_share_family_rival_fork(void) {
     struct Proc *p = proc_alloc(), *ca = proc_alloc(), *cb = proc_alloc();
     struct AddrSpace *aown = NULL, *bown = NULL, *aclone = NULL, *bclone = NULL;
     struct ShareFamily *fa = NULL, *fb = NULL, *spare_a = NULL, *spare_b = NULL;
-    bool premise = false, linked = false, a_kept = false, b_moved = false;
+    bool premise = false, linked = false, a_kept = false, b_moved = false, b_recorded = false;
     bool p_clean = false, p_tainted = false, a_tainted = false;
     u64 live_two = 0, live_one = 0;
     if (p && ca && cb) {
         const u32 me = sj_me();
         p->principal_id = ca->principal_id = cb->principal_id = me;
         p->state = ca->state = cb->state = PROC_STATE_ALIVE;
+        // Only the rival child holds CAP_KILL, so only its publication can put
+        // it in a family: it must land in the one the parent reads.
+        p->caps = ca->caps = 0;
+        cb->caps = CAP_KILL;
         s64 va = sys_mmap_anon_core(p, PAGE_SIZE, VMA_PROT_RW, VMA_PROT_RW, true);
         aclone = va > 0 ? addrspace_clone(p->as, false) : NULL;
         bclone = aclone ? addrspace_clone(p->as, false) : NULL;
@@ -5522,8 +5526,10 @@ void test_devproc_share_family_rival_fork(void) {
             irq_state_t st = proc_table_lock_acquire();
             spare_a = proc_image_share_fork_locked(p, ca);
             spare_b = proc_image_share_fork_locked(p, cb);      // THE RIVAL
-            a_kept  = spare_a == NULL && ca->as->family == fa && p->as->family == fa;
+            a_kept  = spare_a == NULL && ca->as->family == fa && p->as->family == fa &&
+                      (__atomic_load_n(&fa->caps, __ATOMIC_ACQUIRE) & CAP_KILL) == 0;
             b_moved = spare_b == fb && cb->as->family == fa;
+            b_recorded = (__atomic_load_n(&fa->caps, __ATOMIC_ACQUIRE) & CAP_KILL) != 0;
             p_clean = !proc_image_tainted_locked(p);
             proc_mark_debug_tainted_locked(cb);
             p_tainted = proc_image_tainted_locked(p);
@@ -5549,6 +5555,7 @@ void test_devproc_share_family_rival_fork(void) {
     TEST_ASSERT(premise, "premise: two clones before either publication, each in a new family, the parent in none");
     TEST_ASSERT(a_kept, "control: the first publication links the parent to its child's family and hands nothing back");
     TEST_ASSERT(b_moved, "the rival publication moves its child onto the parent's family and hands its own back");
+    TEST_ASSERT(b_recorded, "and records its child's caps in that family, not the one it handed back");
     TEST_ASSERT(p_clean, "premise: nobody tainted before the stamp");
     TEST_ASSERT(p_tainted, "a debug stamp through the moved child reaches the parent's image");
     TEST_ASSERT(a_tainted, "and the other child's: one family for the three spaces");
@@ -5614,9 +5621,13 @@ void test_devproc_share_family_lifetime(void) {
         one_record = sh.p->as->family != NULL && sh.p->as->family == sh.c->as->family &&
                      __atomic_load_n(&sh.p->as->family->refs, __ATOMIC_ACQUIRE) == 2u;
         private_none = pv.p->as->family == NULL && pv.c->as->family == NULL;
+        // Off the table while its space is swapped, so no walker meets the
+        // clone being freed; back on it with its own, as sj_undo expects.
+        proc_test_unlink(sh.c);
         sh.c->as = sh.cown;
         addrspace_unref(sh.clone);
         sh.clone = NULL;
+        proc_test_link(sh.c);
         child_gone = share_family_live_for_test();
     }
     sj_undo(&pv);
@@ -5630,4 +5641,117 @@ void test_devproc_share_family_lifetime(void) {
     TEST_ASSERT(private_none, "control: and neither of its spaces is in a family");
     TEST_EXPECT_EQ(child_gone, base + 1u, "the child's space leaving keeps the record for the parent");
     TEST_EXPECT_EQ(end, base, "the parent's leaving frees it");
+}
+
+// The second fork of a space already in a family (audit round 37 P3-1): the
+// clone gives the child the parent's family and takes its reference, so the
+// publication has nothing to move or hand back. A missing reference would
+// free the record under its members at their puts; a broken count therefore
+// keeps an extra reference here, so it fails this test rather than the boot.
+void test_devproc_share_family_second_fork_adopts(void) {
+    const u64 base = share_family_live_for_test();
+    struct sj_pair sh = { 0 };
+    sj_fork(&sh, true, 0, 0);
+    struct Proc *c2 = proc_alloc();
+    struct AddrSpace *c2own = NULL, *clone2 = NULL;
+    struct ShareFamily *f = NULL, *spare = NULL;
+    bool premise = false, adopted = false, linked2 = false;
+    u32 refs_clone = 0, refs_pub = 0;
+    u64 live = 0;
+    if (sh.linked && c2) {
+        f = sh.p->as->family;
+        premise = f != NULL && f == sh.c->as->family &&
+                  __atomic_load_n(&f->refs, __ATOMIC_ACQUIRE) == 2u;
+        clone2 = premise ? addrspace_clone(sh.p->as, false) : NULL;
+        if (clone2) {
+            adopted    = clone2->family == f;
+            refs_clone = __atomic_load_n(&f->refs, __ATOMIC_ACQUIRE);
+            if (refs_clone != 3u) share_family_get(f);
+            c2own = c2->as;
+            c2->as = clone2;
+            c2->principal_id = sj_me();
+            c2->state = PROC_STATE_ALIVE;
+            proc_test_link(c2);
+            linked2 = true;
+            irq_state_t st = proc_table_lock_acquire();
+            spare = proc_image_share_fork_locked(sh.p, c2);
+            refs_pub = __atomic_load_n(&f->refs, __ATOMIC_ACQUIRE);
+            proc_table_lock_release(st);
+            share_family_put(spare);
+            live = share_family_live_for_test();
+        }
+    }
+    if (c2) {
+        if (linked2) proc_test_unlink(c2);
+        if (clone2) { c2->as = c2own; addrspace_unref(clone2); }
+        c2->state = PROC_STATE_ZOMBIE;
+        proc_free(c2);
+    }
+    sj_undo(&sh);
+    const u64 end = share_family_live_for_test();
+
+    TEST_ASSERT(premise, "premise: a parent and its child in one family, one reference each");
+    TEST_ASSERT(adopted, "the second clone gives its child the parent's family");
+    TEST_EXPECT_EQ(refs_clone, 3u, "and takes the family's reference for it");
+    TEST_ASSERT(spare == NULL, "the publication has nothing to hand back");
+    TEST_EXPECT_EQ(refs_pub, 3u, "nor to take: one reference per member space");
+    TEST_EXPECT_EQ(live, base + 1u, "one record for the three spaces");
+    TEST_EXPECT_EQ(end, base, "and none once every member space is gone");
+}
+
+// A fork in flight across "unmap, then elevate" (audit round 37 P1-1). The
+// clone copies the parent's image while it maps the shared page, so the
+// child would map it too; a peer thread then unmaps it, a debugger stamps the
+// family through the first child (it covered that family, which held nothing
+// elevated), and the parent redeems a propagating clearance -- admitted, its
+// image no longer reaching the family. The carve then runs with the caps the
+// parent held before its clone: the child carries none of what the parent
+// gained after the image was taken. The control is a fork begun after the
+// elevation, whose carve propagates it, so the refusal is the clone-time
+// bound's and not a scope that never propagates. The clone in rfork_internal
+// is EL0-only, so its read before the clone is review's; the carve is the
+// one it calls.
+void test_devproc_share_family_fork_in_flight(void) {
+    struct sj_pair sh = { 0 };
+    sj_fork(&sh, true, 0, 0);
+    struct AddrSpace *clone2 = NULL;
+    struct ShareFamily *f = NULL;
+    bool premise = false, adopted = false;
+    caps_t in_flight = CAP_KILL, after = 0, held = 0;
+    s64 um = -1;
+    int rc = -1;
+    u32 refs = 0;
+    if (sh.linked) {
+        f = sh.p->as->family;
+        const caps_t at_clone = __atomic_load_n(&sh.p->caps, __ATOMIC_ACQUIRE);
+        clone2 = f ? addrspace_clone(sh.p->as, false) : NULL;
+        if (clone2) {
+            adopted = clone2->family == f &&
+                      __atomic_load_n(&clone2->shared_maps, __ATOMIC_ACQUIRE) == 1u;
+            refs = __atomic_load_n(&f->refs, __ATOMIC_ACQUIRE);
+            if (refs != 3u) share_family_get(f);
+            um = sys_munmap_range_for_proc(sh.p, sh.va, PAGE_SIZE);
+            irq_state_t st = proc_table_lock_acquire();
+            proc_mark_debug_tainted_locked(sh.c);
+            proc_table_lock_release(st);
+            rc = proc_become_legate(sh.p, CAP_KILL, 1u, 0u, LEGATE_FLAG_PROPAGATING);
+            held = __atomic_load_n(&sh.p->caps, __ATOMIC_ACQUIRE);
+            const caps_t mask = CAP_ALL | CAP_ELEVATION_ONLY;
+            in_flight = proc_fork_carve(sh.p, at_clone, mask).caps;   // THE REGRESSION
+            after     = proc_fork_carve(sh.p, held, mask).caps;
+            premise = at_clone == 0 && (held & CAP_KILL) != 0;
+        }
+    }
+    if (clone2) addrspace_unref(clone2);
+    sj_undo(&sh);
+
+    TEST_ASSERT(f != NULL && adopted, "premise: the fork in flight maps the shared page, in the parent's family");
+    TEST_EXPECT_EQ(refs, 3u, "premise: its space holds a reference to the family");
+    TEST_EXPECT_EQ(um, (s64)0, "a peer thread unmaps the parent's shared page");
+    TEST_EXPECT_EQ(rc, 0, "unmapped and untainted, the parent elevates (vote 122)");
+    TEST_ASSERT(premise, "premise: the parent held nothing before the clone and CAP_KILL now");
+    TEST_EXPECT_EQ((long)(in_flight & CAP_KILL), 0L,
+                   "the fork in flight carries none of what the parent gained after its clone");
+    TEST_ASSERT((after & CAP_KILL) != 0,
+                "control: a fork begun after the elevation propagates it");
 }

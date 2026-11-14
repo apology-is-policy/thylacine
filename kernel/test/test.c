@@ -1741,6 +1741,8 @@ struct test_case g_tests[] = {
     { "devproc.share_family_rival_fork",       test_devproc_share_family_rival_fork,       false, NULL },
     { "devproc.share_family_counts_every_piece", test_devproc_share_family_counts_every_piece, false, NULL },
     { "devproc.share_family_lifetime",         test_devproc_share_family_lifetime,         false, NULL },
+    { "devproc.share_family_second_fork_adopts", test_devproc_share_family_second_fork_adopts, false, NULL },
+    { "devproc.share_family_fork_in_flight",   test_devproc_share_family_fork_in_flight,   false, NULL },
     { "devproc.dump_seal_scope",               test_devproc_dump_seal_scope,               false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },

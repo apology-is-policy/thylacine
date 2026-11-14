@@ -670,9 +670,9 @@ s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *
     struct pti_binding *wake = NULL, *b = NULL;
     struct pts_entry *e = NULL;
     u64 who = proc_stripes(p);
-    // The image's taint, not the word's alone (vote 120), asked before
-    // g_pts_lock: it walks p's mappings under as->lock, an edge g_pts_lock
-    // must not gain. The lifecycle lock held across both keeps it current.
+    // The image's taint, not the word's alone (votes 120 + 122): the space's
+    // records and its share family's, read in O(1) and without as->lock. The
+    // lifecycle lock held across both keeps it current.
     bool tainted = (op == PTY_INTERACTION_BIND) && proc_image_tainted_locked(p);
     spin_lock(&g_pts_lock);
     if (op == PTY_INTERACTION_BIND) {

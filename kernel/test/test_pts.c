@@ -1504,8 +1504,8 @@ cleanup:
 // taint, not its word. Each host maps one page and a second space is cloned
 // from it, as a fork's would be, with the publication's record written as
 // rfork_internal writes it; the far side is then debugged. Over shared
-// anonymous memory the taint reaches the host only through the shared
-// Burrow's record, and the sealed host is refused; over a private map
+// anonymous memory the taint reaches the host only through the share family's
+// record (vote 122), and the sealed host is refused; over a private map
 // (one variable away) the same steps leave it able to bind.
 struct pti_share {
     struct Proc      *other;
