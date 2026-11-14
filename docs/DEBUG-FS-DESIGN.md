@@ -728,6 +728,24 @@ needs to elevate unmaps the shared memory first, which is what Linux's setuid ex
 does implicitly. The record itself is never lifted, because the bytes a departed
 sharer wrote, or kept secrets in, are still there.
 
+**The taint follows the image across spaces, and outlives the mapping.** A debug
+stamp through one sharer goes on the shared Burrow's record, not on the word of
+any Proc in the other spaces: nothing can find those Procs cheaply. So every
+reader of the taint asks the IMAGE through `proc_image_tainted_locked`, which
+checks the Proc's word, its space's departed-holder record and the share record
+of each shared Burrow it maps. That covers the elevation refusal, the interaction
+bind's sealed-and-untainted gate (`pts_interaction_locked`), and the fork's taint
+inheritance. Because the taint is monotone in every direction (3.3), three
+points also write it down where the record would otherwise lose it:
+
+- an unmap of such a Burrow (`vma_remove_in`) ORs the record's taint into the
+  space's `guards_ever` before the mapping leaves the walk;
+- the exec swap puts the image's taint on the Proc's word before the space goes;
+- a fork inherits the parent's image taint, not only its word.
+
+A taint stamped through the other side AFTER this space unmapped does not reach
+it: that debug control happened after this image stopped holding the bytes.
+
 **Cost.** One mapping walk per join, only for a space that forked shared memory.
 It is bounded by `PROC_VMA_MAX` and runs with interrupts off under the two locks.
 The ordinary space never sets `xshare` and pays nothing.
