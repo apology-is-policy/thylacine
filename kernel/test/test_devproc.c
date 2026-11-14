@@ -5525,9 +5525,11 @@ void test_devproc_share_family_rival_fork(void) {
             premise = fa && fb && fa != fb && !p->as->family && live_two == base + 2u;
             irq_state_t st = proc_table_lock_acquire();
             spare_a = proc_image_share_fork_locked(p, ca);
+            // Read before the rival runs: nobody yet has given the family
+            // CAP_KILL, so b_recorded below can come only from the rival.
+            const bool a_no_kill = (__atomic_load_n(&fa->caps, __ATOMIC_ACQUIRE) & CAP_KILL) == 0;
             spare_b = proc_image_share_fork_locked(p, cb);      // THE RIVAL
-            a_kept  = spare_a == NULL && ca->as->family == fa && p->as->family == fa &&
-                      (__atomic_load_n(&fa->caps, __ATOMIC_ACQUIRE) & CAP_KILL) == 0;
+            a_kept  = spare_a == NULL && ca->as->family == fa && p->as->family == fa && a_no_kill;
             b_moved = spare_b == fb && cb->as->family == fa;
             b_recorded = (__atomic_load_n(&fa->caps, __ATOMIC_ACQUIRE) & CAP_KILL) != 0;
             p_clean = !proc_image_tainted_locked(p);

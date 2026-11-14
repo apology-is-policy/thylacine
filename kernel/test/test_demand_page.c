@@ -2492,7 +2492,7 @@ void test_demand_page_file_private_readahead_hand_over_adopts(void) {
         dq2 = v118_data(child); fq2 = child->file_pages;
         v118_unfloor(child, cfl);
         q->as = qown;
-        addrspace_unref(child);                       // the last mapping: the free
+        addrspace_unref(child);                       // the holder goes, lapsing its record; p still maps the image
     }
     drop_proc(q);
     drop_proc(p);
@@ -2637,7 +2637,7 @@ void test_demand_page_file_private_node_hand_over_adopts(void) {
         dq1 = v118_data(child); fq1 = child->file_pages;
         v118_unfloor(child, cfl);
         q->as = qown;
-        addrspace_unref(child);                       // the last mapping: the free
+        addrspace_unref(child);                       // the holder goes, lapsing its record; p still maps the image
     }
     drop_proc(q);
     drop_proc(p);
@@ -2653,6 +2653,136 @@ void test_demand_page_file_private_node_hand_over_adopts(void) {
     TEST_ASSERT(flagged, "the fill adopted before it decided the leaf");
     TEST_EXPECT_EQ(fq1, fq0, "no leaf charged: a payer's leaf is free");
     TEST_EXPECT_EQ(dq1, dq0 + 2u, "the new payer's count is the record");
+}
+
+// Audit round 38 F2: a fill that loses its slot refunds its page's charge. A
+// racing faulter -- the probe, between the fill's page charge and its install
+// -- mints the slot through the record and installs it first, building the
+// leaf node. The fill's install then finds the slot taken: it serves the
+// fault with the winner's page and refunds its own mint, so the record holds
+// the winner's page and node and nothing for the loser. The premise is the
+// resident page itself: the racer's, so the loser's arm ran. The no-race
+// counts are single_fill_pays_its_node's control and charges_its_payer's.
+static struct page *g_v124_racer_pg;
+static int          g_v124_racer_rc;
+static size_t       g_v124_racer_slot;
+
+static void v124_racer_probe(struct Proc *p, struct Burrow *v) {
+    g_file_mint_probe_for_test = NULL;               // once
+    g_v124_racer_rc = -2;
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    if (!pg) return;
+    if (!burrow_mint_charge(v, p->as, false, 1)) { free_pages(pg, 0); return; }
+    struct page *winner = NULL;
+    g_v124_racer_rc = burrow_record_install(v, p->as, g_v124_racer_slot, pg, false, &winner);
+    if (g_v124_racer_rc == 0) {
+        g_v124_racer_pg = pg;                        // the Burrow owns it now
+    } else {
+        free_pages(pg, 0);
+        burrow_mint_refund(v, 1);
+    }
+}
+
+static bool v124_slot_is(struct Burrow *v, size_t slot, const struct page *pg) {
+    spin_lock(&v->lock);
+    bool is = pg != NULL && pagemap_get(&v->pm, slot) == pg;
+    spin_unlock(&v->lock);
+    return is;
+}
+
+void test_demand_page_file_private_single_fill_loser_refunds(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail = false;
+    g_rev_read_eof  = -1;
+    struct Burrow *v = v124_private_image(p->as);
+    if (!v) { drop_proc(p); TEST_ASSERT(false, "a 33-page private image"); }
+    int mrc = burrow_map(p, v, USER_VA, V124_PAGES * ONE_PAGE, VMA_PROT_READ);
+    burrow_unref(v);                      // the mapping holds it now
+    const bool floored = v118_floor(p->as);
+    const u32 budget0 = p->as->page_budget;
+    const u32 d0 = v118_data(p->as);
+
+    // Under 33 pages of headroom the last slot's window is itself: the single
+    // fill. Four pages: the fill's, and the racer's page and node.
+    p->as->page_budget = p->as->page_count + 4u;
+    g_v124_racer_pg   = NULL;
+    g_v124_racer_rc   = -3;
+    g_v124_racer_slot = V124_PAGES - 1u;
+    g_file_mint_probe_for_test = v124_racer_probe;
+    int calls0 = g_rev_read_calls;
+    enum fault_result r = v118_fault(p, V124_PAGES - 1u);
+    int reads = g_rev_read_calls - calls0;
+    g_file_mint_probe_for_test = NULL;
+    p->as->page_budget = budget0;
+    const int  racer_rc  = g_v124_racer_rc;
+    const bool racer_won = v124_slot_is(v, V124_PAGES - 1u, g_v124_racer_pg);
+    u32 res = burrow_image_resident_count(v), rec = burrow_payer_charge_pages_for_test(v);
+    u32 nodes = pagemap_node_count(&v->pm), d1 = v118_data(p->as);
+
+    int drc = v118_detach(p, 0, V124_PAGES);          // the last mapping: the free
+    u32 d2 = v118_data(p->as);
+    v118_unfloor(p->as, floored);
+    drop_proc(p);
+    (void)image_cache_evict_idle_for_test();
+
+    TEST_ASSERT(floored, "the floor under the payer's count");
+    TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_EXPECT_EQ(reads, 1, "premise: the single fill (one read, one slot)");
+    TEST_EXPECT_EQ(racer_rc, 0, "premise: the racer installed the slot inside the fill's window");
+    TEST_ASSERT(racer_won, "premise: the racer's page is resident, so the fill lost its install");
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the loser's fault is served by the winner's page");
+    TEST_EXPECT_EQ(res, 1u, "one page resident");
+    TEST_EXPECT_EQ(nodes, 1u, "one node, the racer's");
+    TEST_EXPECT_EQ(rec, 2u, "the record: the winner's page and node -- the loser's mint refunded");
+    TEST_EXPECT_EQ(d1, d0 + 2u, "the payer pays the record exactly");
+    TEST_EXPECT_EQ(drc, 0, "detach");
+    TEST_EXPECT_EQ(d2, d0, "the free refunded the record whole");
+}
+
+// The same race at a cluster's faulting slot, which mints and installs first:
+// the fill serves the fault with the winner's page, refunds its own mint, and
+// reads ahead the other 63 slots under the node the racer built.
+void test_demand_page_file_private_cluster_loser_refunds(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail = false;
+    g_rev_read_eof  = -1;
+    struct Burrow *v = v118_private_image(p->as);
+    if (!v) { drop_proc(p); TEST_ASSERT(false, "a private image"); }
+    int mrc = burrow_map(p, v, USER_VA, V118_PAGES * ONE_PAGE, VMA_PROT_READ);
+    burrow_unref(v);                      // the mapping holds it now
+    const bool floored = v118_floor(p->as);
+    const u32 d0 = v118_data(p->as);
+
+    g_v124_racer_pg   = NULL;
+    g_v124_racer_rc   = -3;
+    g_v124_racer_slot = 0;
+    g_file_mint_probe_for_test = v124_racer_probe;
+    enum fault_result r = v118_fault(p, 0);
+    g_file_mint_probe_for_test = NULL;
+    const int  racer_rc  = g_v124_racer_rc;
+    const bool racer_won = v124_slot_is(v, 0, g_v124_racer_pg);
+    u32 res = burrow_image_resident_count(v), rec = burrow_payer_charge_pages_for_test(v);
+    u32 nodes = pagemap_node_count(&v->pm), d1 = v118_data(p->as);
+
+    int drc = v118_detach(p, 0, V118_PAGES);          // the last mapping: the free
+    u32 d2 = v118_data(p->as);
+    v118_unfloor(p->as, floored);
+    drop_proc(p);
+    (void)image_cache_evict_idle_for_test();
+
+    TEST_ASSERT(floored, "the floor under the payer's count");
+    TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_EXPECT_EQ(racer_rc, 0, "premise: the racer installed the faulting slot inside the fill's window");
+    TEST_ASSERT(racer_won, "premise: the racer's page is resident, so the fill lost its install");
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the loser's fault is served by the winner's page");
+    TEST_EXPECT_EQ(res, 64u, "the cluster: the winner's page and 63 read ahead");
+    TEST_EXPECT_EQ(nodes, 1u, "one node, the racer's");
+    TEST_EXPECT_EQ(rec, 65u, "the record: the winner's page and node and the read-ahead -- the loser's mint refunded");
+    TEST_EXPECT_EQ(d1, d0 + 65u, "the payer pays the record exactly");
+    TEST_EXPECT_EQ(drc, 0, "detach");
+    TEST_EXPECT_EQ(d2, d0, "the free refunded the record whole");
 }
 
 // The control: a cached image takes no payer and keeps the system cache's

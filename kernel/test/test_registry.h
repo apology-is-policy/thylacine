@@ -449,6 +449,8 @@ void test_demand_page_file_private_payer_death_hands_over(void);
 void test_demand_page_file_private_readahead_hand_over_adopts(void);
 void test_demand_page_file_private_single_fill_pays_its_node(void);
 void test_demand_page_file_private_node_hand_over_adopts(void);
+void test_demand_page_file_private_single_fill_loser_refunds(void);
+void test_demand_page_file_private_cluster_loser_refunds(void);
 void test_demand_page_file_cached_image_takes_no_payer(void);
 // Votes 117 + 119: shared anonymous memory (test_shared_anon.c).
 void test_shared_anon_fork_shares_the_page(void);

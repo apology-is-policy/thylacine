@@ -172,9 +172,10 @@ extern void (*g_shared_mint_probe_for_test)(struct Proc *p, struct Burrow *v, si
 // Round 35 F2 (tests only): a FILE cluster fill fires this after its faulting
 // slot is installed and adopted, immediately before the read-ahead mints.
 extern void (*g_cluster_readahead_probe_for_test)(struct Proc *p, struct Burrow *v);
-// Vote 124: the single FILE fill's window between a private image's page charge
-// (and its first adoption) and the install whose node charge can make the
-// hand-over -- where a test lapses the payer as its teardown on another CPU would.
+// Vote 124: a FILE fill's window between a private image's page charge and its
+// install (the single fill's, and each cluster slot's) -- where a test lapses
+// the payer, as its teardown on another CPU would, or installs the slot first,
+// as a racing faulter would.
 extern void (*g_file_mint_probe_for_test)(struct Proc *p, struct Burrow *v);
 // Every I-cache sync of a filled FILE page (the single and the cluster fill).
 extern u64 g_file_fill_syncs_for_test;

@@ -3132,7 +3132,9 @@ struct ShareFamily *proc_image_share_fork_locked(struct Proc *parent, struct Pro
     // its own publication moves onto this one (the arm below); an unmap fold
     // that reads NULL folds nothing, and misses nothing, because the child's
     // family is empty until the ORs below and what they add is the parent's
-    // own (its join and word, and a child that inherits from it).
+    // own (its join and word, and a child that inherits from it). A stamp
+    // through the child comes after this hold, and the fold's fence orders
+    // the parent's reads of any bytes it covers before the fold (vma_remove_in).
     struct ShareFamily *spare = NULL;
     struct ShareFamily *pf = pas->family;
     if (!pf) {

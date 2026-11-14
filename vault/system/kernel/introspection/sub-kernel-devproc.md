@@ -656,7 +656,9 @@ and over a private map neither happens. `pts.bind_weighs_shared_taint`
 ([[sub-kernel-pts]]) is the interaction gate's witness. Five cover the family
 itself: `devproc.share_family_rival_fork` (two clones before either publication;
 the second publication moves its child onto the parent's family and hands its
-spare back and records its child's caps in the parent's family, so a stamp
+spare back and records its child's caps in the parent's family -- the first
+publication's own record, read before the rival runs, holds none of them (audit
+round 38 F1: read after it, the control contradicted the claim) -- so a stamp
 through that child reaches the parent; one live record after), `devproc.share_family_counts_every_piece` (an `mprotect` split counts
 three pieces; with two left the parent does not elevate, with none it does) and
 `devproc.share_family_lifetime` (one record per sharing fork, kept by the parent

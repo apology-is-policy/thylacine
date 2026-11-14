@@ -326,8 +326,20 @@ void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     // the mapping or the fold, never neither. The family pointer may be
     // written by a publication right now; NULL folds nothing, and the family
     // it is about to become holds nothing yet but the parent's own.
+    //
+    // The fold owes a stamp only for bytes this space could have read, and
+    // what orders the two is not this lock (the stamp takes another): a
+    // debugger writes a target only while it holds it stopped, a stop needs
+    // the debug owner, and the attach stamps the target's family before it
+    // takes the slot, so the stamp happens before any write it covers. The
+    // fence orders every earlier access of this CPU -- among them a user load
+    // that read such a write -- before the family and taint reads below, so
+    // they see the stamp (message passing; audit round 38 F4). The range's
+    // uninstall, a broadcast TLBI and DSB, gives the same order today; the
+    // fence makes the fold hold without relying on its caller's order.
     struct Burrow *sb = v->burrow;
     if (sb && sb->type == BURROW_TYPE_ANON_SHARED) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
         struct ShareFamily *f = __atomic_load_n(&as->family, __ATOMIC_ACQUIRE);
         if (f)
             __atomic_fetch_or(&as->guards_ever,
