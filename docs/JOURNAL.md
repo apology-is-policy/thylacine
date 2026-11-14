@@ -141,6 +141,16 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   `ls-mac-line` with the app in the fake's place, against the scripted guest (aux-gate
   `scendry-mac`, resid/scendry-app-1.out): 2 runs green and 11 faults red, each at its own check,
   the fake's verdicts exactly. The guest build checks (ninep, corvus, netd).
+- **The app's tests in tools/test-rust.sh.** `OUTSIDE` lists the crates outside usr/'s
+  workspace as `dir:host`, and the Mac app is the one entry, run on a Mac and reported
+  stranded elsewhere. Shown both ways (aux-gate resid/gap-green.out, gap-red.out):
+  - green: thylacine-mac 104 and ninep 25;
+  - a failed app test is FAIL, exit 1;
+  - an unused variable reads as 1 compiler warning;
+  - the host set to linux-gnu reads NO-HOST with 95 tests STRANDED.
+  The no-argument list was taken by running the script's enumeration alone: 143 crates,
+  the app last. A full run of every crate was not taken: the disk was at 97%, and it
+  would have built every usr crate's tests into a new target directory.
 
 ### Decided by the operator
 
@@ -162,8 +172,6 @@ it is audited (round R5).
 - A guest run with the app in the fake's place (`THYLACINE_MAC_APP`), and a scenario of the
   shared folders through the guest's kernel: walk, read, write, create, rename, remove, a link
   read as a link, a read-only share's EROFS.
-- The app's host tests in a routine gate: tools/test-rust.sh runs the usr workspace and not
-  macrunner/app, whose pin failed unseen for a day.
 - I-d: the power key and Quit; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor

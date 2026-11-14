@@ -18,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/MAC-RUNNER.md"]
 created: 2026-11-11
-updated: 2026-11-12
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -479,7 +479,9 @@ as no size, and its scale is 100 then (`aspect_as_size`, 2026-11-12). The test
 counts them and holds each to a view the window cannot be: under 640 by 400
 points, or 160 cm wide. The guest's source is compiled into this test, so a
 change to `scale.rs` is not done until this crate's `cargo test` has run; that
-guard went in without it, and this test was red for two commits. Under 22 points the rounding of the
+guard went in without it, and this test was red for two commits. Since
+2026-11-14 `tools/test-rust.sh` runs this crate's tests on a Mac (its `OUTSIDE`
+list), after the axis pin stood red unseen for a day. Under 22 points the rounding of the
 millimetres is too much of the side (21 points at two pixels to a point read
 175%), and Caveats has the strip. With a guest, `docs/MAC-RUNNER.md` M-3:
 2560x1600 told, 200% taken. The telling is an

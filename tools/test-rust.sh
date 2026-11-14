@@ -29,7 +29,8 @@
 #                unconditionally. On a Mach-O host its `_start` inline asm cannot
 #                assemble (`.type _start, %function` is ELF); on an ELF host that
 #                assembles, and its `#[panic_handler]` collides with std's in the
-#                test harness (E0152).
+#                test harness (E0152). Or it is an OUTSIDE crate (below) and this
+#                is not its host.
 #   NO-TESTS  -- it host-builds fine and runs no test.
 #
 # STRANDED cuts across all five, and it is the figure that matters most. It is
@@ -80,6 +81,16 @@ FEATURE_PASSES=(
     "libutopia:host-test"
 )
 
+# Crates outside usr/'s workspace, each its own workspace with its own lockfile,
+# as `dir:host`: run where the host triple ends in `host`, and NO-HOST elsewhere,
+# where every test they declare is STRANDED. Each is a std program, so its tests
+# run in its own harness, every target, as `cargo test` in its directory runs
+# them. macrunner/app is the Mac app (AppKit, Metal): only a Mac builds it. Until
+# 2026-11-14 nothing here ran it, and one of its tests stood red for a day unseen.
+OUTSIDE=(
+    "macrunner/app:apple-darwin"
+)
+
 # The crates to try. With no arguments: every workspace member, read from the
 # manifest rather than from a hand-kept list here -- a list transcribed into this
 # file would go stale the first time someone added a crate, which is the exact
@@ -97,6 +108,23 @@ else
                 | sort)
 fi
 
+# An OUTSIDE crate's name -> its directory and host, from its own manifest, so a
+# renamed package cannot drop out of the run.
+declare -A outdir=()
+declare -A outhost=()
+for entry in "${OUTSIDE[@]}"; do
+    found=0
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        outdir["$name"]="${entry%%:*}"
+        outhost["$name"]="${entry#*:}"
+        found=$(( found + 1 ))
+        (( $# > 0 )) || crates+=("$name")
+    done < <(cd "$REPO_ROOT/${entry%%:*}" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+                | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]')
+    (( found > 0 )) || { echo "test-rust: cargo metadata named no package in ${entry%%:*}" >&2; exit 2; }
+done
+
 (( ${#crates[@]} > 0 )) || { echo "test-rust: no crates to test" >&2; exit 2; }
 
 # name -> source directory, for the stranded-test count below. Read from the
@@ -109,6 +137,9 @@ done < <(cd "$USR_DIR" && cargo metadata --no-deps --format-version 1 2>/dev/nul
             | python3 -c 'import json,sys
 for p in json.load(sys.stdin)["packages"]:
     print(p["name"] + "\t" + p["manifest_path"])')
+for name in "${!outdir[@]}"; do
+    cratesrc["$name"]="$REPO_ROOT/${outdir[$name]}/src"
+done
 
 # How many `#[test]` attributes a crate's sources declare. Anchored at the start
 # of a line, because a comment that mentions `#[test]` is not a test --
@@ -171,11 +202,13 @@ collect_names() {
 # How many compiler warnings a pass reports for the crate's OWN test build.
 # Summed from cargo's per-crate footer, so a dependency's warnings are not
 # charged to it. Printed, never fatal: a gate that fails on warnings gets
-# bypassed, and one that swallows them hid the doubled `#[test]` above.
+# bypassed, and one that swallows them hid the doubled `#[test]` above. The
+# footer names the target: `(lib test)`, or `(bin "<name>" test)` for an
+# OUTSIDE program's harness.
 crate_warnings() {
     local n
-    n="$(awk -v c="warning: \`$2\` (lib test) generated " \
-            'index($0, c) == 1 {for(i=1;i<=NF;i++) if($i=="generated") print $(i+1)}' "$1" \
+    n="$(awk -v c="warning: \`$2\` (" \
+            'index($0, c) == 1 && index($0, " test) generated ") {for(i=1;i<=NF;i++) if($i=="generated") print $(i+1)}' "$1" \
             | paste -sd+ - | bc 2>/dev/null || true)"
     echo "${n:-0}"
 }
@@ -184,6 +217,10 @@ crate_warnings() {
 cargo_test() {
     local crate="$1" log="$2"
     shift 2
+    if [[ -n "${outdir[$crate]:-}" ]]; then
+        ( cd "$REPO_ROOT/${outdir[$crate]}" && cargo test "$@" 2>&1 ) > "$log"
+        return
+    fi
     # `--lib` only: a bin target is `no_main` + `no_std` and cannot link a test
     # harness. The caller takes the status with `|| rc=$?`, so a failure is
     # CLASSIFIED below rather than killing the run under errexit -- the whole
@@ -206,6 +243,10 @@ for crate in "${crates[@]}"; do
     log="$logdir/$crate.log"
     names="$logdir/$crate.names"
     : > "$names"
+    if [[ -n "${outhost[$crate]:-}" && "$HOST_TRIPLE" != *"${outhost[$crate]}" ]]; then
+        nohost+=("$crate")
+        continue
+    fi
     rc=0
     cargo_test "$crate" "$log" || rc=$?
 
@@ -294,7 +335,7 @@ for c in "${pass[@]:-}"; do
         line+=", $gap STRANDED (declared, compiled into no pass)"
         note_stranded "$c" "$gap"
     elif (( gap < 0 )); then
-        line+=" -- $(( -gap )) more than its sources declare (a macro-generated test?)"
+        line+=" -- $(( -gap )) more than its sources declare (a macro-generated test, or a #[path] file from outside src/?)"
     fi
     if (( ${warnings[$c]:-0} > 0 )); then
         line+=", ${warnings[$c]} compiler WARNING(s)"
@@ -328,7 +369,10 @@ fi
 for c in "${nohost[@]:-}"; do
     [[ -n "$c" ]] || continue
     d="$(declared_tests "$c")"
-    if (( d > 0 )); then
+    if [[ -n "${outhost[$c]:-}" ]]; then
+        printf '  NO-HOST   %-24s runs on *%s only -- %s test(s) STRANDED here\n' "$c" "${outhost[$c]}" "$d"
+        note_stranded "$c" "$d"
+    elif (( d > 0 )); then
         printf '  NO-HOST   %-24s cannot host-test -- %s test(s) STRANDED\n' "$c" "$d"
         note_stranded "$c" "$d"
     else

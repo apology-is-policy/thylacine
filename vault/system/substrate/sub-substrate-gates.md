@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-11-12
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -58,7 +58,9 @@ them run on no machine at all.
   with cargo's own count. Prints per crate the bucket, the tests run, the
   quarantined ignores, the compiler warnings, and STRANDED -- the `#[test]`s the
   sources declare that compiled into no pass. Stranded tests and warnings are
-  reported, never fatal.
+  reported, never fatal. On a Mac it also runs the Mac app's tests
+  (`macrunner/app`, its own workspace); on another host it reports them
+  stranded.
 
 ## Mechanism
 
@@ -502,6 +504,30 @@ instructions, so another host skips the pass and reports the tests stranded. Cor
 **The declared count is anchored at the start of a line**, because a `#[test]`
 that a comment mentions is not a test -- libhalcyon's `theme.rs` has one, and the
 unanchored count called it stranded.
+
+**Crates outside usr/'s workspace are listed in `OUTSIDE`** as `dir:host`, each
+its own workspace with its own lockfile (2026-11-14). The list names only
+directories; each package name comes from that directory's own `cargo metadata`,
+and a directory that names none stops the script. On a host whose triple ends
+in `host`, the crate's tests run as `cargo test` in its directory, every target,
+since it is a std program whose harness links. On any other host it is NO-HOST,
+and every test it declares is stranded. `macrunner/app` is the one entry, the Mac
+app (AppKit and Metal), on `apple-darwin`. Until then nothing routine ran its
+tests, and the pin on tapestryd's axis placement stood red for a day after
+39d8ca95b moved the line it read. The warning count reads cargo's footer for a
+bin's harness as well as a lib's. The app compiles libhalcyon's `scale.rs` in
+through `#[path]`, so it runs 9 more tests than its `src/` declares, and the
+summary says so. A `#[path]` file is not added to the declared count, because
+kaua-term-probe includes halcyond's sources the same way, and halcyond's own
+pass runs those tests: counting them would report as stranded tests that do
+run. Shown 2026-11-14 (aux-gate resid/gap-green.out and gap-red.out):
+- the app and ninep PASS, 104 and 25 tests;
+- a failed app test is FAIL, with exit 1;
+- an unused variable in a test reads as 1 compiler warning;
+- the app's host set to `linux-gnu` reads NO-HOST, with its 95 declared tests
+  STRANDED;
+- with no arguments the list is the usr workspace's 142 crates and the app;
+  with arguments, only the crates named.
 
 **Every figure comes from parsed test NAMES, and the parse proves itself first.**
 Per pass, the names parsed must equal cargo's own passed + ignored, or the crate
