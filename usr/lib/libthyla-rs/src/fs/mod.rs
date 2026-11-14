@@ -217,10 +217,9 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 /// Rename `from` to `to`, atomically replacing an existing `to` (POSIX rename
 /// / 9P Trenameat). Mirrors `std::fs::rename`.
 ///
-/// Both paths must resolve within the SAME Dev (one 9P server): the kernel
-/// rejects a cross-Dev rename (a 9P renameat is within a single session). At
-/// v1.0 the whole pivoted FS is one Stratum Dev, so any in-tree rename
-/// qualifies; a cross-Dev `mv` is the caller's copy+remove fallback. `from`'s
+/// Both paths must resolve within the SAME Dev and, for 9P, the same server:
+/// a 9P renameat is within a single session, so the kernel answers any other
+/// rename `CrossesDevices` (EXDEV), and `mv` copies, then removes. `from`'s
 /// and `to`'s parent directories are held open simultaneously for the rename.
 ///
 /// Leaf rows (#87, Linux `do_renameat2`): renaming `/` or a `.` / `..` leaf

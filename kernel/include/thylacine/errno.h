@@ -385,6 +385,24 @@
 // POSIX: ESTALE.
 #define T_E_STALE      116
 
+// Cross-device link: a rename whose two directories are on different
+// devices -- two Devs, or two dev9p sessions (two servers). SYS_RENAME
+// answers it before any Dev op, and before a Dev's missing rename slot,
+// as Linux refuses a cross-mount rename before it asks the file system;
+// a caller like `mv` reads it as "copy, then remove". Kernels before it
+// answered T_E_INVAL. Operator vote M15 (2026-11-14). POSIX: EXDEV.
+#define T_E_XDEV       18
+
+// File too large, read-only file system, file name too long: a server's
+// answer, crossing the [-4095,-2] Rlerror passthrough by value long
+// before these names (the Mac app answers EFBIG past its snarf bound and
+// EROFS in a read-only shared folder). Named with the operator's signoff
+// (vote M15, 2026-11-14); like T_E_ISDIR, they mint no new ABI value.
+// POSIX: EFBIG, EROFS, ENAMETOOLONG.
+#define T_E_FBIG       27
+#define T_E_ROFS       30
+#define T_E_NAMETOOLONG 36
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -409,6 +427,10 @@ _Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)"
 _Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
 _Static_assert(T_E_NOLCK          == 37,  "T_E_NOLCK ABI pin (POSIX ENOLCK)");
 _Static_assert(T_E_STALE          == 116, "T_E_STALE ABI pin (POSIX ESTALE)");
+_Static_assert(T_E_XDEV           == 18,  "T_E_XDEV ABI pin (POSIX EXDEV)");
+_Static_assert(T_E_FBIG           == 27,  "T_E_FBIG ABI pin (POSIX EFBIG)");
+_Static_assert(T_E_ROFS           == 30,  "T_E_ROFS ABI pin (POSIX EROFS)");
+_Static_assert(T_E_NAMETOOLONG    == 36,  "T_E_NAMETOOLONG ABI pin (POSIX ENAMETOOLONG)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
 _Static_assert(T_E_NOEXEC    == 8,   "T_E_NOEXEC ABI pin (POSIX ENOEXEC)");

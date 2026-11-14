@@ -170,13 +170,29 @@ pub enum Error {
     /// Maps `T_E_STALE` = 116 (POSIX `ESTALE`).
     StaleFile,
 
+    /// A rename whose two directories are on different devices: two
+    /// services, or two 9P servers. `mv` reads it as "copy, then remove".
+    /// Maps `T_E_XDEV` = 18 (POSIX `EXDEV`).
+    CrossesDevices,
+
+    /// A file grew past what its server holds (the Mac app's `snarf` past
+    /// 16 MiB). Server-originated. Maps `T_E_FBIG` = 27 (POSIX `EFBIG`).
+    FileTooLarge,
+
+    /// A change to a file system served read-only. Server-originated.
+    /// Maps `T_E_ROFS` = 30 (POSIX `EROFS`).
+    ReadOnlyFilesystem,
+
+    /// A name or a path past a bound. Server-originated. Maps
+    /// `T_E_NAMETOOLONG` = 36 (POSIX `ENAMETOOLONG`).
+    NameTooLong,
+
     /// Target is a directory where a non-directory was required (e.g.
     /// `unlink` of a directory -- use `remove_dir`). POSIX `EISDIR` = 21.
     ///
-    /// The kernel has no `T_E_ISDIR` constant and does not need one: this is a
-    /// SERVER verdict that crosses the syscall boundary by value (#80). It is
-    /// enumerated here only so callers read "is a directory" instead of the
-    /// `Other(21)` catch-all's "kernel error".
+    /// A SERVER verdict that crossed the syscall boundary by value (#80) before
+    /// the kernel named it `T_E_ISDIR` (#50); `SYS_OPEN_CREATE` answers it too,
+    /// for a lexical directory leaf. Maps `T_E_ISDIR` = 21.
     IsADirectory,
 
     /// Directory not empty: `remove_dir` on a populated directory.
@@ -254,6 +270,10 @@ impl Error {
             Error::TimedOut         => 110,
             Error::ConnectionRefused => 111,
             Error::StaleFile        => 116,
+            Error::CrossesDevices   => 18,
+            Error::FileTooLarge     => 27,
+            Error::ReadOnlyFilesystem => 30,
+            Error::NameTooLong      => 36,
             Error::Other(e)         => e,
             // Library-only variants have no POSIX errno mapping.
             Error::UnexpectedEof    => 0,
@@ -344,6 +364,10 @@ impl From<i32> for Error {
             110 => Error::TimedOut,
             111 => Error::ConnectionRefused,
             116 => Error::StaleFile,
+            18  => Error::CrossesDevices,
+            27  => Error::FileTooLarge,
+            30  => Error::ReadOnlyFilesystem,
+            36  => Error::NameTooLong,
             n   => Error::Other(n),
         }
     }
@@ -379,6 +403,10 @@ impl fmt::Display for Error {
             Error::TimedOut         => "operation timed out",
             Error::ConnectionRefused => "connection refused",
             Error::StaleFile        => "stale file handle",
+            Error::CrossesDevices   => "invalid cross-device link",
+            Error::FileTooLarge     => "file too large",
+            Error::ReadOnlyFilesystem => "read-only file system",
+            Error::NameTooLong      => "file name too long",
             Error::Other(_)         => "kernel error",
             Error::UnexpectedEof    => "unexpected end of file",
             Error::WriteZero        => "writer made no progress",

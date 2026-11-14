@@ -1,9 +1,12 @@
 // mv [-vnf] SRC... DST -- rename/move files.
 //
 // Two forms: `mv SRC DST` (rename) and `mv SRC... DIR` (move each into DIR).
-// Uses libthyla-rs::fs::rename (SYS_RENAME / 9P Trenameat -- atomic replace).
-// v1.0: same-Dev only (the whole pivoted FS is one Stratum Dev, so any in-tree
-// move qualifies); a cross-Dev move (copy+remove fallback) is a v1.x refinement.
+// Within one device a move is libthyla-rs::fs::rename (SYS_RENAME / 9P
+// Trenameat -- an atomic replace). Across devices the kernel answers EXDEV, and
+// mv does what POSIX mv does: the destination removed, the source's tree
+// duplicated with its times, owner and mode (coreutils::copy), then the source
+// removed. A duplication that fails removes what it made and leaves the source
+// whole, so one of the two is always complete.
 
 #![no_std]
 #![no_main]
@@ -16,9 +19,11 @@ use alloc::vec::Vec;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::copy::{self, base, join, Opts};
 use coreutils::usage;
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::fs::{self, Path};
+use libthyla_rs::err::Error;
+use libthyla_rs::fs::{self, File};
 use libthyla_rs::{eprintln, println};
 
 #[no_mangle]
@@ -28,10 +33,11 @@ pub extern "C" fn rs_main() -> i64 {
 
 const USAGE: &str = "\
 usage: mv [-vnf] SRC... DST
-  Rename or move files (atomic replace, same-Dev at v1.0).
+  Rename or move files. Within one device a move is an atomic rename;
+  across devices mv copies (times, owner and mode kept), then removes.
   -v      verbose: print each move
   -n      no-clobber: never overwrite an existing file
-  -f      force (accepted; mv replaces atomically and never prompts)
+  -f      force (accepted; mv never prompts)
   --help  show this help
 
 Examples:
@@ -103,23 +109,142 @@ fn run(args: Args) -> i64 {
         if no_clobber && fs::metadata(target.as_str()).is_ok() {
             continue; // -n: never overwrite an existing destination
         }
-        if let Err(e) = fs::rename(src, target.as_str()) {
-            eprintln!("mv: {} -> {}: {}", src, target, e);
-            status = 1;
-        } else if verbose {
-            println!("'{}' -> '{}'", src, target);
+        match fs::rename(src, target.as_str()) {
+            Ok(()) => {
+                if verbose {
+                    println!("'{}' -> '{}'", src, target);
+                }
+            }
+            Err(Error::CrossesDevices) => {
+                if !move_across(src, target.as_str(), verbose) {
+                    status = 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("mv: {} -> {}: {}", src, target, e);
+                status = 1;
+            }
         }
     }
     status
 }
 
-fn base(path: &str) -> &str {
-    Path::new(path).file_name().unwrap_or(path)
+/// The kind of what `path` names itself, a link not followed.
+fn lstat(path: &str) -> Result<fs::Metadata, Error> {
+    File::open_link(path).and_then(|f| f.metadata())
 }
 
-fn join(dir: &str, name: &str) -> String {
-    let mut s = String::from(dir.trim_end_matches('/'));
-    s.push('/');
-    s.push_str(name);
-    s
+fn move_across(src: &str, dst: &str, verbose: bool) -> bool {
+    let sm = match lstat(src) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("mv: cannot stat '{}': {}", src, e);
+            return false;
+        }
+    };
+    if sm.is_symlink() {
+        eprintln!("mv: cannot move symbolic link '{}' to another device: creating a link is not supported", src);
+        return false;
+    }
+    // What a rename would have replaced: a file by a file, an empty directory by
+    // a directory.
+    if let Ok(dm) = lstat(dst) {
+        if sm.is_dir() && !dm.is_dir() {
+            eprintln!(
+                "mv: cannot overwrite non-directory '{}' with directory '{}'",
+                dst, src
+            );
+            return false;
+        }
+        if !sm.is_dir() && dm.is_dir() {
+            eprintln!(
+                "mv: cannot overwrite directory '{}' with non-directory '{}'",
+                dst, src
+            );
+            return false;
+        }
+        let gone = if dm.is_dir() {
+            fs::remove_dir(dst)
+        } else {
+            fs::remove_file(dst)
+        };
+        if let Err(e) = gone {
+            eprintln!("mv: cannot remove '{}': {}", dst, e);
+            return false;
+        }
+    }
+    let o = Opts {
+        tool: "mv",
+        verbose: false,
+        no_clobber: false,
+        preserve: true,
+        no_deref: true,
+        attrs_soft: true,
+    };
+    if !copy::copy(src, dst, &o) {
+        if !remove_tree(dst) {
+            eprintln!("mv: '{}' is left partly copied; '{}' is whole", dst, src);
+        }
+        return false;
+    }
+    if !remove_tree(src) {
+        return false;
+    }
+    if verbose {
+        println!("'{}' -> '{}'", src, dst);
+    }
+    true
+}
+
+/// `rm -r` of `path`, links not followed: a diagnostic for each failure; true
+/// when nothing is left. A path already gone is nothing left.
+fn remove_tree(path: &str) -> bool {
+    let m = match lstat(path) {
+        Ok(m) => m,
+        Err(Error::NotFound) => return true,
+        Err(e) => {
+            eprintln!("mv: cannot stat '{}': {}", path, e);
+            return false;
+        }
+    };
+    if !m.is_dir() {
+        return match fs::remove_file(path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("mv: cannot remove '{}': {}", path, e);
+                false
+            }
+        };
+    }
+    let mut ok = true;
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for ent in entries {
+                match ent {
+                    Ok(e) => {
+                        let name = e.file_name();
+                        if name != "." && name != ".." && !remove_tree(&join(path, name)) {
+                            ok = false;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("mv: reading directory '{}': {}", path, e);
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("mv: cannot read directory '{}': {}", path, e);
+            ok = false;
+        }
+    }
+    if ok {
+        if let Err(e) = fs::remove_dir(path) {
+            eprintln!("mv: cannot remove '{}': {}", path, e);
+            ok = false;
+        }
+    }
+    ok
 }

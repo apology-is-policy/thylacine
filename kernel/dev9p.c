@@ -3059,7 +3059,7 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     if (!od || !nd) return -T_E_INVAL;
     if (od->fid == P9_NOFID || nd->fid == P9_NOFID ||
         od->cached_open || nd->cached_open) return -T_E_INVAL;   // a cached open
-    if (od->client != nd->client) return -T_E_INVAL;  // renameat is within one session
+    if (od->client != nd->client) return -T_E_XDEV;   // renameat is within one session: two servers
     if (!oldname || !newname) return -T_E_INVAL;
     size_t ol = 0; while (oldname[ol] != '\0') ol++;
     size_t nl = 0; while (newname[nl] != '\0') nl++;

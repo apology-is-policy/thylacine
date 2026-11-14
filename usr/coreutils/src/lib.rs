@@ -44,6 +44,8 @@ mod counting;
 #[cfg(feature = "backend")]
 pub mod beacon_gate;
 #[cfg(feature = "backend")]
+pub mod copy;
+#[cfg(feature = "backend")]
 pub mod meta;
 #[cfg(feature = "backend")]
 pub mod netpump;

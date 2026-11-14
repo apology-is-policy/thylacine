@@ -5329,20 +5329,18 @@ static int sys_copy_component(u64 name_va, u64 name_len, char *scratch) {
 static s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od,
                                 struct Spoor *nd, const char *old_name,
                                 const char *new_name) {
+    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
+    // both directories MUST be on the same Dev (dev9p_rename adds the same-
+    // session guard). Rejected here before any Dev op, and before the slot
+    // check below: two devices answer EXDEV whatever either can do, as Linux
+    // refuses a cross-mount rename before it asks the file system, and a
+    // caller like `mv` reads it as "copy, then remove" (vote M15).
+    if (od->dev != nd->dev)                           return -T_E_XDEV;
     // #80: a Dev with no .rename slot cannot perform the operation at all --
     // OPNOTSUPP, distinguishable from every verdict the slot itself can return
     // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
     // instead of reporting a generic I/O error).
     if (!od->dev || !od->dev->rename)                 return -T_E_OPNOTSUPP;
-    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
-    // both directories MUST be on the same Dev (dev9p_rename adds the same-
-    // session guard). Rejected here before any Dev op.
-    //
-    // #80 seam: POSIX names this case EXDEV (18), which a caller like `mv` reads
-    // as "fall back to copy+unlink". EXDEV is not in the errno registry, and
-    // adding it is an ERRORS.md append needing signoff -- so this stays EINVAL
-    // for now and the cross-Dev copy fallback remains the caller's own policy.
-    if (od->dev != nd->dev)                           return -T_E_INVAL;
 
     // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
     // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
