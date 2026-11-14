@@ -6,12 +6,13 @@
 //                                then set snarf to <text>
 //   mac-line-probe hold <n>      connect, then read snarf once a second for n seconds; a read
 //                                after the Mac app went away is an error, and is said
-//   mac-line-probe beneath <dir> <name>
-//                                hold <dir> as a path handle until the line `go` on stdin, say
-//                                so, then open <name> through the handle and read it. The walk
-//                                starts at the held directory's fid, so if the Mac put a link in
-//                                <dir>'s place meanwhile, the app's own refusal answers (ELOOP);
-//                                a cwd is a name, re-walked from the root, and never reaches it
+//   mac-line-probe beneath <dir> <name> <signal>
+//                                hold <dir> as a path handle until the file <signal> reads `go`,
+//                                say so, then open <name> through the handle and read it. The
+//                                walk starts at the held directory's fid, so if the Mac put a
+//                                link in <dir>'s place meanwhile, the app's own refusal answers
+//                                (ELOOP); a cwd is a name, re-walked from the root, and never
+//                                reaches it
 //
 // Every result is one `mac-line-probe:` line on stdout; the status is 0 only when each step went
 // as the tree says.
@@ -37,6 +38,8 @@ use libthyla_rs::{
 const S_IFMT: u32 = 0o170000;
 const S_IFREG: u32 = 0o100000;
 const QTDIR: u8 = 0x80;
+/// How many times `beneath` reads its signal, 100 ms apart, before it gives up.
+const SIGNAL_READS: u32 = 200;
 
 fn say(line: &str) {
     let mut out = libthyla_rs::io::stdout();
@@ -226,8 +229,9 @@ fn hold(secs: u64) -> bool {
     true
 }
 
-fn beneath(dir: &[u8], name: &[u8]) -> bool {
+fn beneath(dir: &[u8], name: &[u8], signal: &[u8]) -> bool {
     let (dir_s, name_s) = (String::from_utf8_lossy(dir), String::from_utf8_lossy(name));
+    let signal_s = String::from_utf8_lossy(signal);
     // A navigation handle: walked, never opened, so the server still walks from its fid.
     let h = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, dir.as_ptr(), dir.len(), T_OPATH) };
     if h < 0 {
@@ -239,42 +243,46 @@ fn beneath(dir: &[u8], name: &[u8]) -> bool {
         return false;
     }
     say(&alloc::format!("beneath: holding {}", dir_s));
-    // Only the line `go` releases the handle, and the release is said before the walk: a blank
-    // line, a stray byte or a closed stdin cannot start the walk unseen.
-    let (mut line, mut blank, mut other) = (Vec::new(), 0u32, 0u32);
-    let mut b = [0u8; 1];
+    // A console session's child reads a closed pipe, not the console, so the release comes from
+    // the Mac's side: only <signal> reading `go` lets the walk start, and it is said first.
+    let mut reads = 0u32;
     loop {
-        let n = unsafe { t_read(0, b.as_mut_ptr(), 1) };
-        if n <= 0 {
-            let how = if n == 0 {
-                String::from("end of file")
-            } else {
-                why(n)
-            };
-            say(&alloc::format!("beneath: stdin ended before go: {}", how));
+        reads += 1;
+        let fd = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                signal.as_ptr(),
+                signal.len(),
+                T_OREAD,
+            )
+        };
+        let last = if fd < 0 {
+            why(fd)
+        } else {
+            let got = read_all(fd);
+            unsafe { t_close(fd) };
+            match got {
+                Ok(b) if b.trim_ascii() == b"go" => break,
+                Ok(b) => alloc::format!("{:?}", String::from_utf8_lossy(&b)),
+                Err(e) => e,
+            }
+        };
+        if reads == SIGNAL_READS {
+            say(&alloc::format!(
+                "beneath: no go in {} after {} read(s) (last: {})",
+                signal_s,
+                reads,
+                last
+            ));
             unsafe { t_close(h) };
             return false;
         }
-        if b[0] != b'\n' && b[0] != b'\r' {
-            if line.len() < 64 {
-                line.push(b[0]);
-            }
-            continue;
-        }
-        if line == b"go" {
-            break;
-        }
-        if line.is_empty() {
-            blank += 1;
-        } else {
-            other += 1;
-        }
-        line.clear();
+        let _ = libthyla_rs::time::sleep(Duration::from_millis(100));
     }
     say(&alloc::format!(
-        "beneath: released by go, after {} blank line(s) and {} other(s)",
-        blank,
-        other
+        "beneath: released by go in {} after {} read(s)",
+        signal_s,
+        reads
     ));
     let fd = open_at(h, name, T_OREAD);
     unsafe { t_close(h) };
@@ -313,9 +321,9 @@ pub extern "C" fn rs_main() -> i64 {
                 .unwrap_or(5);
             hold(n)
         }
-        Some(b"beneath") if args.len() == 4 => beneath(args[2], args[3]),
+        Some(b"beneath") if args.len() == 5 => beneath(args[2], args[3], args[4]),
         _ => {
-            say("usage: mac-line-probe once <text> | hold <seconds> | beneath <dir> <name>");
+            say("usage: mac-line-probe once <text> | hold <seconds> | beneath <dir> <name> <signal>");
             false
         }
     };

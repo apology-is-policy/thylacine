@@ -72,8 +72,8 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   - links contained beneath `/mnt/mac`;
   - a link the Mac swaps in for a directory the guest is using: beside the cwd, which is a name,
     the kernel resolves it beneath `/mnt/mac` (ENOENT); from a handle `mac-line-probe beneath`
-    held across the swap and released by `go`, the app refuses the walk (ELOOP), and its record
-    shows the walk began at the held directory;
+    held across the swap and released when the Mac writes `go` into a file in the share, the app
+    refuses the walk (ELOOP), and its record shows the walk began at the held directory;
   - the read-only share's EROFS for a create, a write over a file and a remove;
   - ownership and modes.
   Leg 5 is there because the kernel walks one name at a time and resolves a link it is served
@@ -185,6 +185,22 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   rustfmt-clean since 7584af216 (12 hunks); it is formatted, and clippy finds nothing in it. The
   libraries it builds on carry clippy warnings (libthyla-rs 133, ninep 73, loom-client 18), under
   OPEN-BUGS' 2026-11-11 lint entry; ninep's are swept with round R5's I-c work.
+- **The release was typed, and a console child never reads the console** (guest run 11). The
+  probe said `stdin ended before go: end of file` at once. ut gives an ordinary foreground child
+  of the console session a write-closed pipe for fd 0 (usr/utopia/libutopia/src/eval/console.rs,
+  "Piped-drop"; only the full-screen programs it names, and imperium, get the console), so no
+  typed line can reach it. That settles run 10 as well: its wait ended on the same end of file,
+  and it walked before the swap. The app's record in run 11 holds the walk of `inside.txt` from
+  `folders/work/d` and no walk of `secret.txt`. This is the third premise in leg 5 not read from
+  the code it rests on: the scripted guest gave its probe the terminal for stdin, where ut gives
+  a closed pipe. The release now comes from the Mac's side. `mac-line-probe beneath <dir> <name>
+  <signal>` reads <signal> every 100 ms, up to 200 times, until it says `go`. Before its walk it
+  says `released by go in <signal> after N read(s)`, or `no go in <signal> after N read(s)
+  (last: ...)` and exits 1. The scenario empties work/release before the probe starts and writes
+  `go` into it after the swap, so the release line puts the walk after the swap by construction.
+  The scripted guest now gives a console child a closed pipe, keeps typed lines for the shell
+  while the probe holds, and polls as the probe does. Against the 9f18c7b68 scenario it gives
+  run 11's words exactly, and a probe that never reads `go` (the fault `deaf`) is red at leg 5.
 
 ### Evidence
 
@@ -272,6 +288,11 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
 - **The app's interop tests**: 30 of 30 with the walk record's test; the full suite 105 of 105.
   The fake app passes its 45 checks (resid/r6-fake-check-gowait.out). The guest build checks.
 - **The scripted guest with the go release and the walk record**: the clean app is green, all seven legs, and thirteen faults are red, each at its own leg and with its own words: eight of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- and a probe that walks before the swap, not released by `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-6.out, SCENDRY-FOLDERS DONE bad=0, with the walk-first `nowait` red twice and the clean app green again in resid/scendry-folders-7.out.
+- **Guest run 11** (16:01-16:07Z, 9f18c7b68, resid/live10-run11.out, mac released). `ls-mac-line`
+  green, all five legs. `ls-mac-folders` legs 1 to 4 green a third time. Leg 5: `the probe was
+  not released by the go sent after the swap: it said 'stdin ended before go: end of file'`, the
+  wrong turn above. The controls did not run.
+- **The scripted guest with the Mac's release**: the clean app is green, all seven legs, and fourteen faults are red, each at its own leg and with its own words: nine of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, and one that never reads the Mac's `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); against the 9f18c7b68 scenario it gives run 11's words; resid/scendry-folders-8.out, SCENDRY-FOLDERS DONE bad=0.
 
 ### Decided by the operator
 
@@ -284,18 +305,19 @@ session's mount attached as the user and read through, a program's walk with own
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
 tools/mac-app-fake.py, not the app. In run 8 a guest spoke to the app itself: `ls-mac-line` was
-green, all five legs, with the app in the fake's place. In runs 9 and 10 a guest ran
-`ls-mac-folders` legs 1 to 4 green against the app, the remote post's leg among them, and in
-run 10 leg 3's cp. Leg 5 has not been green in a guest: run 9's premise failed, and run 10's
-result could not say which way. Leg 5 as it now stands, legs 6 and 7, and every control are
-shown against the scripted guest only. None of it is audited (round R5).
+green, all five legs, with the app in the fake's place. In runs 9, 10 and 11 a guest ran
+`ls-mac-folders` legs 1 to 4 green against the app, the remote post's leg among them, and from
+run 10 on leg 3's cp. Leg 5 has not been green in a guest: run 9's premise failed, and in runs
+10 and 11 the probe's release came through stdin, which a console child never reads. Leg 5 as
+it now stands, legs 6 and 7, and every control are shown against the scripted guest only. None
+of it is audited (round R5).
 
 ### Open
 
-- Guest run 11: `ls-mac-folders` green with the go release and the walk record, then the five
+- Guest run 12: `ls-mac-folders` green with the Mac's release and the walk record, then the five
   app mutants (resid/mutbin) and the `noremote` control bake, each red at its leg
-  (resid-live10.sh). If the held handle still reads ENOENT after a release that followed the
-  swap, the app's record says where the kernel's walk began, and that is the next hunt.
+  (resid-live12.sh). If the held handle still reads ENOENT after the release, the app's record
+  says where the kernel's walk began, and that is the next hunt.
 - libthyla-rs names no EROFS: a refused write reads `kernel error (errno 30)`, and `$errstr`
   `Other(30)`. Names for 30, 27, 18 and 36 wait on an operator vote (the EISDIR precedent:
   named with signoff, docs/ERRORS.md), asked together with EXDEV for a cross-device rename and

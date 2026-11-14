@@ -15,8 +15,9 @@
 #      nothing. Without the remote declaration both flip.
 #   5. A link the Mac puts in place of a directory the guest is using: the guest stands in a
 #      shared directory, and mac-line-probe holds it as a path handle, while the Mac swaps it
-#      for a link to a folder outside the share. Only a `go` sent after the swap releases the
-#      probe, and it says so before its walk. The handle walks from its fid, so the app's own
+#      for a link to a folder outside the share. Only the `go` the Mac writes into work/release
+#      after the swap releases the probe (a console child's stdin is a closed pipe), and it says
+#      so before its walk. The handle walks from its fid, so the app's own
 #      O_NOFOLLOW_ANY refuses the next step (ELOOP), and the app's record shows that walk began
 #      at the held directory. The cwd is a name (LS-4): a read beside it walks from the root
 #      again, meets the link, and the kernel resolves that beneath /mnt/mac, where the Mac's
@@ -211,10 +212,12 @@ lc_pass "ls-mac-folders: the Mac's links resolve beneath /mnt/mac -- the share's
 # ---- 5. a link the Mac puts in place of a directory the guest is using.
 lc_send "cd /mnt/mac/folders/work/d"
 read_ok inside.txt "INSIDE THE DIRECTORY THE MAC SWAPS" "a read beside the cwd, before the swap"
-# The probe holds the handle until the line `go` and says when it is released, so its walk follows
-# the swap only if that line does. The echoed command line holds no `mac-line-probe:`; only the
-# probe's own lines do.
-lc_send "mac-line-probe beneath /mnt/mac/folders/work/d secret.txt"
+# The probe holds the handle until work/release reads `go`, and says when it is released. The Mac
+# writes go only after the swap, so the walk follows the swap whenever that line comes. ut gives an
+# ordinary child a closed pipe for stdin, never the console, so the release cannot be typed. The
+# echoed command line holds no `mac-line-probe:`; only the probe's own lines do.
+close [open $::W/release w]
+lc_send "mac-line-probe beneath /mnt/mac/folders/work/d secret.txt /mnt/mac/folders/work/release"
 lc_within $lc_cmd_timeout {
     -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
     -re {(mac-line-probe|ut): ([^\r\n]*)[\r\n]}      { lc_fail "[string trimright $expect_out(0,string)] (the probe, before the swap)" }
@@ -227,17 +230,20 @@ lc_step "the probe holds work/d as a path handle"
 file rename $::W/d $::W/d-before
 exec ln -s $::O $::W/d
 lc_step "on the Mac: work/d is now a link to $::O"
-lc_send "go"
+set f [open $::W/release w]
+puts $f go
+close $f
+lc_step "on the Mac: work/release says go"
 lc_within $lc_cmd_timeout {
     -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
     -re {EXTINCTION:}                                { lc_extinction_fail "kernel extinction at the probe's release" }
-    timeout                                          { lc_fail "the probe said nothing once sent go, after the swap" }
+    timeout                                          { lc_fail "the probe said nothing once the Mac wrote go, after the swap" }
     eof                                              { lc_fail "unexpected EOF at the probe's release" }
 }
-if {![string match "released by go*" $said]} {
-    lc_fail "the probe was not released by the go sent after the swap: it said '$said'"
+if {![string match "released by go in /mnt/mac/folders/work/release after *" $said]} {
+    lc_fail "the probe was not released by the go the Mac wrote after the swap: it said '$said'"
 }
-lc_step "the probe was $said, sent after the swap"
+lc_step "the probe was $said"
 lc_within $lc_cmd_timeout {
     -re {mac-line-probe: beneath: ([^\r\n]*)[\r\n]}  { set said $expect_out(1,string) }
     -re {EXTINCTION:}                                { lc_extinction_fail "kernel extinction at the walk from the held handle" }

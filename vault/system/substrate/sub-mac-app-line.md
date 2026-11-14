@@ -226,12 +226,12 @@ fid the kernel holds below a directory the Mac replaced with a link, which `mac-
 beneath` makes with an O_PATH handle; a cwd is a name, re-walked from the root, and the kernel
 meets the link itself; the app's record names where each walk began. Against a scripted guest
 that runs each command as the kernel does (9P against the real app, one name per walk, open
-before create, a served link resolved beneath the mount, the cwd a name, the probe released by
-`go`; aux-gate `scendry-folders`): the clean app is green, all seven legs, and thirteen faults are red, each at its own leg and with its own words: eight of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- and a probe that walks before the swap, not released by `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); resid/scendry-folders-6.out, SCENDRY-FOLDERS DONE bad=0, with the walk-first `nowait` red twice and the clean app green again in resid/scendry-folders-7.out. In a guest under HVF (runs 9 and 10, 2026-11-14)
-legs 1 to 4 were green with the app. Leg 5 has not been green in a guest: run 9's assumed a cwd
-holds a fid, and in run 10 the held handle read ENOENT, with a release that could not show it
-came after the swap. Leg 5 as it now stands is NOT YET RUN IN A GUEST, and none of it is
-audited (round R5).
+before create, a served link resolved beneath the mount, the cwd a name, a console child's
+stdin a closed pipe, the probe released by the `go` the Mac writes; aux-gate
+`scendry-folders`): the clean app is green, all seven legs, and fourteen faults are red, each at its own leg and with its own words: nine of the guest (no `docs` listed, no write, no rename, no copy, links resolved from the guest's root, a cwd walked from a held fid, a held handle re-walked by name -- the app saw no walk of `secret.txt` -- a probe that walks before the swap, and one that never reads the Mac's `go`) and five of the app's rules, built into its binary (resid/mutbin.py: a read-only create, a read-only open for writing, no O_NOFOLLOW_ANY -- the outside file's words reached the guest through the held handle -- the host uid reported, group bits kept); against the 9f18c7b68 scenario it gives run 11's words; resid/scendry-folders-8.out, SCENDRY-FOLDERS DONE bad=0. In a guest under HVF (runs 9, 10 and 11, 2026-11-14) legs 1 to 4
+were green with the app. Leg 5 has not been green in a guest: run 9's assumed a cwd holds a fid,
+and in runs 10 and 11 the probe's release came through stdin, which a console child never
+reads. Leg 5 as it now stands is NOT YET RUN IN A GUEST, and none of it is audited (round R5).
 
 ## Seams
 
