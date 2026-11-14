@@ -15920,12 +15920,15 @@ static s64 viv_mmap(struct Proc *p, const u64 *args) {
         return readable ? -(s64)T_E_NOSYS : -(s64)T_E_ACCES;
     }
 
-    // Linux's anonymous switch knows MAP_SHARED and MAP_PRIVATE and answers
-    // EINVAL for every other type, MAP_SHARED_VALIDATE among them -- after the
-    // length (round 34 F5's order, on the anonymous side). The window's ENOMEM
-    // comes first, as get_unmapped_area's does.
+    // Linux's anonymous switch knows MAP_SHARED, MAP_DROPPABLE and MAP_PRIVATE
+    // and answers EINVAL for every other type, MAP_SHARED_VALIDATE among them --
+    // after the length (round 34 F5's order, on the anonymous side). The
+    // window's ENOMEM comes first, as get_unmapped_area's does. MAP_DROPPABLE is
+    // a type Linux serves and the phenotype does not: it falls to the arms
+    // below, which decline it (round 35 F4).
     u32 atype = (u32)a[3] & (u32)VIV_MAP_TYPE;
-    if (atype != (u32)VIV_MAP_SHARED && atype != (u32)VIV_MAP_PRIVATE)
+    if (atype != (u32)VIV_MAP_SHARED && atype != (u32)VIV_MAP_PRIVATE &&
+        atype != (u32)VIV_MAP_DROPPABLE)
         return a[1] > BURROW_RESERVE_MAX ? -(s64)T_E_NOMEM : -(s64)T_E_INVAL;
 
     // DISTRO D-3b arm 3: the anonymous MAP_FIXED overlay, private or shared.

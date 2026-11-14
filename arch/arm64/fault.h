@@ -169,6 +169,9 @@ extern void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
 // where another sharer's fault into the same slot makes this one the loser.
 struct Burrow;
 extern void (*g_shared_mint_probe_for_test)(struct Proc *p, struct Burrow *v, size_t slot);
+// Round 35 F2 (tests only): a FILE cluster fill fires this after its faulting
+// slot is installed and adopted, immediately before the read-ahead mints.
+extern void (*g_cluster_readahead_probe_for_test)(struct Proc *p, struct Burrow *v);
 // Every I-cache sync of a filled FILE page (the single and the cluster fill).
 extern u64 g_file_fill_syncs_for_test;
 #endif

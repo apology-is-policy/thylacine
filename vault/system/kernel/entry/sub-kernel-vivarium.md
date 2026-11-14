@@ -398,10 +398,12 @@ length-first order as a control; its last pair is a call with no map type
 creator's payer record ([[sub-kernel-burrow]]); the two shared arms are judged
 after the private ones and are disjoint from them, so neither shadows the
 other. The anonymous call is judged on its map type before any arm, after the
-length: Linux's anonymous switch knows `MAP_SHARED` and `MAP_PRIVATE` only, so
-every other type -- `MAP_SHARED_VALIDATE|MAP_ANONYMOUS` among them -- is
-`EINVAL` (`ENOMEM` first for a length past the window, as `get_unmapped_area`
-answers first); a typeless anonymous call used to decline as `ENOSYS`.
+length: Linux's anonymous switch knows `MAP_SHARED`, `MAP_DROPPABLE` and
+`MAP_PRIVATE`, so every other type -- `MAP_SHARED_VALIDATE|MAP_ANONYMOUS` among
+them -- is `EINVAL` (`ENOMEM` first for a length past the window, as
+`get_unmapped_area` answers first); a typeless anonymous call used to decline
+as `ENOSYS`. `MAP_DROPPABLE`, which Linux serves, falls through to the arms and
+is declined (`ENOSYS`; round 35 F4).
 `/dev/zero` follows `do_mmap`'s order: a length past the window is `ENOMEM`
 first (`get_unmapped_area` answers ahead of the file switch), then the switch,
 the type (not shared, shared-validate or private is `EINVAL`), then for a
@@ -421,7 +423,8 @@ beside the same mapping is served from it -- `lazy_reserve_core` never extends
 for a shared call),
 `vivarium.mmap_shared_dev_zero` (read-write shared mints shared memory;
 read-only with `PROT_WRITE` is `EACCES`; read-only `PROT_READ` is a private map
-with a READ ceiling; past the window, `ENOMEM` ahead of both), and pheno-probe legs L23u-L23zd on the device (a fork's
+with a READ ceiling, which never extends a private neighbour; past the window,
+`ENOMEM` ahead of both), and pheno-probe legs L23u-L23zd on the device (a fork's
 child writes, the parent reads it in the shared map and not in the private
 control beside it; DONTNEED keeps the contents; FREE and
 `MAP_SHARED_VALIDATE|MAP_ANONYMOUS` are `EINVAL`).

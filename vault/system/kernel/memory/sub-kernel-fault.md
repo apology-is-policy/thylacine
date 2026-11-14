@@ -544,7 +544,12 @@ the resident-hit path (`file_charge`) and in both install tails
 (`leaf_charge`). Every other holder's leaves are charged exactly as above.
 Each path runs `payer_adopt_if_due` before it decides a leaf, and the
 fills run it right after the charge that may have made a hand-over, before
-anything can bail. A space that has just become the payer by minting into a
+anything can bail. The cluster runs it twice: after the faulting slot, and
+again after its read-ahead, because a read-ahead mint can make the hand-over
+too -- the payer's space may die on another CPU between the faulting slot and
+the read-ahead, and the first read-ahead charge then makes this space the payer
+(audit round 35 F2; `demand_page.file_private_readahead_hand_over_adopts` lands
+the lapse there through `g_cluster_readahead_probe_for_test`). A space that has just become the payer by minting into a
 lapsed record (its payer died) turns its unflagged mappings of the image into
 payer mappings in that same hold of its lock: the leaves it had paid for are
 uninstalled and so refunded, and they re-fault free.
@@ -586,7 +591,9 @@ The refund at an uninstall is `vma_uninstall_range_in`'s
 ([[sub-kernel-vma]]). A tests-only probe, `g_shared_mint_probe_for_test`,
 fires between the charge and the install: `shared_anon.install_loser_refunds`
 runs the rival space's whole fault there, so the loser path is driven, not
-assumed ([[sub-kernel-burrow]] lists the set; the law is [[spec-payer]]).
+assumed; `shared_anon.refused_mint_refunds` parks the pool before the page and,
+through the same probe, before the map's first node, so both refunds after the
+charge are driven too ([[sub-kernel-burrow]] lists the set; the law is [[spec-payer]]).
 
 ## The permission a fault is checked against can now change (B-1a, 2026-09-23)
 

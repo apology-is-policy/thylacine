@@ -289,8 +289,9 @@ static s64 viv_mmap_args(struct Proc *p, u64 addr, u64 len, u64 prot, u64 flags,
 // Votes 117 + 119 (VIVARIUM 6.21): MAP_SHARED|MAP_ANONYMOUS mints shared
 // anonymous memory at the asked prot under an RW ceiling, paid by the caller,
 // MAP_FIXED too; the private call one variable away mints private memory.
-// Linux's anonymous switch knows only shared and private: shared-validate and
-// no type at all are EINVAL (ENOMEM past the window first); PROT_EXEC declines.
+// Linux's anonymous switch knows shared, droppable and private: shared-validate
+// and no type at all are EINVAL (ENOMEM past the window first); droppable, which
+// Linux serves, declines here, as PROT_EXEC does.
 void test_vivarium_mmap_shared_anon(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -322,6 +323,7 @@ void test_vivarium_mmap_shared_anon(void) {
     s64 big    = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, SH, ANY, 0);
     s64 zero   = viv_mmap_args(p, 0, 0, RW, SH, ANY, 0);
     s64 ex     = viv_mmap_args(p, 0, PAGE_SIZE, R | VIV_PROT_EXEC, SH, ANY, 0);
+    s64 dropc  = viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_DROPPABLE | VIV_MAP_ANONYMOUS, ANY, 0);
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -339,6 +341,7 @@ void test_vivarium_mmap_shared_anon(void) {
     TEST_EXPECT_EQ(big, -(s64)T_E_NOMEM, "the shared mint's length rule: ENOMEM past the window");
     TEST_EXPECT_EQ(zero, -(s64)T_E_INVAL, "and EINVAL for 0");
     TEST_EXPECT_EQ(ex, -(s64)T_E_NOSYS, "PROT_EXEC declines");
+    TEST_EXPECT_EQ(dropc, -(s64)T_E_NOSYS, "MAP_DROPPABLE|MAP_ANONYMOUS, a type Linux serves: declined");
 }
 
 // Votes 117 + 119 (VIVARIUM 6.21): a shared /dev/zero map is shared anonymous
@@ -359,7 +362,8 @@ void test_vivarium_mmap_shared_dev_zero(void) {
     const u32 VRW = (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
     bool ok = rwfd >= 0 && rofd >= 0 && wofd >= 0;
     bool s_rw = false, sv_rw = false, fx_rw = false, ro_priv = false, priv_rw = false;
-    s64 ro_w = 0, raise = 0, wo_r = 0, wo_w = 0, notype = 0, big_w = 0, big_t = 0;
+    s64 ro_w = 0, raise = 0, wo_r = 0, wo_w = 0, notype = 0, big_w = 0, big_t = 0, q_raise = 0;
+    bool q_merged = false, q_own = false;
     if (ok) {
         s_rw  = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED, (u64)rwfd, 0), VRW);
         sv_rw = viv_shared_at(p, viv_mmap_args(p, 0, PAGE_SIZE, RW, VIV_MAP_SHARED_VALIDATE,
@@ -382,6 +386,22 @@ void test_vivarium_mmap_shared_dev_zero(void) {
         big_w  = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, RW, VIV_MAP_SHARED,
                                (u64)rofd, 0);
         big_t  = viv_mmap_args(p, 0, BURROW_RESERVE_MAX + PAGE_SIZE, R, 0, (u64)rofd, 0);
+        // The read-ceilinged map never extends a neighbour: a private PROT_READ
+        // call beside a private PROT_READ mapping is served from its Burrow (the
+        // premise), and the read-only shared map beside the same mapping mints
+        // its own, ceiling READ, which a protect cannot raise.
+        const u64 PA = VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS, NOFD = (u64)(u32)-1;
+        s64 qa = viv_mmap_args(p, 0, PAGE_SIZE, R, PA, NOFD, 0);
+        s64 qb = viv_mmap_args(p, 0, PAGE_SIZE, R, PA, NOFD, 0);
+        s64 qc = viv_mmap_args(p, 0, PAGE_SIZE, R, VIV_MAP_SHARED, (u64)rofd, 0);
+        struct Vma *vqa = qa > 0 ? vma_lookup(p, (u64)qa) : NULL;
+        struct Vma *vqb = qb > 0 ? vma_lookup(p, (u64)qb) : NULL;
+        struct Vma *vqc = qc > 0 ? vma_lookup(p, (u64)qc) : NULL;
+        q_merged = vqa && vqb && qb == qa + (s64)PAGE_SIZE && vqa->burrow == vqb->burrow;
+        q_own    = vqb && vqc && qc == qb + (s64)PAGE_SIZE && vqc->burrow != vqb->burrow &&
+                   vma_prot_max(vqc) == (u32)VMA_PROT_READ;
+        q_raise  = qc > 0 ? sys_burrow_protect_for_proc(p, (u64)qc, PAGE_SIZE,
+                                                       BURROW_PROT_READ | BURROW_PROT_WRITE, 0) : 0;
     }
     vma_drain(p);
     p->state = PROC_STATE_ZOMBIE;
@@ -400,6 +420,9 @@ void test_vivarium_mmap_shared_dev_zero(void) {
     TEST_EXPECT_EQ(notype, -(s64)T_E_INVAL, "no map type: EINVAL, before the access mode");
     TEST_EXPECT_EQ(big_w, -(s64)T_E_NOMEM, "the EACCES call past the window: ENOMEM first");
     TEST_EXPECT_EQ(big_t, -(s64)T_E_NOMEM, "the typeless call past the window: ENOMEM first");
+    TEST_ASSERT(q_merged, "control: a private R call beside a private R mapping is served from its Burrow");
+    TEST_ASSERT(q_own, "the read-only shared map beside the same mapping mints its own, ceiling READ");
+    TEST_EXPECT_EQ(q_raise, -(s64)T_E_ACCES, "and a protect cannot make it writable");
 }
 
 // The phenotype judges an mmap in Linux's order -- arm64 sys_mmap's offset

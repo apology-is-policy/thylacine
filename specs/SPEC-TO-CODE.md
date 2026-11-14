@@ -3649,7 +3649,12 @@ against that tree. The vault note is spec-payer.
   `mint_payer_locked` picks the payer, a lapsed record makes the faulter the
   payer at `owed = payer_charge_pages`, `paid_link_locked` links it -- then
   `payer_adopt_if_due` (`vma_payer_adopt_in`: each unflagged mapping's leaves
-  uninstalled and refunded, the flag set) before anything can bail.
+  uninstalled and refunded, the flag set) before anything can bail. The
+  model's `Charge` adopts atomically with every charge; the image cluster
+  charges its read-ahead slot by slot after the faulting slot, so it adopts
+  again after the read-ahead (audit round 35 F2: a read-ahead charge can make
+  the hand-over, and the model, adopting at every charge, could not show the
+  missing second adopt).
 - **`Install(sp)`** -> `pagemap_install(&v->pm, &v->lock, slot, newpg, NULL,
   ..)`: rc 0 the page is the Burrow's; rc 1 a peer won (in ANOTHER address
   space, possibly), so the loser frees its page and `burrow_mint_refund(v, 1)`

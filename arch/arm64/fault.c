@@ -38,6 +38,7 @@
 #ifdef KERNEL_TESTS
 void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
 void (*g_shared_mint_probe_for_test)(struct Proc *p, struct Burrow *v, size_t slot);
+void (*g_cluster_readahead_probe_for_test)(struct Proc *p, struct Burrow *v);
 u64 g_file_fill_syncs_for_test;
 #endif
 
@@ -1278,10 +1279,19 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     // before any leaf of theirs is decided -- even if the fault fails below.
     payer_adopt_if_due(p, vma, v);
     if (!fault_pg) return FAULT_UNHANDLED_USER;     // refused, lost to an OOM, or no headroom
+#ifdef KERNEL_TESTS
+    if (g_cluster_readahead_probe_for_test)
+        g_cluster_readahead_probe_for_test(p, v);
+#endif
     for (size_t i = 0; i < ncluster && !spent; i++) {
         if (i == fi0) continue;
         (void)file_cluster_install_slot(p, v, cstart + i, &clpages[i], &spent);
     }
+    // A read-ahead charge can make the hand-over too: the payer's space may
+    // die (on another CPU) between the faulting slot and its read-ahead, and
+    // the first read-ahead mint then makes this space the payer. Adopt again
+    // before the faulting leaf is decided (round 35 F2).
+    payer_adopt_if_due(p, vma, v);
 
     // B-1a audit F1: the cluster is adopted (the bytes are the Burrow's), but
     // the faulting page's PTE goes in only under a prot that still admits it.

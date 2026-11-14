@@ -16,6 +16,8 @@
 
 #include <thylacine/addrspace.h>
 #include <thylacine/burrow.h>
+#include <thylacine/image.h>
+#include <thylacine/pagemap.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
@@ -509,4 +511,73 @@ void test_shared_anon_dontneed_keeps_contents(void) {
     TEST_EXPECT_EQ(pres0, 1u, "control: one private page resident");
     TEST_EXPECT_EQ(pdn, (s64)0, "control: DONTNEED over the private range");
     TEST_EXPECT_EQ(pres1, 0u, "control: DONTNEED still releases a private page");
+}
+
+// The mint's two refusals after its charge refund it, so the record stays the
+// resident count (I-32): a pool with no room for the data page, and a pool with
+// room for the page but none for the map's first node (the probe parks the
+// rest after the page is allocated; a map past PAGEMAP_INLINE_MAX slots is a
+// radix whose root is a node, absent until the first install). The control is
+// the same fault once the pool has room again: it mints and charges.
+#define SA_RADIX_PAGES (PAGEMAP_INLINE_MAX * 2u)
+
+static u32 g_sa_park;
+
+static void sa_park_probe(struct Proc *p, struct Burrow *v, size_t slot) {
+    (void)p; (void)v; (void)slot;
+    g_shared_mint_probe_for_test = NULL;            // once
+    g_sa_park = capacity_pool_pages() - capacity_pool_charged();
+    capacity_pool_park_for_test(g_sa_park);
+}
+
+void test_shared_anon_refused_mint_refunds(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    (void)image_cache_evict_idle_for_test();         // a full pool reclaims idle images first
+    s64 va = sys_mmap_anon_core(p, (u64)SA_RADIX_PAGES * PAGE_SIZE, VMA_PROT_RW, VMA_PROT_RW, true);
+    struct Burrow *sb = va > 0 ? sa_burrow(p, (u64)va) : NULL;
+    const bool exempt = proc_resource_exempt(p);
+    const bool pfl = sa_floor(p->as);
+    const u32 d0 = sa_data(p->as);
+    enum fault_result r1 = FAULT_HANDLED, r2 = FAULT_HANDLED, r3 = FAULT_UNHANDLED_USER;
+    u32 rec1 = 99, d1 = 0, res2 = 99, rec2 = 99, d2 = 0, rec3 = 0, d3 = 0;
+    g_sa_park = 0;
+    if (sb && !exempt) {
+        // 1. No room for the data page.
+        const u32 room = capacity_pool_pages() - capacity_pool_charged();
+        capacity_pool_park_for_test(room);
+        r1 = sa_fault(p, (u64)va, true);
+        capacity_pool_unpark_for_test(room);
+        rec1 = burrow_payer_charge_pages_for_test(sb);
+        d1   = sa_data(p->as);
+        // 2. Room for the page, none for the node.
+        g_shared_mint_probe_for_test = sa_park_probe;
+        r2 = sa_fault(p, (u64)va, true);
+        g_shared_mint_probe_for_test = NULL;
+        capacity_pool_unpark_for_test(g_sa_park);
+        res2 = burrow_lazy_resident_count(sb);
+        rec2 = burrow_payer_charge_pages_for_test(sb);
+        d2   = sa_data(p->as);
+        // The control.
+        r3   = sa_fault(p, (u64)va, true);
+        rec3 = burrow_payer_charge_pages_for_test(sb);
+        d3   = sa_data(p->as);
+    }
+    sa_unfloor(p->as, pfl);
+    sa_drop(p);
+
+    TEST_ASSERT(va > 0 && sb != NULL, "a shared mint past the inline size");
+    TEST_ASSERT(!exempt, "a faulter the pool can refuse");
+    TEST_ASSERT(pfl, "the floor under the payer's count");
+    TEST_EXPECT_EQ(r1, FAULT_UNHANDLED_USER, "no room for the page: the fault is refused");
+    TEST_EXPECT_EQ(rec1, 0u, "and the mint taken back from the record");
+    TEST_EXPECT_EQ(d1, d0, "and from the payer");
+    TEST_ASSERT(g_sa_park > 0, "the probe parked the pool after the page");
+    TEST_EXPECT_EQ(r2, FAULT_UNHANDLED_USER, "no room for the map's node: refused");
+    TEST_EXPECT_EQ(res2, 0u, "no page resident");
+    TEST_EXPECT_EQ(rec2, 0u, "the mint taken back from the record");
+    TEST_EXPECT_EQ(d2, d0, "and from the payer");
+    TEST_EXPECT_EQ(r3, FAULT_HANDLED, "control: with room the same fault mints");
+    TEST_EXPECT_EQ(rec3, 1u, "control: the record holds the page");
+    TEST_EXPECT_EQ(d3, d0 + 1u, "control: the payer pays it");
 }

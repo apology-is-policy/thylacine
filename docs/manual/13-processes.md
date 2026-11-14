@@ -20,9 +20,12 @@ receives an allocation failure, and the kernel's own memory is never at risk.
 Shared memory is charged to the process that created it. A Linux program's
 `MAP_SHARED` anonymous memory is shared with the children it forks, and every
 page of it that any of them touches is charged to the creator. Each other
-process sharing it is charged one page for each of those pages it maps. When
-the creator exits, the next process to touch a new page of that memory takes
-over the whole charge.
+process sharing it is charged one page for each of those pages it maps. The
+pages stay, and stay charged, while any process maps any part of that memory:
+unmapping part of it frees nothing. A process that touches a new page when the
+creator's charge is at its limit is stopped with an allocation failure. When
+the creator exits or runs `exec`, the next process to touch a new page of that
+memory takes over the whole charge.
 
 ## In Practice
 

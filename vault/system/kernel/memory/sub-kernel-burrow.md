@@ -458,8 +458,9 @@ charges the child the private clone's footprint and nothing for the shared
 page),
 `creator_pays_every_mint`, `unmap_keeps_the_page`, `creator_death_hands_over`,
 `install_loser_refunds` (a probe runs the rival's fault between the loser's
-charge and its install), `protect_split_keeps_payer` and
-`dontneed_keeps_contents`.
+charge and its install), `protect_split_keeps_payer`,
+`dontneed_keeps_contents` and `refused_mint_refunds` (a full pool before the
+page, and before the map's first node: each refusal takes the mint back).
 
 ### The cross-Proc share
 

@@ -445,6 +445,7 @@ void test_demand_page_file_private_read_holds_no_charge(void);
 void test_demand_page_file_private_exempt_payer_binds_holder(void);
 void test_demand_page_file_private_holder_pays_leaves(void);
 void test_demand_page_file_private_payer_death_hands_over(void);
+void test_demand_page_file_private_readahead_hand_over_adopts(void);
 void test_demand_page_file_cached_image_takes_no_payer(void);
 // Votes 117 + 119: shared anonymous memory (test_shared_anon.c).
 void test_shared_anon_fork_shares_the_page(void);
@@ -454,6 +455,7 @@ void test_shared_anon_creator_death_hands_over(void);
 void test_shared_anon_install_loser_refunds(void);
 void test_shared_anon_protect_split_keeps_payer(void);
 void test_shared_anon_dontneed_keeps_contents(void);
+void test_shared_anon_refused_mint_refunds(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
 void test_demand_page_alignment_abort_is_bus_not_handled(void);
