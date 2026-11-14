@@ -6611,6 +6611,13 @@ static long walk_open_in_bin(const char *name, size_t name_len, unsigned long om
 // in the boot log. Blocks in t_read (death-interruptible, #811); EOF means
 // stratumd exited, so the thread exits with it.
 static unsigned char sd_drain_stack[16384] __attribute__((aligned(16)));
+// What sd_drain_settle reads to tell that the drainer has caught up. The counts are
+// the drainer's to write; sd_drain_up and sd_drain_fd are joey's main thread's.
+static unsigned long sd_drain_taken;
+static unsigned long sd_drain_printed;
+static int sd_drain_done;
+static int sd_drain_up;
+static long sd_drain_fd = -1;
 
 static void sd_stderr_drain_main(void *arg) {
     long fd = (long)arg;
@@ -6618,9 +6625,38 @@ static void sd_stderr_drain_main(void *arg) {
         unsigned char b[256];
         long n = t_read(fd, b, sizeof(b));
         if (n <= 0) break;
+        __atomic_fetch_add(&sd_drain_taken, (unsigned long)n, __ATOMIC_RELEASE);
         (void)t_puts((const char *)b, (size_t)n);
+        __atomic_fetch_add(&sd_drain_printed, (unsigned long)n, __ATOMIC_RELEASE);
     }
+    __atomic_store_n(&sd_drain_done, 1, __ATOMIC_RELEASE);
     t_thread_exit();
+}
+
+// joey's exit ends the drainer with it, so what stratumd wrote last -- why it refused
+// the boot attach, say -- would never reach the console. Before joey returns, wait
+// until the drainer has caught up: the pipe empty (a poll, which takes nothing from
+// it), no chunk between the drainer's read and its print, and the count printed
+// unchanged, for SD_SETTLE_QUIET parks in a row. A drainer that read its last chunk and
+// was then kept off a CPU for that long, before counting it, is the case this misses.
+// Bounded, so a daemon that keeps writing cannot hold the end of the boot.
+#define SD_SETTLE_QUIET 3
+#define SD_SETTLE_PARKS 100
+static void sd_drain_settle(void) {
+    if (!sd_drain_up) return;
+    unsigned pacer = 0;
+    unsigned long seen = __atomic_load_n(&sd_drain_printed, __ATOMIC_ACQUIRE);
+    int quiet = 0;
+    for (int i = 0; i < SD_SETTLE_PARKS && quiet < SD_SETTLE_QUIET; i++) {
+        if (__atomic_load_n(&sd_drain_done, __ATOMIC_ACQUIRE)) return;
+        (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+        struct pollfd pfd = { .fd = (int)sd_drain_fd, .events = POLLIN, .revents = 0 };
+        int pending = t_poll(&pfd, 1, 0) > 0;
+        unsigned long printed = __atomic_load_n(&sd_drain_printed, __ATOMIC_ACQUIRE);
+        unsigned long taken = __atomic_load_n(&sd_drain_taken, __ATOMIC_ACQUIRE);
+        quiet = (!pending && taken == printed && printed == seen) ? quiet + 1 : 0;
+        seen = printed;
+    }
 }
 
 #if THYLA_BOOT_PROBES
@@ -6664,7 +6700,7 @@ static int joey_services_are_on_their_account(void) {
 }
 #endif
 
-int main(void) {
+static int joey_main(void) {
     char buf[24];
     t_putstr("joey: hello from /bin/joey (real userspace binary, loaded from ramfs)\n");
 
@@ -8372,7 +8408,8 @@ int main(void) {
                 // the daemon's lifetime. Joey stops reading it here; the
                 // drainer keeps stratumd's output from ever back-pressuring
                 // (see sd_stderr_drain_main). Ownership of sd_rd transfers:
-                // joey must not read or close it past this point. Spawn
+                // joey must not read or close it past this point (its exit
+                // polls it, which takes nothing: sd_drain_settle). Spawn
                 // failure is non-fatal -- the boot proceeds with the old
                 // undrained (wedge-prone, but bounded-output) behavior.
                 long sd_drain_tid = t_thread_spawn(
@@ -8388,6 +8425,8 @@ int main(void) {
                     t_putstr("joey: stratumd stderr drainer spawn FAILED "
                              "(#370: daemon diagnostics silenced)\n");
                 } else {
+                    sd_drain_fd = sd_rd;
+                    sd_drain_up = 1;
                     t_putstr("joey: stratumd stderr drainer up (#370)\n");
                 }
             }
@@ -13438,4 +13477,11 @@ int main(void) {
     }
     session_getty_loop(console_fd, consctl_fd);
     return 1;   // unreachable -- session_getty_loop never returns
+}
+
+// Every return of joey's ends the boot; stratumd's last words go out first.
+int main(void) {
+    int rc = joey_main();
+    sd_drain_settle();
+    return rc;
 }
