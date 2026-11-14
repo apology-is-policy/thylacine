@@ -75,11 +75,41 @@ pub const P9_RREADDIR: u8 = 41;
 pub const P9_RLERROR: u8 = 7;
 pub const P9_TFLUSH: u8 = 108;
 pub const P9_RFLUSH: u8 = 109;
+pub const P9_TSTATFS: u8 = 8;
+pub const P9_RSTATFS: u8 = 9;
+pub const P9_TLCREATE: u8 = 14;
+pub const P9_RLCREATE: u8 = 15;
+pub const P9_TSYMLINK: u8 = 16;
+pub const P9_RSYMLINK: u8 = 17;
+pub const P9_TMKNOD: u8 = 18;
+pub const P9_RMKNOD: u8 = 19;
+pub const P9_TRENAME: u8 = 20;
+pub const P9_RRENAME: u8 = 21;
+pub const P9_TREADLINK: u8 = 22;
+pub const P9_RREADLINK: u8 = 23;
+pub const P9_TSETATTR: u8 = 26;
+pub const P9_RSETATTR: u8 = 27;
+pub const P9_TFSYNC: u8 = 50;
+pub const P9_RFSYNC: u8 = 51;
+pub const P9_TLOCK: u8 = 52;
+pub const P9_RLOCK: u8 = 53;
+pub const P9_TGETLOCK: u8 = 54;
+pub const P9_RGETLOCK: u8 = 55;
+pub const P9_TLINK: u8 = 70;
+pub const P9_RLINK: u8 = 71;
+pub const P9_TMKDIR: u8 = 72;
+pub const P9_RMKDIR: u8 = 73;
+pub const P9_TRENAMEAT: u8 = 74;
+pub const P9_RRENAMEAT: u8 = 75;
+pub const P9_TUNLINKAT: u8 = 76;
+pub const P9_RUNLINKAT: u8 = 77;
 
 // QID type bits (the v1.0 surface -- corvus's namespace is one dir +
 // one file, no symlinks/temp).
 pub const P9_QTDIR: u8 = 0x80;
 pub const P9_QTFILE: u8 = 0x00;
+/// A symbolic link's qid type.
+pub const P9_QTSYMLINK: u8 = 0x02;
 /// Thylacine 9P extension (net-6b-2b; NET-DESIGN section 12.2): a "pollable" file
 /// -- one whose server (netd's per-connection `ready`, ptyfs's `<n>ready`) answers
 /// non-consuming readiness reads as [`ready_answer`] decides. The kernel dev9p.poll
@@ -92,6 +122,7 @@ pub const P9_QTPOLL: u8 = 0x01;
 // consumer; only DIR vs REG matter for the /net tree.
 pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
+pub const DT_LNK: u8 = 10;
 
 // Sentinels.
 pub const P9_NOFID: u32 = 0xFFFF_FFFF;
@@ -132,6 +163,20 @@ pub const E_CONNREFUSED: u32 = 111; // POSIX ECONNREFUSED (a connect RST/reset)
 /// ESTALE: the file a fid named has died. A client reads this one by value: the kernel reads a
 /// server's `E_BADF` as EIO, which a client cannot tell from a lost link (docs/ERRORS.md).
 pub const E_STALE: u32 = 116;
+// What a host filesystem answers (a shared folder). Each crosses the kernel by value
+// (docs/ERRORS.md: a server errno needs no registry name).
+pub const E_IO: u32 = 5;
+pub const E_ACCES: u32 = 13;
+pub const E_XDEV: u32 = 18;
+pub const E_FBIG: u32 = 27;
+pub const E_NOSPC: u32 = 28;
+pub const E_ROFS: u32 = 30;
+pub const E_MLINK: u32 = 31;
+pub const E_NAMETOOLONG: u32 = 36;
+pub const E_NOTEMPTY: u32 = 39;
+pub const E_LOOP: u32 = 40;
+pub const E_OVERFLOW: u32 = 75;
+pub const E_DQUOT: u32 = 122;
 
 // =============================================================================
 // Qid -- in-memory shape of the 13-byte wire qid.
@@ -451,6 +496,327 @@ pub fn parse_treaddir(buf: &[u8]) -> Result<TreaddirArgs, ()> {
     Ok(TreaddirArgs { fid, offset, count })
 }
 
+/// The T-messages whose whole body is one fid: Tstatfs and Treadlink.
+pub fn parse_tfid_only(buf: &[u8]) -> Result<u32, ()> {
+    let (fid, _) = unpack_u32(buf, P9_HDR_LEN)?;
+    Ok(fid)
+}
+
+// A name a creating or naming T-message carries: one path element, never empty.
+fn unpack_name(buf: &[u8], off: usize) -> Result<(&[u8], usize), ()> {
+    let (name, p) = unpack_str(buf, off)?;
+    if name.is_empty() || name.len() > P9_NAME_MAX {
+        return Err(());
+    }
+    Ok((name, p))
+}
+
+/// Tlcreate body: `[fid: u32][name: str][flags: u32][mode: u32][gid: u32]`. The fid names the
+/// directory, and on success it names the new file, opened with `flags`.
+#[derive(Copy, Clone)]
+pub struct TlcreateArgs<'a> {
+    pub fid: u32,
+    pub name: &'a [u8],
+    pub flags: u32,
+    pub mode: u32,
+    pub gid: u32,
+}
+
+pub fn parse_tlcreate(buf: &[u8]) -> Result<TlcreateArgs<'_>, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (name, p) = unpack_name(buf, p)?;
+    let (flags, p) = unpack_u32(buf, p)?;
+    let (mode, p) = unpack_u32(buf, p)?;
+    let (gid, _) = unpack_u32(buf, p)?;
+    Ok(TlcreateArgs {
+        fid,
+        name,
+        flags,
+        mode,
+        gid,
+    })
+}
+
+/// Tsymlink body: `[fid: u32][name: str][symtgt: str][gid: u32]`. The target is any bytes.
+#[derive(Copy, Clone)]
+pub struct TsymlinkArgs<'a> {
+    pub fid: u32,
+    pub name: &'a [u8],
+    pub target: &'a [u8],
+    pub gid: u32,
+}
+
+pub fn parse_tsymlink(buf: &[u8]) -> Result<TsymlinkArgs<'_>, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (name, p) = unpack_name(buf, p)?;
+    let (target, p) = unpack_str(buf, p)?;
+    let (gid, _) = unpack_u32(buf, p)?;
+    Ok(TsymlinkArgs {
+        fid,
+        name,
+        target,
+        gid,
+    })
+}
+
+/// Tmknod body: `[dfid: u32][name: str][mode: u32][major: u32][minor: u32][gid: u32]`.
+#[derive(Copy, Clone)]
+pub struct TmknodArgs<'a> {
+    pub dfid: u32,
+    pub name: &'a [u8],
+    pub mode: u32,
+    pub major: u32,
+    pub minor: u32,
+    pub gid: u32,
+}
+
+pub fn parse_tmknod(buf: &[u8]) -> Result<TmknodArgs<'_>, ()> {
+    let (dfid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (name, p) = unpack_name(buf, p)?;
+    let (mode, p) = unpack_u32(buf, p)?;
+    let (major, p) = unpack_u32(buf, p)?;
+    let (minor, p) = unpack_u32(buf, p)?;
+    let (gid, _) = unpack_u32(buf, p)?;
+    Ok(TmknodArgs {
+        dfid,
+        name,
+        mode,
+        major,
+        minor,
+        gid,
+    })
+}
+
+/// Trename body: `[fid: u32][dfid: u32][name: str]`: the file `fid` names moves into the
+/// directory `dfid` names, as `name`.
+#[derive(Copy, Clone)]
+pub struct TrenameArgs<'a> {
+    pub fid: u32,
+    pub dfid: u32,
+    pub name: &'a [u8],
+}
+
+pub fn parse_trename(buf: &[u8]) -> Result<TrenameArgs<'_>, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (dfid, p) = unpack_u32(buf, p)?;
+    let (name, _) = unpack_name(buf, p)?;
+    Ok(TrenameArgs { fid, dfid, name })
+}
+
+// Tsetattr `valid` bits (Linux v9fs P9_ATTR_*; kernel/include/thylacine/9p_wire.h).
+pub const P9_SETATTR_MODE: u32 = 1 << 0;
+pub const P9_SETATTR_UID: u32 = 1 << 1;
+pub const P9_SETATTR_GID: u32 = 1 << 2;
+pub const P9_SETATTR_SIZE: u32 = 1 << 3;
+pub const P9_SETATTR_ATIME: u32 = 1 << 4;
+pub const P9_SETATTR_MTIME: u32 = 1 << 5;
+pub const P9_SETATTR_CTIME: u32 = 1 << 6;
+/// With ATIME: set atime to the message's value. Without: to the server's present time.
+pub const P9_SETATTR_ATIME_SET: u32 = 1 << 7;
+/// With MTIME: set mtime to the message's value. Without: to the server's present time.
+pub const P9_SETATTR_MTIME_SET: u32 = 1 << 8;
+
+/// Tsetattr body: `fid(4) valid(4) mode(4) uid(4) gid(4) size(8) atime{sec,nsec}(16)
+/// mtime{sec,nsec}(16)`. Only the fields `valid` names are meant.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TsetattrArgs {
+    pub fid: u32,
+    pub valid: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub atime_sec: u64,
+    pub atime_nsec: u64,
+    pub mtime_sec: u64,
+    pub mtime_nsec: u64,
+}
+
+pub fn parse_tsetattr(buf: &[u8]) -> Result<TsetattrArgs, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (valid, p) = unpack_u32(buf, p)?;
+    let (mode, p) = unpack_u32(buf, p)?;
+    let (uid, p) = unpack_u32(buf, p)?;
+    let (gid, p) = unpack_u32(buf, p)?;
+    let (size, p) = unpack_u64(buf, p)?;
+    let (atime_sec, p) = unpack_u64(buf, p)?;
+    let (atime_nsec, p) = unpack_u64(buf, p)?;
+    let (mtime_sec, p) = unpack_u64(buf, p)?;
+    let (mtime_nsec, _) = unpack_u64(buf, p)?;
+    Ok(TsetattrArgs {
+        fid,
+        valid,
+        mode,
+        uid,
+        gid,
+        size,
+        atime_sec,
+        atime_nsec,
+        mtime_sec,
+        mtime_nsec,
+    })
+}
+
+/// Tfsync body: `[fid: u32][datasync: u32]`; a nonzero datasync asks for the data alone.
+#[derive(Copy, Clone)]
+pub struct TfsyncArgs {
+    pub fid: u32,
+    pub datasync: u32,
+}
+
+pub fn parse_tfsync(buf: &[u8]) -> Result<TfsyncArgs, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (datasync, _) = unpack_u32(buf, p)?;
+    Ok(TfsyncArgs { fid, datasync })
+}
+
+// Tlock / Tgetlock types and flags, and Rlock's status (kernel/include/thylacine/9p_wire.h).
+pub const P9_LOCK_TYPE_RDLCK: u8 = 0;
+pub const P9_LOCK_TYPE_WRLCK: u8 = 1;
+pub const P9_LOCK_TYPE_UNLCK: u8 = 2;
+pub const P9_LOCK_FLAGS_BLOCK: u32 = 1;
+pub const P9_LOCK_SUCCESS: u8 = 0;
+pub const P9_LOCK_BLOCKED: u8 = 1;
+pub const P9_LOCK_ERROR: u8 = 2;
+pub const P9_LOCK_GRACE: u8 = 3;
+
+/// Tlock body: `[fid: u32][type: u8][flags: u32][start: u64][length: u64][proc_id: u32]
+/// [client_id: str]`.
+#[derive(Copy, Clone)]
+pub struct TlockArgs<'a> {
+    pub fid: u32,
+    pub kind: u8,
+    pub flags: u32,
+    pub start: u64,
+    pub length: u64,
+    pub proc_id: u32,
+    pub client_id: &'a [u8],
+}
+
+pub fn parse_tlock(buf: &[u8]) -> Result<TlockArgs<'_>, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (kind, p) = unpack_u8(buf, p)?;
+    let (flags, p) = unpack_u32(buf, p)?;
+    let (start, p) = unpack_u64(buf, p)?;
+    let (length, p) = unpack_u64(buf, p)?;
+    let (proc_id, p) = unpack_u32(buf, p)?;
+    let (client_id, _) = unpack_str(buf, p)?;
+    Ok(TlockArgs {
+        fid,
+        kind,
+        flags,
+        start,
+        length,
+        proc_id,
+        client_id,
+    })
+}
+
+/// Tgetlock body: `[fid: u32][type: u8][start: u64][length: u64][proc_id: u32][client_id: str]`.
+#[derive(Copy, Clone)]
+pub struct TgetlockArgs<'a> {
+    pub fid: u32,
+    pub kind: u8,
+    pub start: u64,
+    pub length: u64,
+    pub proc_id: u32,
+    pub client_id: &'a [u8],
+}
+
+pub fn parse_tgetlock(buf: &[u8]) -> Result<TgetlockArgs<'_>, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (kind, p) = unpack_u8(buf, p)?;
+    let (start, p) = unpack_u64(buf, p)?;
+    let (length, p) = unpack_u64(buf, p)?;
+    let (proc_id, p) = unpack_u32(buf, p)?;
+    let (client_id, _) = unpack_str(buf, p)?;
+    Ok(TgetlockArgs {
+        fid,
+        kind,
+        start,
+        length,
+        proc_id,
+        client_id,
+    })
+}
+
+/// Tlink body: `[dfid: u32][fid: u32][name: str]`: a hard link to `fid`'s file, in `dfid`.
+#[derive(Copy, Clone)]
+pub struct TlinkArgs<'a> {
+    pub dfid: u32,
+    pub fid: u32,
+    pub name: &'a [u8],
+}
+
+pub fn parse_tlink(buf: &[u8]) -> Result<TlinkArgs<'_>, ()> {
+    let (dfid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (fid, p) = unpack_u32(buf, p)?;
+    let (name, _) = unpack_name(buf, p)?;
+    Ok(TlinkArgs { dfid, fid, name })
+}
+
+/// Tmkdir body: `[dfid: u32][name: str][mode: u32][gid: u32]`.
+#[derive(Copy, Clone)]
+pub struct TmkdirArgs<'a> {
+    pub dfid: u32,
+    pub name: &'a [u8],
+    pub mode: u32,
+    pub gid: u32,
+}
+
+pub fn parse_tmkdir(buf: &[u8]) -> Result<TmkdirArgs<'_>, ()> {
+    let (dfid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (name, p) = unpack_name(buf, p)?;
+    let (mode, p) = unpack_u32(buf, p)?;
+    let (gid, _) = unpack_u32(buf, p)?;
+    Ok(TmkdirArgs {
+        dfid,
+        name,
+        mode,
+        gid,
+    })
+}
+
+/// Trenameat body: `[olddirfid: u32][oldname: str][newdirfid: u32][newname: str]`.
+#[derive(Copy, Clone)]
+pub struct TrenameatArgs<'a> {
+    pub olddirfid: u32,
+    pub oldname: &'a [u8],
+    pub newdirfid: u32,
+    pub newname: &'a [u8],
+}
+
+pub fn parse_trenameat(buf: &[u8]) -> Result<TrenameatArgs<'_>, ()> {
+    let (olddirfid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (oldname, p) = unpack_name(buf, p)?;
+    let (newdirfid, p) = unpack_u32(buf, p)?;
+    let (newname, _) = unpack_name(buf, p)?;
+    Ok(TrenameatArgs {
+        olddirfid,
+        oldname,
+        newdirfid,
+        newname,
+    })
+}
+
+/// Tunlinkat's flag that asks for a directory's removal (Linux AT_REMOVEDIR).
+pub const P9_UNLINK_AT_REMOVEDIR: u32 = 0x200;
+
+/// Tunlinkat body: `[dfid: u32][name: str][flags: u32]`.
+#[derive(Copy, Clone)]
+pub struct TunlinkatArgs<'a> {
+    pub dfid: u32,
+    pub name: &'a [u8],
+    pub flags: u32,
+}
+
+pub fn parse_tunlinkat(buf: &[u8]) -> Result<TunlinkatArgs<'_>, ()> {
+    let (dfid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (name, p) = unpack_name(buf, p)?;
+    let (flags, _) = unpack_u32(buf, p)?;
+    Ok(TunlinkatArgs { dfid, name, flags })
+}
+
 // =============================================================================
 // Rmsg builders -- server-side output. Each writes a full framed Rmsg
 // into `out`; returns the byte count written. The `size` field in the
@@ -585,15 +951,10 @@ pub fn parse_tgetattr(buf: &[u8]) -> Result<u32, ()> {
     Ok(fid)
 }
 
-/// build_rgetattr -- the full 9P2000.L Rgetattr (153-byte body; the kernel's
-/// `p9_parse_rgetattr` enforces exact body length). `valid` is the mask of
-/// meaningfully-filled fields; qid/mode/uid/gid/nlink/size are the node's. The
-/// remaining statx fields (rdev, blksize, blocks, times, gen, data_version) are
-/// zeroed -- a 0 blksize defaults to 4096 in dev9p_stat_native.
-///
-/// Body: valid(8) qid(13) mode(4) uid(4) gid(4) nlink(8) rdev(8) size(8)
-///   blksize(8) blocks(8) atime{s,ns}(16) mtime{s,ns}(16) ctime{s,ns}(16)
-///   btime{s,ns}(16) gen(8) data_version(8).
+/// build_rgetattr -- an Rgetattr for a node that keeps no times: the node's
+/// qid/mode/uid/gid/nlink/size, and every other field zero (a 0 blksize
+/// defaults to 4096 in dev9p_stat_native). `valid` is the mask of the
+/// meaningfully-filled fields. [`build_rgetattr_attr`] carries every field.
 #[allow(clippy::too_many_arguments)]
 pub fn build_rgetattr(
     out: &mut [u8],
@@ -606,27 +967,217 @@ pub fn build_rgetattr(
     nlink: u64,
     size: u64,
 ) -> Result<usize, ()> {
+    let attr = Attr {
+        valid,
+        qid: *qid,
+        mode,
+        uid,
+        gid,
+        nlink,
+        size,
+        ..Attr::default()
+    };
+    build_rgetattr_attr(out, tag, &attr)
+}
+
+// Tgetattr request-mask / Rgetattr valid bits past the security trio (statx's).
+pub const P9_GETATTR_RDEV: u64 = 0x10;
+pub const P9_GETATTR_ATIME: u64 = 0x20;
+pub const P9_GETATTR_MTIME: u64 = 0x40;
+pub const P9_GETATTR_CTIME: u64 = 0x80;
+pub const P9_GETATTR_INO: u64 = 0x100;
+pub const P9_GETATTR_SIZE: u64 = 0x200;
+pub const P9_GETATTR_BLOCKS: u64 = 0x400;
+/// The fields a POSIX stat has: MODE through BLOCKS.
+pub const P9_GETATTR_BASIC: u64 = 0x7FF;
+pub const P9_GETATTR_BTIME: u64 = 0x800;
+pub const P9_GETATTR_GEN: u64 = 0x1000;
+pub const P9_GETATTR_DATA_VERSION: u64 = 0x2000;
+
+/// Every field of an Rgetattr. A time is `(seconds, nanoseconds)`.
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Attr {
+    pub valid: u64,
+    pub qid: Qid,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub nlink: u64,
+    pub rdev: u64,
+    pub size: u64,
+    pub blksize: u64,
+    pub blocks: u64,
+    pub atime: (u64, u64),
+    pub mtime: (u64, u64),
+    pub ctime: (u64, u64),
+    pub btime: (u64, u64),
+    pub gen: u64,
+    pub data_version: u64,
+}
+
+/// The Rgetattr body's length: the kernel's `p9_parse_rgetattr` takes exactly this many bytes.
+pub const P9_RGETATTR_BODY_LEN: usize = 8 + P9_QID_LEN + 12 + 15 * 8;
+
+/// build_rgetattr_attr -- the full 9P2000.L Rgetattr.
+///
+/// Body: valid(8) qid(13) mode(4) uid(4) gid(4) nlink(8) rdev(8) size(8)
+///   blksize(8) blocks(8) atime{s,ns}(16) mtime{s,ns}(16) ctime{s,ns}(16)
+///   btime{s,ns}(16) gen(8) data_version(8).
+pub fn build_rgetattr_attr(out: &mut [u8], tag: u16, a: &Attr) -> Result<usize, ()> {
     let p = build_header(out, P9_RGETATTR, tag)?;
-    let p = pack_u64(out, p, valid)?;
+    let p = pack_u64(out, p, a.valid)?;
+    let p = pack_qid(out, p, &a.qid)?;
+    let p = pack_u32(out, p, a.mode)?;
+    let p = pack_u32(out, p, a.uid)?;
+    let mut p = pack_u32(out, p, a.gid)?;
+    for v in [
+        a.nlink,
+        a.rdev,
+        a.size,
+        a.blksize,
+        a.blocks,
+        a.atime.0,
+        a.atime.1,
+        a.mtime.0,
+        a.mtime.1,
+        a.ctime.0,
+        a.ctime.1,
+        a.btime.0,
+        a.btime.1,
+        a.gen,
+        a.data_version,
+    ] {
+        p = pack_u64(out, p, v)?;
+    }
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+// The replies of the creating and naming operations. Three shapes: empty (Rrename,
+// Rrenameat, Rlink, Runlinkat, Rsetattr, Rfsync), one qid (Rsymlink, Rmknod, Rmkdir),
+// and a qid with an iounit (Rlcreate, as Rlopen).
+
+fn build_empty(out: &mut [u8], mtype: u8, tag: u16) -> Result<usize, ()> {
+    let p = build_header(out, mtype, tag)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+fn build_qid_only(out: &mut [u8], mtype: u8, tag: u16, qid: &Qid) -> Result<usize, ()> {
+    let p = build_header(out, mtype, tag)?;
     let p = pack_qid(out, p, qid)?;
-    let p = pack_u32(out, p, mode)?;
-    let p = pack_u32(out, p, uid)?;
-    let p = pack_u32(out, p, gid)?;
-    let p = pack_u64(out, p, nlink)?;
-    let p = pack_u64(out, p, 0)?; // rdev
-    let p = pack_u64(out, p, size)?; // size
-    let p = pack_u64(out, p, 0)?; // blksize (0 -> dev9p default 4096)
-    let p = pack_u64(out, p, 0)?; // blocks
-    let p = pack_u64(out, p, 0)?; // atime_sec
-    let p = pack_u64(out, p, 0)?; // atime_nsec
-    let p = pack_u64(out, p, 0)?; // mtime_sec
-    let p = pack_u64(out, p, 0)?; // mtime_nsec
-    let p = pack_u64(out, p, 0)?; // ctime_sec
-    let p = pack_u64(out, p, 0)?; // ctime_nsec
-    let p = pack_u64(out, p, 0)?; // btime_sec
-    let p = pack_u64(out, p, 0)?; // btime_nsec
-    let p = pack_u64(out, p, 0)?; // gen
-    let p = pack_u64(out, p, 0)?; // data_version
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+pub fn build_rrename(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    build_empty(out, P9_RRENAME, tag)
+}
+
+pub fn build_rrenameat(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    build_empty(out, P9_RRENAMEAT, tag)
+}
+
+pub fn build_rlink(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    build_empty(out, P9_RLINK, tag)
+}
+
+pub fn build_runlinkat(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    build_empty(out, P9_RUNLINKAT, tag)
+}
+
+pub fn build_rsetattr(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    build_empty(out, P9_RSETATTR, tag)
+}
+
+pub fn build_rfsync(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    build_empty(out, P9_RFSYNC, tag)
+}
+
+pub fn build_rsymlink(out: &mut [u8], tag: u16, qid: &Qid) -> Result<usize, ()> {
+    build_qid_only(out, P9_RSYMLINK, tag, qid)
+}
+
+pub fn build_rmknod(out: &mut [u8], tag: u16, qid: &Qid) -> Result<usize, ()> {
+    build_qid_only(out, P9_RMKNOD, tag, qid)
+}
+
+pub fn build_rmkdir(out: &mut [u8], tag: u16, qid: &Qid) -> Result<usize, ()> {
+    build_qid_only(out, P9_RMKDIR, tag, qid)
+}
+
+pub fn build_rlcreate(out: &mut [u8], tag: u16, qid: &Qid, iounit: u32) -> Result<usize, ()> {
+    let p = build_header(out, P9_RLCREATE, tag)?;
+    let p = pack_qid(out, p, qid)?;
+    let p = pack_u32(out, p, iounit)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// Rreadlink body: `[target: str]`.
+pub fn build_rreadlink(out: &mut [u8], tag: u16, target: &[u8]) -> Result<usize, ()> {
+    let p = build_header(out, P9_RREADLINK, tag)?;
+    let p = pack_str(out, p, target)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// An Rstatfs's fields (Linux statfs).
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Statfs {
+    pub kind: u32,
+    pub bsize: u32,
+    pub blocks: u64,
+    pub bfree: u64,
+    pub bavail: u64,
+    pub files: u64,
+    pub ffree: u64,
+    pub fsid: u64,
+    pub namelen: u32,
+}
+
+/// Rstatfs body: `type(4) bsize(4) blocks(8) bfree(8) bavail(8) files(8) ffree(8) fsid(8)
+/// namelen(4)`, 60 bytes.
+pub fn build_rstatfs(out: &mut [u8], tag: u16, st: &Statfs) -> Result<usize, ()> {
+    let p = build_header(out, P9_RSTATFS, tag)?;
+    let p = pack_u32(out, p, st.kind)?;
+    let p = pack_u32(out, p, st.bsize)?;
+    let p = pack_u64(out, p, st.blocks)?;
+    let p = pack_u64(out, p, st.bfree)?;
+    let p = pack_u64(out, p, st.bavail)?;
+    let p = pack_u64(out, p, st.files)?;
+    let p = pack_u64(out, p, st.ffree)?;
+    let p = pack_u64(out, p, st.fsid)?;
+    let p = pack_u32(out, p, st.namelen)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// Rlock body: `[status: u8]`.
+pub fn build_rlock(out: &mut [u8], tag: u16, status: u8) -> Result<usize, ()> {
+    let p = build_header(out, P9_RLOCK, tag)?;
+    let p = pack_u8(out, p, status)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// Rgetlock body: `[type: u8][start: u64][length: u64][proc_id: u32][client_id: str]`.
+/// `kind` P9_LOCK_TYPE_UNLCK says no lock is in the way.
+pub fn build_rgetlock(
+    out: &mut [u8],
+    tag: u16,
+    kind: u8,
+    start: u64,
+    length: u64,
+    proc_id: u32,
+    client_id: &[u8],
+) -> Result<usize, ()> {
+    let p = build_header(out, P9_RGETLOCK, tag)?;
+    let p = pack_u8(out, p, kind)?;
+    let p = pack_u64(out, p, start)?;
+    let p = pack_u64(out, p, length)?;
+    let p = pack_u32(out, p, proc_id)?;
+    let p = pack_str(out, p, client_id)?;
     patch_header_size(out, p)?;
     Ok(p)
 }
@@ -901,6 +1452,503 @@ mod tests {
             p = pack_str(&mut body, p, name).unwrap();
         }
         frame(P9_TWALK, 1, &body[..p], out)
+    }
+
+    // A body laid out field by field, in the order kernel/9p_wire.c's builder writes it.
+    struct Body {
+        b: [u8; 512],
+        n: usize,
+    }
+
+    impl Body {
+        fn new() -> Body {
+            Body { b: [0; 512], n: 0 }
+        }
+        fn u8(mut self, v: u8) -> Body {
+            self.n = pack_u8(&mut self.b, self.n, v).unwrap();
+            self
+        }
+        fn u32(mut self, v: u32) -> Body {
+            self.n = pack_u32(&mut self.b, self.n, v).unwrap();
+            self
+        }
+        fn u64(mut self, v: u64) -> Body {
+            self.n = pack_u64(&mut self.b, self.n, v).unwrap();
+            self
+        }
+        fn s(mut self, v: &[u8]) -> Body {
+            self.n = pack_str(&mut self.b, self.n, v).unwrap();
+            self
+        }
+        fn framed(&self, mtype: u8, out: &mut [u8]) -> usize {
+            frame(mtype, 9, &self.b[..self.n], out)
+        }
+    }
+
+    #[test]
+    fn the_naming_tmessages_parse_in_the_kernels_field_order() {
+        let mut m = [0u8; 600];
+        let n = Body::new()
+            .u32(3)
+            .s(b"new")
+            .u32(0o1101)
+            .u32(0o644)
+            .u32(1000)
+            .framed(P9_TLCREATE, &mut m);
+        let a = parse_tlcreate(&m[..n]).unwrap();
+        assert_eq!(
+            (a.fid, a.name, a.flags, a.mode, a.gid),
+            (3, &b"new"[..], 0o1101, 0o644, 1000)
+        );
+
+        let n = Body::new()
+            .u32(4)
+            .s(b"ln")
+            .s(b"../t")
+            .u32(7)
+            .framed(P9_TSYMLINK, &mut m);
+        let a = parse_tsymlink(&m[..n]).unwrap();
+        assert_eq!(
+            (a.fid, a.name, a.target, a.gid),
+            (4, &b"ln"[..], &b"../t"[..], 7)
+        );
+
+        let n = Body::new()
+            .u32(5)
+            .s(b"fifo")
+            .u32(0o10644)
+            .u32(1)
+            .u32(2)
+            .u32(8)
+            .framed(P9_TMKNOD, &mut m);
+        let a = parse_tmknod(&m[..n]).unwrap();
+        assert_eq!(
+            (a.dfid, a.name, a.mode, a.major, a.minor, a.gid),
+            (5, &b"fifo"[..], 0o10644, 1, 2, 8)
+        );
+
+        let n = Body::new()
+            .u32(6)
+            .u32(7)
+            .s(b"to")
+            .framed(P9_TRENAME, &mut m);
+        let a = parse_trename(&m[..n]).unwrap();
+        assert_eq!((a.fid, a.dfid, a.name), (6, 7, &b"to"[..]));
+
+        let n = Body::new()
+            .u32(8)
+            .u32(9)
+            .s(b"hard")
+            .framed(P9_TLINK, &mut m);
+        let a = parse_tlink(&m[..n]).unwrap();
+        assert_eq!((a.dfid, a.fid, a.name), (8, 9, &b"hard"[..]));
+
+        let n = Body::new()
+            .u32(10)
+            .s(b"d")
+            .u32(0o755)
+            .u32(11)
+            .framed(P9_TMKDIR, &mut m);
+        let a = parse_tmkdir(&m[..n]).unwrap();
+        assert_eq!((a.dfid, a.name, a.mode, a.gid), (10, &b"d"[..], 0o755, 11));
+
+        let n = Body::new()
+            .u32(12)
+            .s(b"a")
+            .u32(13)
+            .s(b"b")
+            .framed(P9_TRENAMEAT, &mut m);
+        let a = parse_trenameat(&m[..n]).unwrap();
+        assert_eq!(
+            (a.olddirfid, a.oldname, a.newdirfid, a.newname),
+            (12, &b"a"[..], 13, &b"b"[..])
+        );
+
+        let n = Body::new()
+            .u32(14)
+            .s(b"gone")
+            .u32(P9_UNLINK_AT_REMOVEDIR)
+            .framed(P9_TUNLINKAT, &mut m);
+        let a = parse_tunlinkat(&m[..n]).unwrap();
+        assert_eq!((a.dfid, a.name, a.flags), (14, &b"gone"[..], 0x200));
+
+        let n = Body::new().u32(15).framed(P9_TREADLINK, &mut m);
+        assert_eq!(parse_tfid_only(&m[..n]), Ok(15));
+        let n = Body::new().u32(16).u32(1).framed(P9_TFSYNC, &mut m);
+        let a = parse_tfsync(&m[..n]).unwrap();
+        assert_eq!((a.fid, a.datasync), (16, 1));
+    }
+
+    #[test]
+    fn a_name_that_is_empty_or_past_name_max_is_refused() {
+        let mut m = [0u8; 600];
+        let n = Body::new()
+            .u32(1)
+            .s(b"")
+            .u32(0o755)
+            .u32(0)
+            .framed(P9_TMKDIR, &mut m);
+        assert!(parse_tmkdir(&m[..n]).is_err());
+        let long = [b'x'; P9_NAME_MAX + 1];
+        let n = Body::new()
+            .u32(1)
+            .s(&long)
+            .u32(0)
+            .framed(P9_TUNLINKAT, &mut m);
+        assert!(parse_tunlinkat(&m[..n]).is_err());
+        let fits = [b'x'; P9_NAME_MAX];
+        let n = Body::new()
+            .u32(1)
+            .s(&fits)
+            .u32(0)
+            .framed(P9_TUNLINKAT, &mut m);
+        assert_eq!(parse_tunlinkat(&m[..n]).unwrap().name.len(), P9_NAME_MAX);
+        // A symlink's target is a path, not a name: it may be long, and it may be empty.
+        let n = Body::new()
+            .u32(1)
+            .s(b"l")
+            .s(b"")
+            .u32(0)
+            .framed(P9_TSYMLINK, &mut m);
+        assert_eq!(parse_tsymlink(&m[..n]).unwrap().target, b"");
+    }
+
+    #[test]
+    fn a_truncated_naming_tmessage_is_refused() {
+        let mut m = [0u8; 600];
+        let n = Body::new()
+            .u32(12)
+            .s(b"a")
+            .u32(13)
+            .s(b"b")
+            .framed(P9_TRENAMEAT, &mut m);
+        for cut in P9_HDR_LEN..n {
+            assert!(parse_trenameat(&m[..cut]).is_err(), "cut at {cut}");
+        }
+        let n = Body::new()
+            .u32(3)
+            .s(b"new")
+            .u32(0)
+            .u32(0o644)
+            .u32(0)
+            .framed(P9_TLCREATE, &mut m);
+        for cut in P9_HDR_LEN..n {
+            assert!(parse_tlcreate(&m[..cut]).is_err(), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn tsetattr_is_sixty_bytes_of_body_in_the_kernels_order() {
+        let mut m = [0u8; 600];
+        let n = Body::new()
+            .u32(2)
+            .u32(P9_SETATTR_SIZE | P9_SETATTR_MTIME | P9_SETATTR_MTIME_SET)
+            .u32(0o600)
+            .u32(1000)
+            .u32(1001)
+            .u64(4096)
+            .u64(11)
+            .u64(12)
+            .u64(13)
+            .u64(14)
+            .framed(P9_TSETATTR, &mut m);
+        assert_eq!(n, P9_HDR_LEN + 60);
+        let a = parse_tsetattr(&m[..n]).unwrap();
+        assert_eq!(
+            a,
+            TsetattrArgs {
+                fid: 2,
+                valid: 0x128,
+                mode: 0o600,
+                uid: 1000,
+                gid: 1001,
+                size: 4096,
+                atime_sec: 11,
+                atime_nsec: 12,
+                mtime_sec: 13,
+                mtime_nsec: 14,
+            }
+        );
+        assert!(parse_tsetattr(&m[..n - 1]).is_err());
+    }
+
+    #[test]
+    fn the_lock_tmessages_parse_in_the_kernels_order() {
+        let mut m = [0u8; 600];
+        let n = Body::new()
+            .u32(1)
+            .u8(P9_LOCK_TYPE_WRLCK)
+            .u32(P9_LOCK_FLAGS_BLOCK)
+            .u64(10)
+            .u64(20)
+            .u32(77)
+            .s(b"thylacine")
+            .framed(P9_TLOCK, &mut m);
+        let a = parse_tlock(&m[..n]).unwrap();
+        assert_eq!(
+            (
+                a.fid,
+                a.kind,
+                a.flags,
+                a.start,
+                a.length,
+                a.proc_id,
+                a.client_id
+            ),
+            (1, 1, 1, 10, 20, 77, &b"thylacine"[..])
+        );
+        let n = Body::new()
+            .u32(2)
+            .u8(P9_LOCK_TYPE_RDLCK)
+            .u64(5)
+            .u64(6)
+            .u32(8)
+            .s(b"c")
+            .framed(P9_TGETLOCK, &mut m);
+        let a = parse_tgetlock(&m[..n]).unwrap();
+        assert_eq!(
+            (a.fid, a.kind, a.start, a.length, a.proc_id, a.client_id),
+            (2, 0, 5, 6, 8, &b"c"[..])
+        );
+    }
+
+    // The body of a framed R-message: what the kernel's strict parser measures.
+    fn body_of(out: &[u8], n: usize, mtype: u8, tag: u16) -> &[u8] {
+        let h = peek_header(&out[..n]).unwrap();
+        assert_eq!((h.size as usize, h.mtype, h.tag), (n, mtype, tag));
+        &out[P9_HDR_LEN..n]
+    }
+
+    #[test]
+    fn the_replies_have_the_lengths_the_kernels_strict_parsers_take() {
+        let mut o = [0u8; 300];
+        let q = Qid {
+            kind: P9_QTSYMLINK,
+            version: 3,
+            path: 0x55,
+        };
+        let empty: [(fn(&mut [u8], u16) -> Result<usize, ()>, u8); 6] = [
+            (build_rrename, P9_RRENAME),
+            (build_rrenameat, P9_RRENAMEAT),
+            (build_rlink, P9_RLINK),
+            (build_runlinkat, P9_RUNLINKAT),
+            (build_rsetattr, P9_RSETATTR),
+            (build_rfsync, P9_RFSYNC),
+        ];
+        for (f, t) in empty {
+            let n = f(&mut o, 4).unwrap();
+            assert_eq!(body_of(&o, n, t, 4).len(), 0);
+        }
+        let qid_only: [(fn(&mut [u8], u16, &Qid) -> Result<usize, ()>, u8); 3] = [
+            (build_rsymlink, P9_RSYMLINK),
+            (build_rmknod, P9_RMKNOD),
+            (build_rmkdir, P9_RMKDIR),
+        ];
+        for (f, t) in qid_only {
+            let n = f(&mut o, 5, &q).unwrap();
+            let b = body_of(&o, n, t, 5);
+            assert_eq!(b, [P9_QTSYMLINK, 3, 0, 0, 0, 0x55, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        let n = build_rlcreate(&mut o, 6, &q, 8192).unwrap();
+        assert_eq!(body_of(&o, n, P9_RLCREATE, 6).len(), P9_QID_LEN + 4);
+        assert_eq!(unpack_u32(&o, P9_HDR_LEN + P9_QID_LEN), Ok((8192, n)));
+
+        let n = build_rreadlink(&mut o, 7, b"../target").unwrap();
+        assert_eq!(
+            unpack_str(body_of(&o, n, P9_RREADLINK, 7), 0),
+            Ok((&b"../target"[..], 11))
+        );
+
+        let st = Statfs {
+            kind: 0x01021997,
+            bsize: 4096,
+            blocks: 1,
+            bfree: 2,
+            bavail: 3,
+            files: 4,
+            ffree: 5,
+            fsid: 6,
+            namelen: 255,
+        };
+        let n = build_rstatfs(&mut o, 8, &st).unwrap();
+        let b = body_of(&o, n, P9_RSTATFS, 8);
+        assert_eq!(b.len(), 60);
+        assert_eq!(unpack_u32(b, 0), Ok((0x01021997, 4)));
+        assert_eq!(unpack_u64(b, 40), Ok((5, 48)), "ffree");
+        assert_eq!(unpack_u64(b, 48), Ok((6, 56)), "fsid");
+        assert_eq!(unpack_u32(b, 56), Ok((255, 60)));
+
+        let n = build_rlock(&mut o, 9, P9_LOCK_SUCCESS).unwrap();
+        assert_eq!(body_of(&o, n, P9_RLOCK, 9), [0]);
+        let n = build_rgetlock(&mut o, 10, P9_LOCK_TYPE_UNLCK, 1, 2, 3, b"id").unwrap();
+        let b = body_of(&o, n, P9_RGETLOCK, 10);
+        assert_eq!(b.len(), 1 + 8 + 8 + 4 + 2 + 2);
+        assert_eq!(b[0], P9_LOCK_TYPE_UNLCK);
+        assert_eq!(unpack_str(b, 21), Ok((&b"id"[..], 25)));
+    }
+
+    #[test]
+    fn a_reply_that_does_not_fit_is_refused() {
+        let q = Qid::default();
+        let mut o = [0u8; P9_HDR_LEN + P9_QID_LEN + 3];
+        assert!(build_rlcreate(&mut o, 1, &q, 0).is_err());
+        let mut o = [0u8; P9_HDR_LEN + 59];
+        assert!(build_rstatfs(&mut o, 1, &Statfs::default()).is_err());
+        let mut o = [0u8; P9_HDR_LEN + 2 + 3];
+        assert!(build_rreadlink(&mut o, 1, b"four").is_err());
+        assert_eq!(build_rreadlink(&mut o, 1, b"abc"), Ok(P9_HDR_LEN + 5));
+    }
+
+    #[test]
+    fn rgetattr_attr_carries_every_field_in_the_kernels_order() {
+        let mut o = [0u8; 300];
+        let a = Attr {
+            valid: P9_GETATTR_BASIC | P9_GETATTR_BTIME,
+            qid: Qid {
+                kind: P9_QTFILE,
+                version: 1,
+                path: 2,
+            },
+            mode: 0o100600,
+            uid: 1000,
+            gid: 1000,
+            nlink: 1,
+            rdev: 3,
+            size: 4,
+            blksize: 5,
+            blocks: 6,
+            atime: (7, 8),
+            mtime: (9, 10),
+            ctime: (11, 12),
+            btime: (13, 14),
+            gen: 15,
+            data_version: 16,
+        };
+        let n = build_rgetattr_attr(&mut o, 2, &a).unwrap();
+        let b = body_of(&o, n, P9_RGETATTR, 2);
+        assert_eq!(b.len(), P9_RGETATTR_BODY_LEN);
+        assert_eq!(P9_RGETATTR_BODY_LEN, 153);
+        assert_eq!(unpack_u64(b, 0), Ok((0xFFF, 8)));
+        assert_eq!(unpack_u32(b, 8 + P9_QID_LEN), Ok((0o100600, 25)));
+        // The fifteen u64s after the security trio: nlink first, data_version last.
+        let mut off = 8 + P9_QID_LEN + 12;
+        for want in 1..=16u64 {
+            if want == 2 {
+                continue; // the qid's path, not a u64 of the tail
+            }
+            let (v, p) = unpack_u64(b, off).unwrap();
+            assert_eq!(v, want, "the u64 at {off}");
+            off = p;
+        }
+        assert_eq!(off, b.len());
+    }
+
+    #[test]
+    fn the_plain_rgetattr_is_the_full_one_with_its_other_fields_zero() {
+        let q = Qid {
+            kind: P9_QTDIR,
+            version: 0,
+            path: 9,
+        };
+        let mut plain = [0u8; 300];
+        let n = build_rgetattr(&mut plain, 3, 0xF, &q, 0o40700, 1000, 1000, 2, 0).unwrap();
+        let mut full = [0u8; 300];
+        let a = Attr {
+            valid: 0xF,
+            qid: q,
+            mode: 0o40700,
+            uid: 1000,
+            gid: 1000,
+            nlink: 2,
+            ..Attr::default()
+        };
+        assert_eq!(build_rgetattr_attr(&mut full, 3, &a), Ok(n));
+        assert_eq!(plain[..n], full[..n]);
+        assert_eq!(n, P9_HDR_LEN + P9_RGETATTR_BODY_LEN);
+    }
+
+    // Every message number this crate names is the kernel's: read against the wire enum the
+    // kernel's client sends (kernel/include/thylacine/9p_wire.h), so neither can move alone.
+    // Tauth/Rauth, which the kernel never sends, are 9P2000's.
+    #[test]
+    fn the_message_numbers_are_the_kernels() {
+        let h = include_str!("../../../../kernel/include/thylacine/9p_wire.h");
+        let kernel = |name: &str| -> Option<u8> {
+            h.lines().find_map(|l| {
+                let mut w = l.split_whitespace();
+                if w.next() != Some("#define") || w.next() != Some(name) {
+                    return None;
+                }
+                w.next()?
+                    .trim_matches(|c| c == '(' || c == ')')
+                    .trim_end_matches('u')
+                    .parse()
+                    .ok()
+            })
+        };
+        let ours: &[(&str, u8)] = &[
+            ("P9_TVERSION", P9_TVERSION),
+            ("P9_RVERSION", P9_RVERSION),
+            ("P9_TATTACH", P9_TATTACH),
+            ("P9_RATTACH", P9_RATTACH),
+            ("P9_TWALK", P9_TWALK),
+            ("P9_RWALK", P9_RWALK),
+            ("P9_TLOPEN", P9_TLOPEN),
+            ("P9_RLOPEN", P9_RLOPEN),
+            ("P9_TREAD", P9_TREAD),
+            ("P9_RREAD", P9_RREAD),
+            ("P9_TWRITE", P9_TWRITE),
+            ("P9_RWRITE", P9_RWRITE),
+            ("P9_TCLUNK", P9_TCLUNK),
+            ("P9_RCLUNK", P9_RCLUNK),
+            ("P9_TGETATTR", P9_TGETATTR),
+            ("P9_RGETATTR", P9_RGETATTR),
+            ("P9_TREADDIR", P9_TREADDIR),
+            ("P9_RREADDIR", P9_RREADDIR),
+            ("P9_RLERROR", P9_RLERROR),
+            ("P9_TFLUSH", P9_TFLUSH),
+            ("P9_RFLUSH", P9_RFLUSH),
+            ("P9_TSTATFS", P9_TSTATFS),
+            ("P9_RSTATFS", P9_RSTATFS),
+            ("P9_TLCREATE", P9_TLCREATE),
+            ("P9_RLCREATE", P9_RLCREATE),
+            ("P9_TSYMLINK", P9_TSYMLINK),
+            ("P9_RSYMLINK", P9_RSYMLINK),
+            ("P9_TMKNOD", P9_TMKNOD),
+            ("P9_RMKNOD", P9_RMKNOD),
+            ("P9_TRENAME", P9_TRENAME),
+            ("P9_RRENAME", P9_RRENAME),
+            ("P9_TREADLINK", P9_TREADLINK),
+            ("P9_RREADLINK", P9_RREADLINK),
+            ("P9_TSETATTR", P9_TSETATTR),
+            ("P9_RSETATTR", P9_RSETATTR),
+            ("P9_TFSYNC", P9_TFSYNC),
+            ("P9_RFSYNC", P9_RFSYNC),
+            ("P9_TLOCK", P9_TLOCK),
+            ("P9_RLOCK", P9_RLOCK),
+            ("P9_TGETLOCK", P9_TGETLOCK),
+            ("P9_RGETLOCK", P9_RGETLOCK),
+            ("P9_TLINK", P9_TLINK),
+            ("P9_RLINK", P9_RLINK),
+            ("P9_TMKDIR", P9_TMKDIR),
+            ("P9_RMKDIR", P9_RMKDIR),
+            ("P9_TRENAMEAT", P9_TRENAMEAT),
+            ("P9_RRENAMEAT", P9_RRENAMEAT),
+            ("P9_TUNLINKAT", P9_TUNLINKAT),
+            ("P9_RUNLINKAT", P9_RUNLINKAT),
+            ("P9_TWEFT", P9_TWEFT),
+            ("P9_RWEFT", P9_RWEFT),
+            ("P9_TWEFTIO", P9_TWEFTIO),
+            ("P9_RWEFTIO", P9_RWEFTIO),
+        ];
+        assert!(
+            ours.len() >= 50,
+            "the list is every P9_T*/P9_R* the crate names"
+        );
+        for (name, v) in ours {
+            assert_eq!(kernel(name), Some(*v), "{name}");
+        }
+        assert_eq!((P9_TAUTH, P9_RAUTH), (102, 103));
     }
 
     #[test]

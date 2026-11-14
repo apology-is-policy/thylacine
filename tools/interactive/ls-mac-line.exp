@@ -18,6 +18,9 @@
 #      held connection's reads fail, the session's mount fails, and a new connect fails at once.
 #   5. A new app connects: the driver sends HELLO again and a new connect works.
 #
+# THYLACINE_MAC_APP=<the thylacine-mac binary> runs the app itself in the fake's place, its
+# pasteboard in memory (--snarf-memory) and its record (--line-log) in the fake's words.
+#
 # Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
 # it: the serial stream arrives in pieces, and an open-ended `([0-9]+)` matches the first piece.
 
@@ -31,6 +34,12 @@ catch {file delete -force $::mac_sock $::mac_log}
 set ::env(THYLACINE_MAC_LINE) $::mac_sock
 
 proc fake_start {} {
+    if {[info exists ::env(THYLACINE_MAC_APP)] && $::env(THYLACINE_MAC_APP) ne ""} {
+        set ::fake_pid [exec $::env(THYLACINE_MAC_APP) --mac-line $::mac_sock --line-log $::mac_log \
+            --snarf-memory $::mac_text >>& $::mac_log.err &]
+        lc_step "thylacine-mac started (pid $::fake_pid)"
+        return
+    }
     set ::fake_pid [exec python3 [file join $::lc_repo tools mac-app-fake.py] \
         --socket $::mac_sock --log $::mac_log --snarf $::mac_text >>& $::mac_log.err &]
     lc_step "mac-app-fake started (pid $::fake_pid)"

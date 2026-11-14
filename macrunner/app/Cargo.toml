@@ -7,6 +7,9 @@ license = "GPL-3.0-only"
 description = "Thylacine for Mac: the window that shows the guest (docs/MAC-RUNNER.md)"
 
 [dependencies]
+# The line to the Mac's framing and 9P codec, the same source the guest builds (docs/MAC-RUNNER.md 4.4).
+macline = { path = "../../usr/lib/macline" }
+ninep = { path = "../../usr/lib/ninep" }
 zbus = { version = "6.2", features = ["p2p"] }
 libc = "0.2"
 objc2 = "0.6"

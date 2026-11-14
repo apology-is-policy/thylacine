@@ -332,6 +332,19 @@ Its `E_*` errnos are what a server answers in `Rlerror`. `E_STALE` is the one to
 a client must tell a dead handle from a lost link, since the kernel reads `E_BADF` as `EIO`
 (vote 66).
 
+It speaks every message the kernel's client sends (2026-11-14, for the Mac app's server,
+[[sub-mac-app-line]]), as well as the read side:
+- the creating and naming half: Tlcreate, Tmkdir, Tsymlink, Tmknod, Tlink, Trename, Trenameat
+  and Tunlinkat;
+- Treadlink, Tsetattr, Tstatfs and Tfsync, with Tlock and Tgetlock.
+Each layout is the kernel's builder's (`kernel/9p_wire.c`), field for field. A name such a
+message carries is one path element, never empty and at most 255 bytes, and the parser refuses
+any other. `build_rgetattr_attr` carries every Rgetattr field (times, blocks, rdev), and
+`build_rgetattr` is its case with those zero. Each reply has the exact length the kernel's
+strict parser takes (a host test per shape). A host test reads every message number the crate
+names against the kernel's header, so neither can move alone. Mutants of the layouts each turn
+a test red (aux-gate resid/ic-mut.py).
+
 It is a crate of its own, `usr/lib/ninep`, which libthyla-rs re-exports as
 `libthyla_rs::ninep`, so no caller names it differently. libthyla-rs cannot be
 built for the host (its `_start` is ELF assembly), so a test inside it would run

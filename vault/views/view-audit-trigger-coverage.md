@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**253 declared surfaces · 245 covered by a hard-audit dossier · 8 soft-owned · 0 unowned · 0 unparsed · 27 cited path(s) that do not resolve.**
+**254 declared surfaces · 245 covered by a hard-audit dossier · 9 soft-owned · 0 unowned · 0 unparsed · 27 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -84,6 +84,7 @@ changed on main? — is the next increment, tracked as task #169.
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Rust registered payload ownership | soft-owned | owned by [[sub-libthyla-rs]], none `audit: hard` |
 | The Mac app's boundary with QEMU: the display listener, the upload, the keys (the Mac runn… | soft-owned | owned by [[sub-libhalcyon]], none `audit: hard` |
+| The Mac app's end of the line: the 9P2000.L server over snarf and the shared folders (the … | soft-owned | owned by [[sub-libthyla-rs]], none `audit: hard` |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint marker + the img cl… | soft-owned | owned by [[sub-substrate-remote-host]], none `audit: hard` |
 <!-- generated:end -->

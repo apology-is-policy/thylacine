@@ -1,6 +1,8 @@
 // Thylacine for Mac, first window: attach to a QEMU started with `-display dbus,p2p=on` and show the
 // guest. usage: thylacine-mac --attach <qmp socket>; the other arguments are a test's (view::Options).
+// --mac-line serves the line to the Mac (interop) beside the window, or alone without --attach.
 mod display;
+mod interop;
 mod keymap;
 mod view;
 // The guest's own rule for a scale, compiled into the tests from its source, so that what the
@@ -12,6 +14,8 @@ mod view;
 mod guest_scale;
 
 use std::cell::OnceCell;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -289,6 +293,11 @@ fn main() {
     let mut qmp = None;
     let mut opts = Options::default();
     let mut activate = true;
+    let mut mac_line: Option<PathBuf> = None;
+    let mut shares = Vec::new();
+    let mut line_log: Option<PathBuf> = None;
+    let mut memory_snarf: Option<String> = None;
+    let mut line_once = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -296,6 +305,34 @@ fn main() {
                 qmp = args.get(i + 1).cloned();
                 i += 1;
             }
+            "--mac-line" => {
+                mac_line = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--share" => {
+                match args.get(i + 1).map(|s| interop::Share::parse(s)) {
+                    Some(Ok(s)) => shares.push(s),
+                    Some(Err(e)) => {
+                        eprintln!("thylacine-mac: --share: {e}");
+                        std::process::exit(2);
+                    }
+                    None => {
+                        eprintln!("thylacine-mac: --share takes <name>=<path>[:ro]");
+                        std::process::exit(2);
+                    }
+                }
+                i += 1;
+            }
+            "--line-log" => {
+                line_log = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            // A test's: snarf is this text in memory, and the person's pasteboard is not touched.
+            "--snarf-memory" => {
+                memory_snarf = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--line-once" => line_once = true,
             "--stats" => opts.print_stats = true,
             "--no-activate" => activate = false,
             "--exit-after" => {
@@ -351,10 +388,59 @@ fn main() {
         }
         i += 1;
     }
+    let line = match mac_line {
+        Some(socket) => {
+            let log = match interop::Log::open(line_log.as_deref()) {
+                Ok(l) => Arc::new(l),
+                Err(e) => {
+                    eprintln!("thylacine-mac: --line-log: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let pasteboard: Arc<dyn interop::Pasteboard> = match memory_snarf {
+                Some(text) => Arc::new(interop::MemoryPasteboard::new(&text)),
+                None => Arc::new(interop::SystemPasteboard),
+            };
+            Some((
+                interop::Config {
+                    socket,
+                    shares,
+                    once: line_once,
+                },
+                pasteboard,
+                log,
+            ))
+        }
+        None => {
+            if !shares.is_empty() || line_log.is_some() || memory_snarf.is_some() || line_once {
+                eprintln!("thylacine-mac: --share, --line-log, --snarf-memory and --line-once need --mac-line");
+                std::process::exit(2);
+            }
+            None
+        }
+    };
     let Some(qmp) = qmp else {
-        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--scripted-capture] [--scripted-click <x>,<y>] [--scripted-captured-click <x>,<y>,<dx>,<dy>] [--resize-to <w>x<h>]");
+        // No window: the line alone.
+        if let Some((cfg, pasteboard, log)) = line {
+            if let Err(e) = interop::serve(cfg, pasteboard, log) {
+                eprintln!("thylacine-mac: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        eprintln!("usage: thylacine-mac --attach <qmp socket> [--stats] [--no-activate] [--exit-after <s>] [--dump <ppm>] [--scripted-input] [--scripted-bar] [--scripted-capture] [--scripted-click <x>,<y>] [--scripted-captured-click <x>,<y>,<dx>,<dy>] [--resize-to <w>x<h>] [--mac-line <socket> [--share <name>=<path>[:ro]]... [--line-log <path>] [--snarf-memory <text>] [--line-once]]");
         std::process::exit(2);
     };
+    if let Some((cfg, pasteboard, log)) = line {
+        std::thread::Builder::new()
+            .name("mac line".into())
+            .spawn(move || {
+                if let Err(e) = interop::serve(cfg, pasteboard, log) {
+                    eprintln!("thylacine-mac: the line to the Mac: {e}");
+                }
+            })
+            .expect("a thread for the line");
+    }
     let mtm = MainThreadMarker::new().expect("the main thread");
     // The first +sharedApplication decides the class of the one application object.
     let app: Retained<NSApplication> =

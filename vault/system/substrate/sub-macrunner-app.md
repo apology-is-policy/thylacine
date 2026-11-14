@@ -271,8 +271,10 @@ exists, where the two reports of one command are handed over in one pass of
 QEMU's input layer. The place stays in the second command for a tablet that
 is bound and was not found to be (one with another name): there the press
 is still one report with its place. `axis` is exact only against that one line
-of the compositor; a unit test reads `usr/tapestryd/src/main.rs` and fails
-when the line is no longer there.
+of the compositor, `pointer::place` in `usr/tapestryd/src/pointer.rs`. A unit
+test reads it there, and the call in `main.rs` that places both axes with it,
+and fails when either is no longer there. It read `main.rs` alone until
+2026-11-14, and failed unseen for a day after 39d8ca95b moved the line.
 
 **A release QEMU refuses.** QEMU refuses `input-send-event` for a machine
 that is stopped (`ui/input.c`, "VM not running"), and by then the view has
@@ -690,6 +692,9 @@ every step of a drag is a mode the guest sets at every step.
 - `tools/run-vm.sh`'s `app` and `dbus` display modes ([[sub-substrate-machine]]).
 - The guest sees a virtio keyboard, a virtio tablet and gpu0 through QEMU; the
   app knows nothing of the guest.
+- The line to the Mac ([[sub-mac-app-line]]): `--mac-line <socket>` serves it
+  beside the window, on its own thread, or alone without `--attach`; `--share`,
+  `--line-log`, `--snarf-memory` and `--line-once` are its arguments.
 
 ## Caveats
 

@@ -51,6 +51,15 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   - `ls-mac-line` gained the session's leg: the attach made at login carries the principal `id`
     names, `cat /mnt/mac/snarf` reads the app's text, `stat` shows the user as owner, and with
     the app gone the session's mount fails.
+- **I-c, the app's end of the line** (`macrunner/app/src/interop`, [[sub-mac-app-line]]). The app
+  connects to QEMU's socket, speaks `macline` as `End::App`, and serves each channel's 9P2000.L
+  session on its own thread: `snarf` (the pasteboard, NSPasteboard) and `folders/<name>/` (each
+  `--share`, read-only or not), every host path walked one name at a time with O_NOFOLLOW_ANY.
+  Ownership is the attacher's, a read-only share answers EROFS, errnos are Linux's, and POSIX
+  locks are arbitrated among the guest's owners: the kernel names an owner in every Tlock and
+  leaves the arbitration to the server (kernel/dev9p.c's lock path), so a stub would have lied.
+  `usr/lib/ninep` gained the rest of what the kernel's client sends. `ls-mac-line` takes
+  `THYLACINE_MAC_APP` to run the app in the fake's place.
 
 ### Wrong turns, and what caught each
 
@@ -75,6 +84,19 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   - mutant C10 (a name for a port never added) survived until a test named an unadded port;
   - quaestor's render wanted an abi-boot-banner line for the new scenario;
   - the dossier gate wanted sub-warden beside the warden manifest.
+- **I-c's own.** macOS refuses O_NOFOLLOW_ANY beside O_NOFOLLOW (EINVAL): every walk below one
+  level failed, and the folder and rename tests caught it before anything ran against a guest.
+  The first mutant pass found two rules no test knew: the message numbers (a renumbered
+  Trenameat stayed green; a host test now reads each number against the kernel's header) and a
+  directory check before each walk step that the no-follow open already makes (removed). A
+  feared gap was not one: the guest's errno registry names no EROFS or EFBIG, and
+  docs/ERRORS.md already says a server's errno crosses the kernel by value.
+- **An app test red since 39d8ca95b.** The app's full suite, run for this chunk, had one
+  failure outside it: the pin of the compositor's axis arithmetic still read
+  `usr/tapestryd/src/main.rs`, and 39d8ca95b (2026-11-13) had moved that arithmetic into
+  `pointer::place`. Nothing routine runs the app's `cargo test` (tools/test-rust.sh covers the
+  usr workspace only), so it failed unseen for a day. The pin now reads `pointer.rs` and the
+  call in main.rs; a changed `place` turns it red. 104 of 104 pass.
 
 ### Evidence
 
@@ -114,6 +136,11 @@ Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throug
   - the gate image as committed, baked again: green again, all five legs, in 97 s.
   The mac was released at the run's end. 7584af216, a335f4541 and 81f009549 are pushed to
   GitHub aux-3-mac (verified with ls-remote); Codeberg is behind.
+- **I-c on the host.** `ninep` 25 host tests; the app's `interop` 29, each against real
+  directories and the session request by request in the kernel's layouts. 24 mutants (aux-gate resid/ic-mut.py, `IC-MUT DONE bad=0`) each turn a host test red: 7 of ninep's layouts and numbers, 17 of the server's rules.
+  `ls-mac-line` with the app in the fake's place, against the scripted guest (aux-gate
+  `scendry-mac`, resid/scendry-app-1.out): 2 runs green and 11 faults red, each at its own check,
+  the fake's verdicts exactly. The guest build checks (ninep, corvus, netd).
 
 ### Decided by the operator
 
@@ -125,12 +152,19 @@ In a guest (run 7, twice green): every leg of `ls-mac-line` -- the line's HELLO 
 session's mount attached as the user and read through, a program's walk with ownership checked
 against `id`, the app going away under a held connection and the session's mount, and a new
 app. Each of the three controls turned it red at its own leg. The Mac's end in all of it is
-tools/mac-app-fake.py, not the app: the app's own line and server are I-c. None of it is audited
-(round R5).
+tools/mac-app-fake.py, not the app. The app's line and server (I-c) are shown on the host only:
+against real directories, and against the scripted guest with the fake's verdicts. No guest has
+spoken to the app, and no test has driven the shared folders through the guest's kernel. None of
+it is audited (round R5).
 
 ### Open
 
-- I-c: the app's mac1 line and 9P2000.L server; I-d: the power key and Quit; then round R5.
+- A guest run with the app in the fake's place (`THYLACINE_MAC_APP`), and a scenario of the
+  shared folders through the guest's kernel: walk, read, write, create, rename, remove, a link
+  read as a link, a read-only share's EROFS.
+- The app's host tests in a routine gate: tools/test-rust.sh runs the usr workspace and not
+  macrunner/app, whose pin failed unseen for a day.
+- I-d: the power key and Quit; then round R5.
 
 ## 2026-11-13 (aux): the input station's residue, /mnt/mac fixed by four votes, and a blank restore told to the compositor
 

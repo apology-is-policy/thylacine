@@ -1983,12 +1983,14 @@ mod tests {
     // an axis value another way, this fails, and `axis` and `guest_pixel_of` follow it.
     #[test]
     fn the_compositor_still_makes_a_pixel_of_an_axis_value_this_way() {
+        // The arithmetic is tapestryd's pointer::place, and its main loop places both axes with it.
+        let pointer = include_str!("../../../usr/tapestryd/src/pointer.rs");
         let compositor = include_str!("../../../usr/tapestryd/src/main.rs");
-        for line in [
-            "(ax.min(mx) as u64 * dw.saturating_sub(1) as u64 / mx.max(1) as u64) as u32;",
-            "(ay.min(my) as u64 * dh.saturating_sub(1) as u64 / my.max(1) as u64) as u32;",
+        for (source, line) in [
+            (pointer, "(value.min(max) as u64 * span.saturating_sub(1) as u64 / max.max(1) as u64) as u32"),
+            (compositor, "comp.ptr_move(pointer::place(ax, mx, dw), pointer::place(ay, my, dh), mask)"),
         ] {
-            assert_eq!(compositor.matches(line).count(), 1, "{line}");
+            assert_eq!(source.matches(line).count(), 1, "{line}");
         }
     }
 
