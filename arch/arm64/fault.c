@@ -1051,8 +1051,6 @@ static enum fault_result file_install_locked(struct Proc *p,
             free_pages(newpg, 0);
             return FAULT_UNHANDLED_USER; // the payer has no headroom: refused as a leaf is
         }
-        // A hand-over this charge made: adopt before anything below can bail.
-        payer_adopt_if_due(p, vma, v);
 #ifdef KERNEL_TESTS
         if (g_file_mint_probe_for_test) g_file_mint_probe_for_test(p, v);
 #endif
@@ -1062,13 +1060,15 @@ static enum fault_result file_install_locked(struct Proc *p,
         ? burrow_record_install(v, p->as, freq->slot, newpg, proc_resource_exempt(p), &resident)
         : pagemap_install(&v->pm, &v->lock, freq->slot, newpg, NULL,
                           proc_resource_exempt(p), &resident);
-    // The node charge can make the hand-over too: the payer's space died on
-    // another CPU after the page's charge. Adopt before any exit, as after it.
+    // Either charge can make the hand-over: the page's, or the nodes' when the
+    // payer's space died on another CPU after the page's. One adoption after
+    // both, before any exit, turns this space's mappings into payer mappings
+    // before any leaf of theirs is decided.
     if (v->payer_record) payer_adopt_if_due(p, vma, v);
     if (irc < 0) {
         free_pages(newpg, 0);
         burrow_mint_refund(v, minted);
-        return FAULT_UNHANDLED_USER;     // node OOM, or an impossible shape change; bail safe
+        return FAULT_UNHANDLED_USER;     // the payer cannot cover the nodes, a node OOM, or a shape change
     }
     if (irc == 1) {
         free_pages(newpg, 0);            // a sibling faulter won: discard the loser's freshly-read page
@@ -1247,6 +1247,9 @@ static struct page *file_cluster_install_slot(struct Proc *p, struct Burrow *v, 
         spin_unlock(&v->lock);
         if (have) return have;
         if (!burrow_mint_charge(v, p->as, exempt, 1)) { *spent = true; return NULL; }
+#ifdef KERNEL_TESTS
+        if (g_file_mint_probe_for_test) g_file_mint_probe_for_test(p, v);
+#endif
     }
     // Vote 124: a private image's nodes go through its record like its pages.
     // Only the faulting slot can lack any: the window lies inside one aligned

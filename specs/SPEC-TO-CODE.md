@@ -3656,15 +3656,18 @@ against that tree. The vault note is spec-payer.
   the hand-over, and the model, adopting at every charge, could not show the
   missing second adopt). The nodes (the shared arm's, vote 121; a private
   image's, vote 124) are charged the same way, inside the install (next row),
-  so the shared arm and the image's single fill adopt again after the install
-  (the cluster's faulting slot is followed by its first adopt, and its
-  read-ahead slots lack no node).
+  so the shared arm adopts again after the install and the image's single
+  fill adopts once, after it (audit round 38 F3: the adoption it also made
+  between the two charges was redundant); the cluster's faulting slot is
+  followed by its first adopt, and its read-ahead slots lack no node.
 - **`Install(sp)`** -> `burrow_record_install(v, p->as, slot, newpg, ..)` in
   the shared arm and in both image fills (`pagemap_install_paid` with the
   record as the node payer; a cached image, which has no record, passes
   `pagemap_install(.., NULL, ..)`): rc 0 the page is the
   Burrow's; rc 1 a peer won (in ANOTHER address space, possibly), so the loser
-  frees its page and `burrow_mint_refund(v, 1)` refunds whoever pays NOW. Then
+  frees its page and `burrow_mint_refund(v, 1)` refunds whoever pays NOW (the
+  image fills' loser arms: `demand_page.file_private_single_fill_loser_refunds`,
+  `..._cluster_loser_refunds`, audit round 38 F2). Then
   the leaf, at step 5: charged (`addrspace_charge_pages`) iff
   `!(vma->flags & VMA_FLAG_PAYER)`. A node the slot's path lacks is one more
   `Charge` -- `record_node_charge`, all the path's nodes or none, through

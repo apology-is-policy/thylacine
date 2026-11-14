@@ -754,7 +754,14 @@ space with a family and at least one shared anonymous mapping ORs the family rec
 into the join's caps and flags and is `shared`. The count is read first, with
 acquire. The unmap fold writes the family's taint into the space's record and only
 then lowers the count, with a release store. So a join that sees the count lowered
-also sees the fold. No VMA operation takes the count through zero while the bytes
+also sees the fold. The fold itself must see every stamp that covers bytes the
+space read before it unmapped them. A debugger writes a target only while holding
+it stopped, a stop needs the debug owner, and the attach stamps the target's family
+before it takes the slot, so the stamp happens before any write it covers. A full
+fence ahead of the fold orders the CPU's earlier user loads, a load of such a write
+among them, before the fold's family and taint reads (audit round 38 F4). The
+range's uninstall, a broadcast TLBI and DSB, gives the same order, but it sits in
+the caller. No VMA operation takes the count through zero while the bytes
 stay mapped:
 
 - a split inserts its pieces while the original still counts;

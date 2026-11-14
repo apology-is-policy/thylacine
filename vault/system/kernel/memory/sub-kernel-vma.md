@@ -44,7 +44,13 @@ the count (acquire), the family and `guards_ever` without this lock (audit round
 fold, never neither (an `mprotect` split shrinks the original and inserts the
 pieces, a merge removes a piece beside its counted survivor, so the count never
 passes through zero while the bytes stay mapped; a `MAP_FIXED` replace of the
-last shared piece is an unmap, then a map);
+last shared piece is an unmap, then a map). The fold sees every stamp that
+covers bytes this space read: a debugger writes a target only while holding it
+stopped, a stop needs the debug owner, and the attach stamps the family first;
+a full fence ahead of the fold orders this CPU's earlier user loads before its
+family and taint reads (audit round 38 F4 -- the range's uninstall, a broadcast
+TLBI and DSB, gives the same order, but the fence keeps the fold from relying
+on its caller);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain_in` tears the whole list down when the address
 space's last owner drops it.

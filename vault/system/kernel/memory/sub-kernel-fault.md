@@ -561,10 +561,18 @@ The nodes moved with the pages (2026-11-14; operator vote 124). The pagemap
 nodes a private image's slot's path lacks are charged through the same record,
 all of them or none (`burrow_record_install`), in both fills: a payer with
 room for the page but not its node is refused the fault, and the page's charge
-is refunded. The single fill runs `payer_adopt_if_due` a second time after the
-install, because the node charge can make the hand-over too (the payer's space
-died after the page's charge; `demand_page.file_private_node_hand_over_adopts`
-lapses it there through `g_file_mint_probe_for_test`). In the cluster only the
+is refunded. The single fill runs `payer_adopt_if_due` once, after the install
+and before any exit, because either charge can make the hand-over: the page's,
+or the node's when the payer's space died after the page's
+(`demand_page.file_private_node_hand_over_adopts` lapses it there through
+`g_file_mint_probe_for_test`; an adoption between the two charges would be
+redundant, audit round 38 F3). A fill that loses its slot to a racer between
+its page charge and its install serves the fault with the winner's page and
+refunds its own mint, in the single fill and at a cluster slot alike
+(`demand_page.file_private_single_fill_loser_refunds` and
+`demand_page.file_private_cluster_loser_refunds`: the probe, which fires after
+the page charge in both fills, installs the slot first; audit round 38 F2). In
+the cluster only the
 faulting slot can lack a node: the window lies inside one aligned
 `REVENANT_READAHEAD_PAGES` cluster, which divides a leaf's 512 slots (a
 `_Static_assert` pins it), and the faulting slot installs first; a refusal on a
