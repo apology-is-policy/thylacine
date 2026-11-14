@@ -2,14 +2,14 @@
 id: sub-kernel-burrow
 type: sub
 parent: moc-kernel-memory
-title: "The Burrow — a memory object with two refcounts and six backings"
-code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h", "kernel/test/test_burrow.c"]
+title: "The Burrow — a memory object with two refcounts and eight backings"
+code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h", "kernel/test/test_burrow.c", "kernel/test/test_shared_anon.c"]
 audit: hard
 guarded-by: [inv-i7, inv-i32, inv-i44]
-validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
+validated-by: [spec-burrow, spec-cow, spec-capacity, spec-payer, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-11-04
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -26,8 +26,10 @@ until *both* reach zero.
 
 ## Contract
 
-**Creation** is per-backing-type and there are six of them, each returning a
-Burrow with `handle_count = 1, mapping_count = 0`:
+**Creation** is per-backing-type, each constructor returning a Burrow with
+`handle_count = 1, mapping_count = 0` (the table is the general ones; HOSTMEM,
+a PCI host-memory window, is minted by `burrow_create_hostmem` from a held
+PCI object):
 
 | constructor | backing | shape |
 |---|---|---|
@@ -37,6 +39,7 @@ Burrow with `handle_count = 1, mapping_count = 0`:
 | `burrow_create_file` | a byte range of a file, via a pinned Spoor | **sparse** |
 | `burrow_create_anon_lazy` | anonymous, demand-zeroed | **sparse** |
 | `burrow_create_code` | anonymous, demand-zeroed — identical to lazy anon (B-2a, 2026-10-07; one contiguous chunk before) | **sparse** |
+| `burrow_create_anon_shared(size, payer, exempt)` | anonymous, demand-zeroed — lazy anon's backing, with a payer record naming the creating space (operator votes 117 + 119, 2026-11-14) | **sparse**, shared by fork |
 
 **Refcounting** is four calls: `burrow_ref`/`burrow_unref` on the handle side,
 `burrow_acquire_mapping` and the release on the mapping side — the VMA layer
@@ -71,6 +74,12 @@ pieces a protect cut, every refusal decided before the first release, and since
 B-1b speaking errno (`-T_E_NOMEM` for a hole, `-T_E_INVAL` for a mapping the
 release cannot apply to) for the phenotype `madvise` row and the Pouch wrapper
 -- the native `SYS_BURROW_DECOMMIT` still flattens to -1;
+`burrow_dontneed(p, vaddr, length)` (2026-11-14, the phenotype's
+`MADV_DONTNEED`) is the same core, `burrow_advise_release_in`, with shared
+ranges admitted: over an ANON_SHARED mapping it only uninstalls this space's
+leaves (a sharer's refunded, [[sub-kernel-vma]]) and releases no page, so the
+next touch maps the page that is there; the decommit (`MADV_FREE`, the native
+call) still refuses a shared range;
 `burrow_release_lazy_range_in(as, v, lo, hi)` is the per-mapping half the
 decommit and the range detach both loop over, returning the slots it released.
 `burrow_lazy_resident_count` (the tests' reader; production reads `burrow_lazy_footprint`) is O(1) (the pagemap keeps the count) and
@@ -143,13 +152,14 @@ deliberately so: it is the tripwire for a future caller that frees without it.
 ### Eager and sparse are two different lifetimes
 
 Two types hold **one contiguous chunk** in `pages` with an `order`; the free
-arm calls `free_pages` once. Three types hold a **sparse per-page slot table** --
+arm calls `free_pages` once. Four types hold a **sparse per-page slot table** --
 the pagemap `pm` ([[sub-kernel-pagemap]]; B-1a' replaced the flat `filepages`
 array), each slot absent until faulted in, its nodes allocated as slots fill and
 charged to the mapping address space for ANON_LAZY and CODE (uncharged for FILE, the
-Image cache's posture; a FILE map's PAGES are charged to each space that maps
+Image cache's posture, and for ANON_SHARED, whose map outlives any one sharer; a
+FILE map's PAGES are charged to each space that maps
 them, per leaf, by the fault -- [[sub-kernel-fault]]) -- and the free arm destroys it, putting every resident
-page (a plain free for FILE, a COW put for ANON_LAZY and CODE) and freeing the nodes.
+page (a plain free for FILE and ANON_SHARED, a COW put for ANON_LAZY and CODE) and freeing the nodes.
 
 **CODE moved from the first group to the second at B-2a (2026-10-07).** A JIT
 region is a reservation -- JavaScriptCore reserves its whole pool at startup
@@ -170,7 +180,7 @@ That split is the reason the type-dispatched free arm exists at all, and it is
 also why the per-type **liveness check** on every mapping acquire reads a
 different field per type: `pages` for the contiguous types, the held hardware
 object for the foreign ones, the pinned Spoor for file-backed, `pagemap_live`
-for lazy-anon. For the sparse types an EMPTY map is the normal freshly-mapped
+for lazy anon, code and shared anon. For the sparse types an EMPTY map is the normal freshly-mapped
 (or fully decommitted) state, not a use-after-free — so their check is on the
 map's liveness, not its contents.
 
@@ -367,44 +377,115 @@ drop that frees the region. That serves an eager region with one holder. A
 private FILE Burrow (vote 114) needs more. Its pages are charged as faults
 mint them, possibly by a forked holder that cannot name the payer by id, and
 its last mapping may be any holder's. So it carries its own record:
-`file_private`, `file_payer`, `file_charge_pages`, `file_payer_exempt`, and
-the `file_paid_next`/`file_paid_prev` links of the payer's list
-`AddrSpace.file_paid`. Every field but `file_private` lives under one global
-leaf lock, `g_file_payer_lock`. It is global because a dying space must reach
+`payer_record`, `payer`, `payer_charge_pages`, `payer_exempt`, and
+the `paid_next`/`paid_prev` links of the payer's list
+`AddrSpace.paid_burrows`. Every field but `payer_record` lives under one global
+leaf lock, `g_payer_lock`. It is global because a dying space must reach
 every record that names it without taking the Burrows' locks in some order,
 and it costs nothing visible because a mint is a 9P read away. Nothing is
 acquired inside it; the charge and refund are the space counter's CAS loops.
 
-The invariant: `file_charge_pages` is the Burrow's resident page count plus at
-most the one page a fill has charged and is installing (charge and install in
-one hold of the faulting space's `as->lock`, no sleep between), and a non-NULL
-`file_payer` has paid exactly `file_charge_pages`.
+The invariant: `payer_charge_pages` is the Burrow's resident page count (for
+ANON_SHARED, plus its pagemap's node pages, operator vote 121) plus at
+most one page per address space that a fill has charged and is installing
+(charge and install in one hold of the faulting space's `as->lock`, no sleep
+between -- one in flight per space; a shared anonymous Burrow, below, can have
+several spaces mid-mint at once), and a non-NULL `payer` has paid exactly
+`payer_charge_pages`. The law is [[spec-payer]]'s, model-checked since
+2026-11-14 for both classes.
 
-- `burrow_file_set_payer` marks the Burrow private and links the payer, once,
-  before the Burrow is published.
-- `burrow_file_mint_charge` charges up to `want` pages to the payer, cut to its
+- `burrow_payer_set` marks the Burrow record-paid and links the payer, once,
+  before the Burrow is published. It admits FILE and ANON_SHARED only and
+  extincts on any other type.
+- `burrow_mint_charge` charges up to `want` pages to the payer, cut to its
   headroom, and adds them to the record. A lapsed record is first handed to the
   faulter, which is charged the whole residency as well. The cap binds unless
   both the payer and the faulter are exempt (audit round 34 F6: the payer's
   recorded exemption alone used to waive it for any holder). Callers charge a
   page right before installing it, never across a read (round 34 F1).
-- `burrow_file_mint_headroom` answers how many of `want` the same charge could
+- `burrow_mint_headroom` answers how many of `want` the same charge could
   take now, charging nothing; the cluster sizes its window with it.
-- `burrow_file_mint_refund` takes back mints that did not end resident, from
+- `burrow_record_install` (ANON_SHARED's fault) installs a minted page with
+  the nodes its slot's path lacks charged through the record as well, all of
+  them or none (`pagemap_install_paid` with the record as the node payer), on
+  a mint's terms: the same payer choice, so a node charge can hand a lapsed
+  record over and the caller adopts after it too; a node a racer made
+  unnecessary is refunded like a loser's mint. No path takes a slot out of a
+  record-paid Burrow, so its nodes live until `pagemap_destroy`, and the free
+  refunds them with the record. A private image's nodes are still the
+  pool's.
+- `burrow_mint_refund` takes back mints that did not end resident, from
   the record and from whoever pays now. A hand-over charged the new payer the
   whole record, so the refund always belongs to the current payer.
-- The FILE free arm (`burrow_file_payer_release`) refunds the record whole to
-  the current payer and unlinks it.
-- `burrow_file_payers_lapse` runs in `addrspace_destroy` after the drain
+- The FILE and ANON_SHARED free arms (`burrow_payer_release`) refund the
+  record whole to the current payer and unlink it.
+- `burrow_payers_lapse` runs in `addrspace_destroy` after the drain
   ([[sub-kernel-addrspace]]). Every record still naming the dying space drops
   its payer and keeps its count, so the pointer never outlives the descriptor,
   and the next mint hands the record over.
 - `burrow_map_in` marks a fresh mapping into the payer's space as a payer
-  mapping (`vma_file_payer_mark_fresh`, [[sub-kernel-vma]]).
+  mapping (`vma_payer_mark_fresh`, [[sub-kernel-vma]]).
 
 What a lapsed record leaves -- resident pages no live space pays for until a
 survivor mints -- is the residue ARCH section 28 I-32 states, bounded per
-survivor by the private images it maps.
+survivor by the private images and shared anonymous Burrows it maps.
+
+### Shared anonymous memory (2026-11-14; operator votes 117 + 119)
+
+`BURROW_TYPE_ANON_SHARED` is the memory a fork shares: the phenotype's
+`MAP_SHARED|MAP_ANONYMOUS` and a shared `/dev/zero` map through a descriptor
+open for writing ([[sub-kernel-vivarium]]). Its backing is ANON_LAZY's -- a
+pagemap, demand-zero -- and it is a TYPE, not a flag on a lazy Burrow,
+because every private-lazy test in the tree is `type == BURROW_TYPE_ANON_LAZY`
+(`vma_is_cow`, `burrow_clone_cow`, `lazy_release_admits`, `extend_admits`,
+populate, swap), so each refuses shared memory by default; the census before
+the build found every other admission (the share, Loom, weft) fails closed for
+a new type as well. Admitted where it was named on purpose: the acquire's
+liveness arm, the free, `reprotect_admits`, the DONTNEED arm of the release
+core, `burrow_lazy_resident_count` and the tests' slot reader.
+
+`burrow_create_anon_shared(size, payer, exempt)` is the lazy constructor with
+the type, then `burrow_payer_set(v, payer, exempt)`: vote 119 is "the creator
+pays", vote 118's record extended. The creating space pays every page any
+sharer mints; its own leaves are free (its mappings carry `VMA_FLAG_PAYER`);
+every other sharer pays one page per leaf it installs, refunded at every
+uninstall ([[sub-kernel-fault]], [[sub-kernel-vma]]). The payer's death lapses
+the record; the next sharer to mint is charged the residency plus its page and
+its mappings are adopted. An unmap never releases a shared page, whoever's
+mapping it is -- a sharer's unmap cannot know whether another space still maps
+the page -- so the pages go at the free and not before ([[inv-i7]]). The free
+arm refunds the record whole to whoever pays now (the last mapping may be any
+sharer's), then destroys the map with a plain page free: the pages are this
+Burrow's alone, because a fork shares the Burrow and never clones it
+([[sub-kernel-addrspace]]), and the map's nodes were charged to no space
+until operator vote 121 put them in the record.
+
+The witnesses are `kernel/test/test_shared_anon.c`, each driving the real
+paths (the phenotype's mint core, the fault arm, `addrspace_clone`, the munmap
+and madvise cores) and taking a floor under every count it compares back to a
+baseline: `shared_anon.fork_shares_the_page` (one physical page behind both
+leaves; the private map beside it, one variable away, gets a copy; the fork
+charges the child the private clone's footprint and nothing for the shared
+page),
+`creator_pays_every_mint`, `unmap_keeps_the_page`, `creator_death_hands_over`,
+`install_loser_refunds` (a probe runs the rival's fault between the loser's
+charge and its install), `protect_split_keeps_payer`,
+`dontneed_keeps_contents`, `refused_mint_refunds` (a full pool before the
+page, and before the map's first node, and a payer capped one page short of
+that node: each refusal takes the mint back), `nodes_paid_by_record` (vote
+121: across a two-level map the record and the payer's count hold every
+node, the child pays only its leaf, and the free refunds it all) and
+`node_charge_hand_over_adopts` (the payer lapses inside the mint, so the node
+charge makes the hand-over and the fault adopts again).
+
+**The share record (operator vote 120, 2026-11-14; DEBUG-FS-DESIGN 3.4).** An
+ANON_SHARED Burrow also carries `share_caps`, `share_guards` (the
+`PROC_IMAGE_GUARDS` bits) and `share_spaces`: the image guards of every Proc that
+maps it or ever has, from any address space, and whether a fork has mapped it
+into a second space. The fork's publication writes it and every image stamp on a
+space that maps it ORs into it, both with atomic ORs under `g_proc_table_lock`;
+the image join reads it, and `vma_remove_in` reads its taint to fold into the
+unmapping space. Nothing clears it. Its rules are [[sub-kernel-proc]]'s.
 
 ### The cross-Proc share
 
@@ -465,8 +546,8 @@ unchanged and merely costs the range a re-fault. A resident page keeps its slot
 and its charge across a protect to none, as Linux keeps a `PROT_NONE`
 mapping's contents; returning pages is `burrow_decommit`'s job.
 
-The precheck admits ANON, ANON_LAZY and FILE only (`reprotect_admits`, in
-[[sub-kernel-vma]]). CODE is the I-42 pair -- one charge, two aliases, neither
+The precheck admits ANON, ANON_LAZY, ANON_SHARED and FILE only
+(`reprotect_admits`, in [[sub-kernel-vma]]). CODE is the I-42 pair -- one charge, two aliases, neither
 a plain mapping -- and MMIO / DMA / HOSTMEM are [[inv-i34]] windows whose
 permissions were conferred, not chosen. X is never a target; the mechanism
 refuses it in the precheck and the boundary refuses it before any lookup.
@@ -489,6 +570,8 @@ which clears every cursor it set before it unlocks, on every outcome -- a
 cursor that outlived the clone would name a Burrow a failed child's drain may
 already have freed. Nothing else reads it ([[sub-kernel-addrspace]] owns the
 clone; `cow.clone_dedupes_split_pieces` counts exactly two holders per page).
+An ANON_SHARED Burrow never reaches the cursor: the fork maps the source
+itself, every piece of it ([[sub-kernel-addrspace]]).
 
 The clone's slot table is a `pagemap_mirror` (B-1a'): `burrow_clone_cow(src, exempt)`
 allocates the struct, an empty map of the same count, and a pool of exactly
@@ -573,7 +656,11 @@ reclaim-safe 1.
 
 [[inv-i7]] — the pages live iff at least one count is above zero. Both
 directions are failures: freeing early is a use-after-free, freeing late is a
-leak, and the model checks it as an iff for that reason.
+leak, and the model checks it as an iff for that reason. For ANON_SHARED that
+iff is the whole of the page lifetime: no unmap, decommit or DONTNEED releases
+a shared page, only the free does ([[spec-payer]]'s `NoFreedLeaf`; its
+`BUGGY_UNMAP_RELEASES` keeps every book exact while freeing a page a peer
+still maps, which is why the law is not an accounting one).
 
 [[inv-i32]] participates through `burrow_backing_pages`: this layer is where a
 Proc's page charge is computed, and the eager types charge occupancy at create

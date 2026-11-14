@@ -1694,6 +1694,35 @@ enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
     return VIV_TRANSLATED;
 }
 
+// Votes 117 + 119: the shared anonymous arms. The private arms' domains with
+// the map type swapped for MAP_SHARED -- the same prot list (PROT_EXEC is I-42's
+// and declines), the same exact flags equality, the same fd and offset the
+// shell has already normalized -- so the disjointness check still separates
+// all six on the flags word alone.
+enum viv_verdict vivarium_mmap_shared_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                  u64 fd, u64 offset) {
+    (void)addr;                                   // a hint, as on the private arm
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+    if (pr & ~VIV_MMAP_SHARED_ANON_PROT_ADMITTED) return VIV_FORWARD;
+    if (fl != VIV_MMAP_SHARED_ANON_FLAGS_ADMITTED) return VIV_FORWARD;
+    if ((s32)(u32)fd != -1)                        return VIV_FORWARD;
+    if (offset != 0)                               return VIV_FORWARD;
+    return VIV_TRANSLATED;
+}
+
+enum viv_verdict vivarium_mmap_fixed_shared_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                        u64 fd, u64 offset) {
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+    if (!fixed_addr_ok(addr))                            return VIV_FORWARD;
+    if (pr & ~VIV_MMAP_SHARED_ANON_PROT_ADMITTED)        return VIV_FORWARD;
+    if (fl != VIV_MMAP_FIXED_SHARED_ANON_FLAGS_ADMITTED) return VIV_FORWARD;
+    if ((s32)(u32)fd != -1)                              return VIV_FORWARD;
+    if (offset != 0)                                     return VIV_FORWARD;
+    return VIV_TRANSLATED;
+}
+
 #ifdef KERNEL_TESTS
 bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
                                  u64 fd, u64 offset) {
@@ -1705,6 +1734,10 @@ bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
     if (vivarium_mmap_fixed_file_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
         admitted++;
     if (vivarium_mmap_fixed_anon_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_shared_anon_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_fixed_shared_anon_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
         admitted++;
     return admitted <= 1;
 }
@@ -1740,6 +1773,8 @@ enum viv_verdict vivarium_madvise_decide(u64 advice, enum viv_madvise_kind *kind
     // Linux declares `int advice`: the register's high half is not the word.
     switch ((u32)advice) {
     case VIV_MADV_DONTNEED:
+        *kind_out = VIV_MADVISE_DONTNEED;
+        return VIV_TRANSLATED;
     case VIV_MADV_FREE:
         *kind_out = VIV_MADVISE_RELEASE;
         return VIV_TRANSLATED;

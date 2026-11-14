@@ -6,11 +6,11 @@ parent: moc-kernel-memory
 code: ["kernel/addrspace.c", "kernel/include/thylacine/addrspace.h", "kernel/cow.c", "kernel/include/thylacine/cow.h", "tools/test-addrspace-lifetime.py", "tools/host-tests/addrspace-lifetime.c"]
 audit: hard
 guarded-by: [inv-i44, inv-i32]
-validated-by: [spec-cow, spec-capacity, gate-smp]
+validated-by: [spec-cow, spec-capacity, spec-payer, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-10-27
+updated: 2026-11-14
 ---
 
 ## Shared retention design review
@@ -202,6 +202,7 @@ and never learns a fork was attempted.
 |---|---|---|
 | `ANON_LAZY` | **cloned ONCE per source Burrow**, both sides flagged COW | per-page ownership exists to break; the pieces a protect left all map the one clone (the cursor, below) |
 | `FILE` | **shared** | read-only by construction; sharing is the point of the I-36 Image cache |
+| `ANON_SHARED` | **shared, writable** (2026-11-14, votes 117 + 119) | sharing is the point: `MAP_SHARED` memory, the first writable share across a fork. The child's VMA names the parent's Burrow with the ceiling as its only flags -- no `VMA_FLAG_COW` (so `vma_is_cow` leaves the parent's writable leaves in place) and no `VMA_FLAG_PAYER` (the child is a sharer, paying its own leaves; [[sub-kernel-burrow]]'s payer record pays the pages). Nothing is charged at the fork |
 | `ANON` with a read-only CEILING | **shared** | one indivisible buddy block that nothing can EVER write -- the ceiling, not the current prot (B-1a) |
 | `ANON` with WRITE in its ceiling | **refused** | no per-page ownership for a break to take, and a raise could make it writable again |
 | guard | reproduced as a guard | dropping it silently deletes the child's stack guard page |
@@ -285,16 +286,23 @@ telemetry) / `guards_ever` and `caps_ever` (2026-10-08,
 [[dec-2026-10-08-image-holder-record]]: the image's record of the Procs that have
 left it -- their `NODUMP` / `NOTRACE` / `DEBUG_TAINTED` bits and their caps,
 ORed in at each departure and never cleared; the I-39 image join weighs them,
-[[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
+[[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`; since vote 120
+`guards_ever` also takes the taint of a shared anonymous Burrow the space unmaps,
+[[sub-kernel-vma]]) / `xshare` (vote 120: the space maps a shared anonymous
+Burrow that another space maps; set by `clone_one_vma`'s shared arm on the
+unpublished child space and on the parent's at the fork's publication, read by
+the image join, never cleared) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4)
 / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
-`file_paid` (vote 118: the private FILE Burrows whose payer record names this
-space, under `g_file_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
+`paid_burrows` (the record-paid Burrows whose payer record names this space --
+private images since vote 118, shared anonymous memory since vote 119 -- under
+`g_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
 The struct is 96 bytes. `addrspace_destroy` calls
-`burrow_file_payers_lapse` after `vma_drain_in`: the private images only this
+`burrow_payers_lapse` after `vma_drain_in`: the record-paid Burrows only this
 space held were freed by the drain (refunding a count that dies with the
-space), and every record left -- an image surviving in a fork's child --
-lapses before a kernel pin could let the descriptor outlive its owners.
+space), and every record left -- an image or a shared region surviving in a
+fork's child -- lapses before a kernel pin could let the descriptor outlive
+its owners. `page_count` includes the pages such a record charges this space.
 
 `context_id` lives here because **the ASID names a translation table**,
 which is what the allocator always semantically meant. Two Procs sharing
@@ -627,7 +635,7 @@ declaration and lifecycle, the release/destroy pair with it, and the actual
 and the device resets are host doubles, and its VMA list is real nodes the walk
 can follow. The drain double has the kernel's external linkage, so a mutant
 that removes destroy's only drain still compiles and meets its assertion; so
-does the double for `burrow_file_payers_lapse`, which refuses a lapse after
+does the double for `burrow_payers_lapse`, which refuses a lapse after
 the last lifetime drop (it compares the space against the last pointer the
 `kfree` double freed, and so refuses before it would read freed memory); the
 cases count one lapse to each destroy and, after their own drain checks, see

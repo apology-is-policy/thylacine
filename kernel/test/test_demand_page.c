@@ -2105,22 +2105,22 @@ void test_demand_page_file_private_charges_its_payer(void) {
     struct Burrow *v = v118_private_image(p->as);
     if (!v) { drop_proc(p); TEST_ASSERT(false, "a private image"); }
 
-    bool payer_set = burrow_file_payer_for_test(v) == p->as;
+    bool payer_set = burrow_payer_for_test(v) == p->as;
     int  mrc       = burrow_map(p, v, USER_VA, V118_PAGES * ONE_PAGE, VMA_PROT_READ);
     struct Vma *vma = vma_lookup(p, USER_VA);
-    bool flagged   = vma && (vma->flags & VMA_FLAG_FILE_PAYER);
+    bool flagged   = vma && (vma->flags & VMA_FLAG_PAYER);
     burrow_unref(v);                      // the mapping holds it now
     const bool floored = v118_floor(p->as);
     const u32 d0 = v118_data(p->as);
     const u32 f0 = p->as->file_pages;
 
     enum fault_result r0 = v118_fault(p, 0);
-    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_file_charge_pages_for_test(v);
+    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_payer_charge_pages_for_test(v);
     u32 d1 = v118_data(p->as), f1 = p->as->file_pages;
     enum fault_result r1 = v118_fault(p, 1);          // a resident hit
     u32 d2 = v118_data(p->as), f2 = p->as->file_pages;
     int drc1 = v118_detach(p, 0, 1);                   // a payer leaf: no refund
-    u32 d3 = v118_data(p->as), rec3 = burrow_file_charge_pages_for_test(v);
+    u32 d3 = v118_data(p->as), rec3 = burrow_payer_charge_pages_for_test(v);
     int drc2 = v118_detach(p, 1, V118_PAGES - 1);      // the last mapping: the free
     u32 d4 = v118_data(p->as);
     v118_unfloor(p->as, floored);
@@ -2158,7 +2158,7 @@ void test_demand_page_file_private_single_fill_charges(void) {
     struct Burrow *v = image_lookup_or_create(s, 0, ONE_PAGE, /*exec=*/false,
                                               BURROW_FILE_LIMIT_UNKNOWN, p->as, false);
     if (!v) { spoor_clunk(s); drop_proc(p); TEST_ASSERT(false, "a one-page private image"); }
-    bool payer_set = burrow_file_payer_for_test(v) == p->as;
+    bool payer_set = burrow_payer_for_test(v) == p->as;
     int  mrc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
     burrow_unref(v);
     const bool floored = v118_floor(p->as);
@@ -2166,7 +2166,7 @@ void test_demand_page_file_private_single_fill_charges(void) {
     int calls0 = g_rev_read_calls;
     enum fault_result r0 = v118_fault(p, 0);
     int reads = g_rev_read_calls - calls0;
-    u32 res = burrow_image_resident_count(v), rec = burrow_file_charge_pages_for_test(v);
+    u32 res = burrow_image_resident_count(v), rec = burrow_payer_charge_pages_for_test(v);
     u32 d1 = v118_data(p->as), f1 = p->as->file_pages;
     int drc = v118_detach(p, 0, 1);
     u32 d2 = v118_data(p->as);
@@ -2204,7 +2204,7 @@ void test_demand_page_file_private_readahead_clamps_to_headroom(void) {
     const u32 tables0 = p->as->pgtable_pages;
     p->as->page_budget = p->as->page_count + 5u;     // five pages of headroom
     enum fault_result r1 = v118_fault(p, 80);        // unaligned: its cluster starts at 64
-    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_file_charge_pages_for_test(v);
+    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_payer_charge_pages_for_test(v);
     bool win_starts_at_fault = burrow_file_slot_for_test(v, 64) == NULL &&
                                burrow_file_slot_for_test(v, 79) == NULL &&
                                burrow_file_slot_for_test(v, 80) != NULL &&
@@ -2213,12 +2213,12 @@ void test_demand_page_file_private_readahead_clamps_to_headroom(void) {
     bool at_cap = p->as->page_count == p->as->page_budget;
     u32 tables1 = p->as->pgtable_pages;
     enum fault_result r2 = v118_fault(p, 90);         // no headroom left
-    u32 res2 = burrow_image_resident_count(v), rec2 = burrow_file_charge_pages_for_test(v);
+    u32 res2 = burrow_image_resident_count(v), rec2 = burrow_payer_charge_pages_for_test(v);
     p->as->page_budget = budget0;
     // A cluster over a partly resident window: 80..84 are there, so 59 mint.
     const u32 d3a = v118_data(p->as);
     enum fault_result r3 = v118_fault(p, 100);
-    u32 res3 = burrow_image_resident_count(v), rec3 = burrow_file_charge_pages_for_test(v);
+    u32 res3 = burrow_image_resident_count(v), rec3 = burrow_payer_charge_pages_for_test(v);
     u32 d3 = v118_data(p->as);
     int drc = v118_detach(p, 0, V118_PAGES);
     drop_proc(p);
@@ -2263,7 +2263,7 @@ void test_demand_page_file_private_read_holds_no_charge(void) {
     enum fault_result r1 = v118_fault(p, 64);        // a three-page window
     int probe = g_rev_probe_ok;
     g_rev_probe_as = NULL;
-    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_file_charge_pages_for_test(v);
+    u32 res1 = burrow_image_resident_count(v), rec1 = burrow_payer_charge_pages_for_test(v);
     p->as->page_budget = budget0;
     int drc = v118_detach(p, 0, V118_PAGES);
     drop_proc(p);
@@ -2305,7 +2305,7 @@ void test_demand_page_file_private_exempt_payer_binds_holder(void) {
         q->as = child;
         r   = v118_fault(q, 0);                     // the holder is not exempt
         res = burrow_image_resident_count(v);
-        rec = burrow_file_charge_pages_for_test(v);
+        rec = burrow_payer_charge_pages_for_test(v);
         q->as = qown;
         p->as->page_budget = budget0;
         addrspace_unref(child);
@@ -2346,7 +2346,7 @@ void test_demand_page_file_private_holder_pays_leaves(void) {
     if (child) {
         q->as = child;
         cv = vma_lookup(q, USER_VA);
-        child_flagged = cv && (cv->flags & VMA_FLAG_FILE_PAYER);
+        child_flagged = cv && (cv->flags & VMA_FLAG_PAYER);
         dq0 = v118_data(child); fq0 = child->file_pages;
         rq  = v118_fault(q, 0);                       // the child mints
         dp1 = v118_data(p->as); dq1 = v118_data(child); fq1 = child->file_pages;
@@ -2404,12 +2404,12 @@ void test_demand_page_file_private_payer_death_hands_over(void) {
         struct Burrow *cb = cv ? cv->burrow : NULL;
         drop_proc(p);                                 // the payer dies
         p = NULL;
-        lapsed     = cb && burrow_file_payer_for_test(cb) == NULL;
-        rec_lapsed = cb ? burrow_file_charge_pages_for_test(cb) : 0;
+        lapsed     = cb && burrow_payer_for_test(cb) == NULL;
+        rec_lapsed = cb ? burrow_payer_charge_pages_for_test(cb) : 0;
         r2  = v118_fault(q, 64);                      // a mint into a lapsed record
-        handed  = cb && burrow_file_payer_for_test(cb) == child;
-        rec2    = cb ? burrow_file_charge_pages_for_test(cb) : 0;
-        flagged = cv && (cv->flags & VMA_FLAG_FILE_PAYER);
+        handed  = cb && burrow_payer_for_test(cb) == child;
+        rec2    = cb ? burrow_payer_charge_pages_for_test(cb) : 0;
+        flagged = cv && (cv->flags & VMA_FLAG_PAYER);
         old_leaf_gone = walk_to_l3_entry(child->pgtable_root, USER_VA + ONE_PAGE) == 0;
         dq2 = v118_data(child); fq2 = child->file_pages;
         r3  = v118_fault(q, 1);                       // re-faults as a payer leaf
@@ -2439,6 +2439,79 @@ void test_demand_page_file_private_payer_death_hands_over(void) {
     TEST_EXPECT_EQ(dq3, dq2, "as a payer leaf, free");
 }
 
+// Round 35 F2: a read-ahead mint can make the hand-over. The payer's space
+// dies between the faulting slot (charged to it) and the read-ahead (here the
+// probe lapses its records, as its teardown on another CPU would), so the first
+// read-ahead charge makes the faulter the payer. The fault adopts again before
+// it decides the faulting leaf: the new payer's leaves are all free and its
+// count is the record. The floor keeps the adoption's refund off the clamp.
+static struct AddrSpace *g_v118_lapse_as;
+static int               g_v118_lapse_fired;
+
+static void v118_lapse_probe(struct Proc *p, struct Burrow *v) {
+    (void)p; (void)v;
+    g_cluster_readahead_probe_for_test = NULL;       // once
+    g_v118_lapse_fired++;
+    burrow_payers_lapse(g_v118_lapse_as);
+}
+
+void test_demand_page_file_private_readahead_hand_over_adopts(void) {
+    struct Proc *p = make_proc();
+    struct Proc *q = make_proc();
+    if (!p || !q) { drop_proc(q); drop_proc(p); TEST_ASSERT(false, "proc_alloc failed"); }
+    g_rev_read_fail = false;
+    g_rev_read_eof  = -1;
+    struct Burrow *v = v118_private_image(p->as);
+    if (!v) { drop_proc(q); drop_proc(p); TEST_ASSERT(false, "a private image"); }
+    int mrc = burrow_map(p, v, USER_VA, V118_PAGES * ONE_PAGE, VMA_PROT_READ);
+    burrow_unref(v);
+    enum fault_result r0 = v118_fault(p, 0);         // the payer mints 0..63
+
+    struct AddrSpace *child = addrspace_clone(p->as, false);
+    struct AddrSpace *qown  = q->as;
+    bool cfl = false, handed = false, flagged = false;
+    u32 dq0 = 0, fq0 = 0, fq1 = 0, dq2 = 0, fq2 = 0, rec2 = 0;
+    enum fault_result r1 = FAULT_UNHANDLED_USER, r2 = FAULT_UNHANDLED_USER;
+    g_v118_lapse_fired = 0;
+    if (child) {
+        q->as = child;
+        cfl = v118_floor(child);
+        dq0 = v118_data(child); fq0 = child->file_pages;
+        r1  = v118_fault(q, 1);                       // a resident hit: a charged leaf
+        fq1 = child->file_pages;
+        struct Vma *cv = vma_lookup(q, USER_VA);
+        struct Burrow *cb = cv ? cv->burrow : NULL;
+        g_v118_lapse_as = p->as;
+        g_cluster_readahead_probe_for_test = v118_lapse_probe;
+        r2  = v118_fault(q, 64);                      // slot 64 to the payer, the lapse, the read-ahead
+        g_cluster_readahead_probe_for_test = NULL;
+        g_v118_lapse_as = NULL;
+        handed  = cb && burrow_payer_for_test(cb) == child;
+        rec2    = cb ? burrow_payer_charge_pages_for_test(cb) : 0;
+        flagged = cv && (cv->flags & VMA_FLAG_PAYER);
+        dq2 = v118_data(child); fq2 = child->file_pages;
+        v118_unfloor(child, cfl);
+        q->as = qown;
+        addrspace_unref(child);                       // the last mapping: the free
+    }
+    drop_proc(q);
+    drop_proc(p);
+    (void)image_cache_evict_idle_for_test();
+
+    TEST_EXPECT_EQ(mrc, 0, "burrow_map R");
+    TEST_EXPECT_EQ(r0, FAULT_HANDLED, "the payer mints");
+    TEST_ASSERT(child != NULL && cfl, "the fork, and the floor under the child");
+    TEST_EXPECT_EQ(r1, FAULT_HANDLED, "the child's resident hit");
+    TEST_EXPECT_EQ(fq1, fq0 + 1u, "the child paid that leaf");
+    TEST_EXPECT_EQ(r2, FAULT_HANDLED, "the child's fill is served");
+    TEST_EXPECT_EQ(g_v118_lapse_fired, 1, "the lapse landed between the faulting slot and the read-ahead");
+    TEST_ASSERT(handed, "a read-ahead mint handed the record to the faulter");
+    TEST_EXPECT_EQ(rec2, 128u, "the record: 65 the old payer paid + 63 read ahead");
+    TEST_ASSERT(flagged, "the fault adopted before it decided the faulting leaf");
+    TEST_EXPECT_EQ(fq2, fq0, "no leaf charged: the old one refunded, the faulting one free");
+    TEST_EXPECT_EQ(dq2, dq0 + 128u, "the new payer's count is the record");
+}
+
 // The control: a cached image takes no payer and keeps the system cache's
 // posture -- one leaf charged per page mapped, no mint charge.
 void test_demand_page_file_cached_image_takes_no_payer(void) {
@@ -2452,14 +2525,14 @@ void test_demand_page_file_cached_image_takes_no_payer(void) {
     struct Burrow *v = image_lookup_or_create(s, 0, V118_PAGES * ONE_PAGE, /*exec=*/false,
                                               BURROW_FILE_LIMIT_UNKNOWN, p->as, false);
     if (!v) { spoor_clunk(s); drop_proc(p); TEST_ASSERT(false, "a cached image"); }
-    bool no_payer = !v->file_private && burrow_file_payer_for_test(v) == NULL;
+    bool no_payer = !v->payer_record && burrow_payer_for_test(v) == NULL;
     int mrc = burrow_map(p, v, USER_VA, V118_PAGES * ONE_PAGE, VMA_PROT_READ);
     struct Vma *vma = vma_lookup(p, USER_VA);
-    bool flagged = vma && (vma->flags & VMA_FLAG_FILE_PAYER);
+    bool flagged = vma && (vma->flags & VMA_FLAG_PAYER);
     const u32 d0 = v118_data(p->as), f0 = p->as->file_pages;
     enum fault_result r0 = v118_fault(p, 0);
     u32 d1 = v118_data(p->as), f1 = p->as->file_pages;
-    u32 res = burrow_image_resident_count(v), rec = burrow_file_charge_pages_for_test(v);
+    u32 res = burrow_image_resident_count(v), rec = burrow_payer_charge_pages_for_test(v);
     int drc = v118_detach(p, 0, V118_PAGES);
     burrow_unref(v);
     drop_proc(p);

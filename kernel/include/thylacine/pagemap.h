@@ -119,6 +119,21 @@ int  pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                      struct page *pg, struct AddrSpace *as, bool exempt,
                      struct page **out_winner);
 
+// Who pays the nodes an install allocates, when that is not an address space
+// (a Burrow's payer record). `charge` takes all `n` or none; `uncharge` returns
+// what a charge took. Both run with no lock held.
+struct pagemap_payer {
+    bool (*charge)(void *ctx, u32 n, bool exempt);
+    void (*uncharge)(void *ctx, u32 n);
+    void  *ctx;
+};
+
+// pagemap_install with the node charge routed through `payer` (NULL: the pool
+// alone). Same results and the same charge-before-allocate order.
+int  pagemap_install_paid(struct pagemap *pm, spin_lock_t *lock, size_t idx,
+                          struct page *pg, const struct pagemap_payer *payer,
+                          bool exempt, struct page **out_winner);
+
 // Take slot `idx`'s page out (*out_pg, or NULL if it was absent) and NULL the
 // slot. A node emptied by the take is unlinked and handed back in `freed[]`
 // (capacity PAGEMAP_MAX_DEPTH; *nfreed says how many), for the caller to

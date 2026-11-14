@@ -3622,6 +3622,104 @@ longer says the counter is blind; `capacity_buggy_extend_alias.cfg` must
 violate `NoAlias` with `ChargeConserved`, `NoOrphan` and `ZeroRead` ahead of
 it and holding.
 
+## `payer.tla` -- the payer record: pages that outlive the mapping that faulted them (vote 119, 2026-11-14)
+
+**Model-first, written before the code it constrains**, under two
+re-enablements at once: this is a share across fork (I-44, the LINEAGE surface,
+`cow.tla`'s) and a page-accounting law (I-32, `capacity.tla`'s). `capacity.tla`
+cannot carry it, because a record-paid Burrow breaks both of that model's
+premises on purpose: several address spaces map it, its pages stay resident
+when a mapping goes, and its free CAN refund (the record names who pays). The
+same record has carried a private image's pages since vote 118, which no model
+covered; this one covers both classes.
+
+The binding below names the code as built (the record's rename off its
+`file_` prefix a718ffba8; the shared arm 4683127c2), each row confirmed
+against that tree. The vault note is spec-payer.
+
+- **`Fork(p, c)`** -> `kernel/addrspace.c::clone_one_vma`, the
+  `BURROW_TYPE_ANON_SHARED` arm (and the FILE arm, for a private image): the
+  child's VMA names the parent's Burrow (`vma_alloc` takes the mapping ref)
+  with `flags = src->flags & VMA_FLAG_MAX_MASK` -- no `VMA_FLAG_COW`, no
+  `VMA_FLAG_PAYER`. Nothing is charged. `vma_is_cow` is false for it, so the
+  parent's leaves stay writable.
+- **`Charge(sp, s)`** -> `arch/arm64/fault.c`, the shared arm's miss (and
+  `file_install_locked` / `file_cluster_install_slot` for an image):
+  `burrow_mint_charge(v, p->as, exempt, 1)` under `g_payer_lock` --
+  `mint_payer_locked` picks the payer, a lapsed record makes the faulter the
+  payer at `owed = payer_charge_pages`, `paid_link_locked` links it -- then
+  `payer_adopt_if_due` (`vma_payer_adopt_in`: each unflagged mapping's leaves
+  uninstalled and refunded, the flag set) before anything can bail. The
+  model's `Charge` adopts atomically with every charge; the image cluster
+  charges its read-ahead slot by slot after the faulting slot, so it adopts
+  again after the read-ahead (audit round 35 F2: a read-ahead charge can make
+  the hand-over, and the model, adopting at every charge, could not show the
+  missing second adopt). The shared arm's nodes (vote 121) are charged the
+  same way, inside the install (next row), so it too adopts again after the
+  install.
+- **`Install(sp)`** -> the shared arm's `burrow_record_install(v, p->as, slot,
+  newpg, ..)` (`pagemap_install_paid` with the record as the node payer; an
+  image's fill passes `pagemap_install(.., NULL, ..)`): rc 0 the page is the
+  Burrow's; rc 1 a peer won (in ANOTHER address space, possibly), so the loser
+  frees its page and `burrow_mint_refund(v, 1)` refunds whoever pays NOW. Then
+  the leaf, at step 5: charged (`addrspace_charge_pages`) iff
+  `!(vma->flags & VMA_FLAG_PAYER)`. A node the slot's path lacks is one more
+  `Charge` -- `record_node_charge`, all the path's nodes or none, through
+  `mint_payer_locked` like a page, so it can make the hand-over -- and a node
+  a racer made unnecessary is a loser's refund (`record_node_uncharge`); a
+  linked node is resident until the free and no space maps it, which is the
+  model's slot minted and then unmapped, so the record laws cover nodes with
+  no second unit kind.
+- **`Hit(sp, s)`** -> the shared arm's resident hit: `payer_adopt_if_due`, then
+  the leaf on the same rule.
+- **`Uninstall(sp, s)`** -> `kernel/vma.c::vma_uninstall_range_in`, the
+  per-leaf refund for an unflagged mapping of a record-paid Burrow (reached
+  from the phenotype's `MADV_DONTNEED` over a shared range, the protect paths,
+  the adopt itself).
+- **`Unmap(sp, s)`** -> `vma_detach_range_in`: the uninstall (above), then NO
+  release -- `lazy_release_admits` admits `ANON_LAZY` alone -- then the
+  geometry. The whole mapping's drop is `vma_free_settled_deferred`; the last
+  one anywhere reaches `burrow_free_internal`.
+- **`FreeOrKeep`** -> `burrow_free_internal`'s `ANON_SHARED` arm (and FILE's,
+  for a private image): `burrow_payer_release` refunds `payer_charge_pages` to
+  the payer if the record has one and unlinks it, then `pagemap_destroy`.
+- **`Die(sp)`** -> `kernel/addrspace.c::addrspace_destroy`: `vma_drain_in`,
+  then `burrow_payers_lapse(as)` (every record on `as->paid_burrows` unlinked,
+  its count kept), then `addrspace_lifetime_put`.
+- **`RecordIsResidency` / `ChargeExact`** -> the kernel tests
+  `shared_anon.*` (the creator charged per mint by any sharer; a child's leaf
+  charged and its own pages free; the loser's refund; the hand-over at the
+  creator's death charging the residency; the adopt) and the vote 118
+  `demand_page.file_private_*` set for the image class.
+- **`NoFreedLeaf`** -> `shared_anon.unmap_keeps_the_page` (the payer unmaps
+  every mapping it has, and the child's leaf still names the page, its
+  contents intact) and `shared_anon.dontneed_keeps_contents` (a DONTNEED
+  uninstalls and releases nothing).
+- **`PayerIsLive` / `DeadUntouched`** -> the lapse in `addrspace_destroy`,
+  witnessed by the host fixture `tools/host-tests/addrspace-lifetime.c` (the
+  lapse after the drain, before the last lifetime drop) and
+  `shared_anon.creator_death_hands_over`.
+- **`LapseOnlyAtDeath`** -> there is no settle on an unmap for a record-paid
+  Burrow: `settle_as` in `vma_detach_range_in` is non-NULL only for eager
+  `BURROW_TYPE_ANON` (#131's rule is that type's alone).
+
+What the model cannot see, said so the green reads no larger: one Burrow; no
+cap, exemption or pool -- they bound how much is charged, never to whom (the
+shared arm's nodes ARE charged to whom the record says, vote 121, as the
+`Install` row maps them; an image's nodes are still the pool's); the
+descriptor's lifetime (the host fixture's); and no geometry below "which slots
+a space maps", so a split's carriage of the payer flag, the protect paths and
+the fixed overlay are the kernel tests'. A space's own steps are atomic in the
+model because its `as->lock` serializes them; only the mint is split, at the
+two locks it takes in turn.
+
+Gate: `specs/check-payer.sh`. `payer.cfg` clean (three spaces, two slots),
+15603 distinct and 89443 generated states, pinned at the first TLC run
+(2026-11-14); the seven buggy cfgs each violate their named
+invariant -- three of them with a law that must HOLD listed ahead
+(`loser_keeps_charge`: ChargeExact; `unmap_releases`: RecordIsResidency and
+ChargeExact; `unmap_lapses`: ChargeExact).
+
 ---
 
 ## Spec-first re-enablement record (moved verbatim from CLAUDE.md, 2026-08-05)

@@ -165,7 +165,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
             return NULL;                     // no ref taken; caller still owns spoor
         own->file_limit = file_limit;        // private here, as on the miss arm
         // Vote 118: its pages are the mapper's, so it is born with a payer.
-        burrow_file_set_payer(own, payer, payer_exempt);
+        burrow_payer_set(own, payer, payer_exempt);
         spin_lock(&g_image_lock);
         g_image_private++;
         spin_unlock(&g_image_lock);
@@ -227,7 +227,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
         // Vote 118 (round 34 F2): never registered, never served to another
         // mapper, never idle-reclaimable -- a private image in all but how it
         // got here, so its pages are its payer's like any private image's.
-        burrow_file_set_payer(fresh, payer, payer_exempt);
+        burrow_payer_set(fresh, payer, payer_exempt);
         return fresh;
     }
 

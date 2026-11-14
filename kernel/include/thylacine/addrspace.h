@@ -100,7 +100,7 @@ struct AddrSpace {
     // I-32 resource axes. All three are charged/uncharged under `lock` so they
     // are exact, and stored with __atomic_store_n so lockless /proc readers get
     // a coherent snapshot.
-    u32            page_count;         // the HOLDER count: anon + mapped file pages, and the nodes + tables that map them
+    u32            page_count;         // the HOLDER count: anon + mapped file pages, the nodes + tables that map them, and the pages its payer records charge it (votes 118 + 119)
     u32            vma_count;          // VMA-slab bound
     u32            shared_map_pages;   // pages shared IN from other Procs (G-2)
 
@@ -150,8 +150,9 @@ struct AddrSpace {
     // here, their caps in caps_ever below. A holder's authority stays in the bytes
     // after the holder is gone -- an RFMEM child keeps the image its creator filled
     // -- so the image join weighs the record beside its live mappers. Written at
-    // every departure (addrspace_record_holder), never cleared; exec's fresh
-    // space starts without one.
+    // every departure (addrspace_record_holder), and with the taint of a shared
+    // anonymous Burrow this space unmaps (vma_remove_in, vote 120); never
+    // cleared; exec's fresh space starts without one.
     u32            guards_ever;
 
     // B-1a' audit F4: this space's identity, for the records that outlive it.
@@ -177,17 +178,24 @@ struct AddrSpace {
     u32            private_rings;
 
     // Vote 118: the private FILE Burrows whose payer record names this space
-    // (Burrow.file_paid_next/prev), under g_file_payer_lock (burrow.c), never
+    // (Burrow.paid_next/prev), under g_payer_lock (burrow.c), never
     // as->lock. addrspace_destroy lapses them after the drain.
-    struct Burrow *file_paid;
+    struct Burrow *paid_burrows;
+
+    // Vote 120 (I-39; DEBUG-FS-DESIGN 3.4): this space maps a shared anonymous
+    // Burrow that a fork has mapped into another space, so the image join must
+    // read those Burrows' share records. Set by clone_one_vma on a fork's
+    // unpublished space, and on the parent's at the publication under
+    // g_proc_table_lock; read under that lock; never cleared.
+    u32            xshare;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 96,
-               "AddrSpace is 96 bytes: ref+lock (8) + pgtable_root (8) + "
+_Static_assert(sizeof(struct AddrSpace) == 104,
+               "AddrSpace is 104 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
                "page_budget + page_peak + pgtable_pages + file_pages + "
                "guards_ever (32) + id (8) + caps_ever (8) + owners + "
-               "private_rings (8) + file_paid (8). "
+               "private_rings (8) + paid_burrows (8) + xshare (4, padded to 8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM
@@ -321,6 +329,13 @@ void addrspace_destroy(struct AddrSpace *as);
 //                          vDSO clock page is this case, and it is in EVERY
 //                          address space, so without the read-only arm no real
 //                          fork clones at all (#136).
+//   BURROW_TYPE_ANON_SHARED  SHARED, writable or not (votes 117 + 119): the
+//                          child maps the SAME Burrow, with no COW flag and no
+//                          payer flag, so a write by either side is the other's
+//                          -- the one writable share across fork (I-44). Its
+//                          pages are paid by the Burrow's payer record, so the
+//                          fork charges nothing; the child pays its own leaves
+//                          as it faults them.
 //   several VMAs, ONE      a lazy Burrow a protect has split into pieces is
 //   ANON_LAZY Burrow       cloned ONCE (the clone_cursor dedupe, B-1a); every
 //                          piece maps that one clone. cow.tla's

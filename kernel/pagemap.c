@@ -121,9 +121,24 @@ static void **path_build(struct pagemap *pm, size_t idx, struct page **pool, u32
     return node;
 }
 
+static bool as_node_charge(void *ctx, u32 n, bool exempt) {
+    return addrspace_charge_pages((struct AddrSpace *)ctx, n, exempt);
+}
+
+static void as_node_uncharge(void *ctx, u32 n) {
+    addrspace_uncharge_pages((struct AddrSpace *)ctx, n);
+}
+
 int pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                     struct page *pg, struct AddrSpace *as, bool exempt,
                     struct page **out_winner) {
+    struct pagemap_payer ap = { as_node_charge, as_node_uncharge, as };
+    return pagemap_install_paid(pm, lock, idx, pg, as ? &ap : NULL, exempt, out_winner);
+}
+
+int pagemap_install_paid(struct pagemap *pm, spin_lock_t *lock, size_t idx,
+                         struct page *pg, const struct pagemap_payer *payer,
+                         bool exempt, struct page **out_winner) {
     if (out_winner) *out_winner = NULL;
     if (!pm || !lock || !pg)  return -1;
 
@@ -171,14 +186,14 @@ int pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
             u32 left = 0;
             for (u32 i = 0; i < pool_n; i++)
                 if (pool[i]) { free_pages(pool[i], 0); pool[i] = NULL; left++; }
-            if (left && as) addrspace_uncharge_pages(as, left);
+            if (left && payer) payer->uncharge(payer->ctx, left);
             return rc;
         }
         spin_unlock(lock);
 
         // Allocate the shortfall, charged FIRST so a cap hit allocates nothing.
         u32 need = missing - pool_n;
-        if (as && !addrspace_charge_pages(as, need, exempt)) goto fail;
+        if (payer && !payer->charge(payer->ctx, need, exempt)) goto fail;
         u32 got = 0;
         while (got < need) {
             struct page *np = node_alloc(pm->node_sponsor, exempt);
@@ -187,7 +202,7 @@ int pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
             got++;
         }
         if (got < need) {
-            if (as) addrspace_uncharge_pages(as, need - got);   // the part never allocated
+            if (payer) payer->uncharge(payer->ctx, need - got);   // the part never allocated
             goto fail;
         }
     }
@@ -196,7 +211,7 @@ fail:;
     u32 left = 0;
     for (u32 i = 0; i < pool_n; i++)
         if (pool[i]) { free_pages(pool[i], 0); pool[i] = NULL; left++; }
-    if (left && as) addrspace_uncharge_pages(as, left);
+    if (left && payer) payer->uncharge(payer->ctx, left);
     return -1;
 }
 

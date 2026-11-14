@@ -28,6 +28,7 @@
 #include "../../mm/phys.h"               // alloc_pages / free_pages
 #include "../../mm/slub.h"               // kmalloc -- the ns windows test's buffers
 
+#include <thylacine/addrspace.h>       // vote 120: addrspace_clone -- the fork the share join records
 #include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
@@ -3616,6 +3617,42 @@ void test_devproc_maps(void) {
 // B-2b: who may see where a Proc's code aliases lie. Driven with synthetic
 // (caller, target) pairs, the prowl-5-F4 precedent; the read path that consults it
 // is pinned end to end by test_devproc_maps_code_redacted.
+// Votes 117 + 119: a shared anonymous mapping renders as Linux's does -- the
+// share flag and its own type -- beside a private lazy mapping one variable
+// away (the same mint, not shared), which stays 'p' and "lazy".
+void test_devproc_maps_shared_anon(void) {
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+    const u64 sva = 0x0000000010000000ull, pva = 0x0000000010002000ull;
+    struct Burrow *bs = burrow_create_anon_shared(PAGE_SIZE, tgt->as, false);
+    int rcs = bs ? burrow_map(tgt, bs, sva, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bs) burrow_unref(bs);
+    struct Burrow *bp = burrow_create_anon_lazy(PAGE_SIZE);
+    int rcp = bp ? burrow_map(tgt, bp, pva, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bp) burrow_unref(bp);
+
+    char buf[1024];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    long n = -999;
+    struct Spoor *c = open_pidfile_for(tgt->pid, "maps", 0);
+    if (c) { n = devproc.read(c, buf, (long)sizeof(buf) - 1, 0); spoor_clunk(c); }
+    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)rcs, 0L, "mapped the shared mapping");
+    TEST_EXPECT_EQ((long)rcp, 0L, "mapped the private one");
+    TEST_ASSERT(n > 0, "/proc/<pid>/maps reads non-empty");
+    TEST_ASSERT(contains(buf, (size_t)n, "0x10000000-0x10001000 rw-s 0x0 shared - -\n"),
+                "the shared row: rw-s, type shared");
+    TEST_ASSERT(contains(buf, (size_t)n, "0x10002000-0x10003000 rw-p 0x0 lazy - -\n"),
+                "control: the private row stays rw-p, type lazy");
+}
+
 void test_devproc_maps_code_visible(void) {
     struct Proc *caller = proc_alloc();
     struct Proc *target = proc_alloc();
@@ -5125,4 +5162,239 @@ void test_devproc_zombie_status_signal(void) {
     TEST_ASSERT(index_of(e, (size_t)le, "exit:    1\n") >= 0 &&
                 index_of(e, (size_t)le, "signal:") < 0,
                 "an exit(1) shows no signal line");
+}
+
+// =============================================================================
+// Vote 120 (DEBUG-FS-DESIGN 3.4): the image join across address spaces.
+// =============================================================================
+//
+// Shared anonymous memory is the first writable memory a fork shares between
+// TWO spaces, so a guard on either image must weigh the other side: the record
+// the fork's publication writes on the shared Burrow (proc_image_share_fork_locked),
+// the stamp that reaches it, and the join that reads it. Each witness forks a
+// real addrspace_clone of a parent's space and runs the publication's record
+// write as rfork_internal does, under the lifecycle lock -- a kernel test cannot
+// reach a fork that continues at EL0 (test_fork.c says why). The control for each
+// is the same fork over a PRIVATE map, one variable away, and every premise pins
+// that the two spaces are separate (owner counts of one), so the single-space
+// join of section 3.3 cannot be what answers.
+struct sj_pair {
+    struct Proc      *p, *c;
+    struct AddrSpace *cown;     // the child's own space, parked while it runs the clone
+    struct AddrSpace *clone;
+    u64               va;
+    bool              linked;
+};
+
+static u32 sj_me(void) {
+    struct Thread *th = current_thread();
+    return th && th->proc ? th->proc->principal_id : 0xA11CEu;
+}
+
+static void sj_fork(struct sj_pair *s, bool shared, caps_t pcaps, u32 pseal) {
+    s->p = proc_alloc();
+    s->c = proc_alloc();
+    if (!s->p || !s->c) return;
+    const u32 me = sj_me();
+    s->p->principal_id = s->c->principal_id = me;
+    s->p->state = s->c->state = PROC_STATE_ALIVE;
+    s->p->caps = pcaps;
+    s->c->caps = 0;                                   // the carve stripped the child
+    s64 va = sys_mmap_anon_core(s->p, PAGE_SIZE, VMA_PROT_RW, VMA_PROT_RW, shared);
+    if (va <= 0) return;
+    s->va = (u64)va;
+    if (pseal) proc_seal(s->p, pseal);                // sealed BEFORE the fork
+    s->clone = addrspace_clone(s->p->as, false);
+    if (!s->clone) return;
+    s->cown  = s->c->as;
+    s->c->as = s->clone;
+    proc_test_link(s->p);
+    proc_test_link(s->c);
+    s->linked = true;
+    irq_state_t st = proc_table_lock_acquire();
+    proc_image_share_fork_locked(s->p, s->c);
+    proc_table_lock_release(st);
+}
+
+static void sj_undo(struct sj_pair *s) {
+    if (s->linked) { proc_test_unlink(s->c); proc_test_unlink(s->p); }
+    if (s->c) {
+        if (s->clone) { s->c->as = s->cown; addrspace_unref(s->clone); }
+        s->c->state = PROC_STATE_ZOMBIE;
+        proc_free(s->c);
+    }
+    if (s->p) { s->p->state = PROC_STATE_ZOMBIE; proc_free(s->p); }
+}
+
+// Two spaces, one owner each, and the page shared (one Burrow behind both) or
+// private (the COW clone), as the fixture says.
+static bool sj_premise(const struct sj_pair *s, bool shared) {
+    if (!s->linked || s->p->as == s->c->as) return false;
+    if (addrspace_owner_count(s->p->as) > 1 || addrspace_owner_count(s->c->as) > 1) return false;
+    struct Vma *pv = vma_lookup(s->p, s->va), *cv = vma_lookup(s->c, s->va);
+    if (!pv || !cv || !pv->burrow || !cv->burrow) return false;
+    return shared ? (pv->burrow == cv->burrow &&
+                     pv->burrow->type == BURROW_TYPE_ANON_SHARED)
+                  : (pv->burrow != cv->burrow);
+}
+
+static long sj_read_maps(int pid) {
+    char buf[512];
+    struct Spoor *m = open_pidfile_for(pid, "maps", 0);
+    long r = m ? devproc.read(m, buf, (long)sizeof(buf), 0) : -2;
+    if (m) spoor_clunk(m);
+    return r;
+}
+
+// Chain A: the parent holds a cap the child's carve stripped; a same-owner peer
+// that covers only the child must not drive the memory the two share.
+void test_devproc_share_join_cover(void) {
+    struct sj_pair sh = { 0 }, pv = { 0 };
+    sj_fork(&sh, true, CAP_KILL, 0);
+    sj_fork(&pv, false, CAP_KILL, 0);
+    struct Proc *b = proc_alloc();
+    bool premise = false, into_shared = true, into_private = false, covering = false;
+    if (sh.linked && pv.linked && b) {
+        b->principal_id = sj_me();
+        b->state = PROC_STATE_ALIVE;
+        b->caps = 0;
+        premise = sj_premise(&sh, true) && sj_premise(&pv, false);
+        into_shared  = devproc_debug_authorized(b, sh.c);   // THE REGRESSION
+        into_private = devproc_debug_authorized(b, pv.c);
+        b->caps = CAP_KILL;
+        covering     = devproc_debug_authorized(b, sh.c);
+    }
+    if (b) { b->state = PROC_STATE_ZOMBIE; proc_free(b); }
+    sj_undo(&pv);
+    sj_undo(&sh);
+
+    TEST_ASSERT(premise, "premise: two spaces, one owner each, the page shared (or private)");
+    TEST_ASSERT(!into_shared,
+                "the join across spaces: a peer not covering the parent is refused the child sharing its memory");
+    TEST_ASSERT(into_private, "control: the same fork over a private map leaves the child debuggable");
+    TEST_ASSERT(covering, "control: a peer covering the parent too is admitted");
+}
+
+// Chain B: no sharer elevates while it maps the shared Burrow; unmapping it
+// lifts the refusal (the record says ever-shared, the walk says while-mapped).
+void test_devproc_share_join_elevation(void) {
+    struct sj_pair sh = { 0 }, pv = { 0 };
+    sj_fork(&sh, true, 0, 0);
+    sj_fork(&pv, false, 0, 0);
+    bool premise = false;
+    int child_rc = 0, parent_rc = 0, private_rc = 1, after_rc = 1;
+    caps_t refused_caps = CAP_ALL;
+    s64 um = -1;
+    if (sh.linked && pv.linked) {
+        premise    = sj_premise(&sh, true) && sj_premise(&pv, false);
+        private_rc = proc_become_legate(pv.p, CAP_KILL, 1u, 0u, 0u);   // control first
+        child_rc   = proc_become_legate(sh.c, CAP_KILL, 1u, 0u, 0u);
+        parent_rc  = proc_become_legate(sh.p, CAP_KILL, 1u, 0u, 0u);
+        refused_caps = __atomic_load_n(&sh.p->caps, __ATOMIC_ACQUIRE);
+        um       = sys_munmap_range_for_proc(sh.p, sh.va, PAGE_SIZE);
+        after_rc = proc_become_legate(sh.p, CAP_KILL, 1u, 0u, 0u);
+    }
+    sj_undo(&pv);
+    sj_undo(&sh);
+
+    TEST_ASSERT(premise, "premise: two spaces, one owner each, the page shared (or private)");
+    TEST_EXPECT_EQ(private_rc, 0, "control: a parent whose fork shares nothing becomes a legate");
+    TEST_ASSERT(child_rc != 0, "the child mapping the shared Burrow does not elevate");
+    TEST_ASSERT(parent_rc != 0, "the parent mapping it does not elevate either");
+    TEST_EXPECT_EQ((long)refused_caps, (long)0, "the refused redeem conferred nothing");
+    TEST_EXPECT_EQ(um, (s64)0, "the parent unmaps the shared page");
+    TEST_EXPECT_EQ(after_rc, 0, "unmapped, an untainted parent elevates again");
+}
+
+// The seals reach across: NODUMP taken by the parent after the fork (the
+// stamp) or before it (the publication's record) seals the child's maps, and
+// NOTRACE after the fork refuses control of the child.
+void test_devproc_share_join_seals(void) {
+    struct sj_pair sh = { 0 }, pv = { 0 }, sb = { 0 }, pb = { 0 };
+    sj_fork(&sh, true, 0, 0);
+    sj_fork(&pv, false, 0, 0);
+    sj_fork(&sb, true, 0, PROC_FLAG_NODUMP);
+    sj_fork(&pb, false, 0, PROC_FLAG_NODUMP);
+    struct Proc *b = proc_alloc();
+    bool premise = false, ctl_before = false, ctl_after = true, ctl_private = false;
+    long before = -2, after = 0, private_after = -2, pre_shared = 0, pre_private = -2;
+    if (sh.linked && pv.linked && sb.linked && pb.linked && b) {
+        b->principal_id = sj_me();
+        b->state = PROC_STATE_ALIVE;
+        b->caps = 0;
+        premise = sj_premise(&sh, true) && sj_premise(&pv, false) &&
+                  sj_premise(&sb, true) && sj_premise(&pb, false) &&
+                  (sh.c->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0 &&
+                  (sb.c->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0;
+        before = sj_read_maps(sh.c->pid);
+        proc_seal(sh.p, PROC_FLAG_NODUMP);
+        proc_seal(pv.p, PROC_FLAG_NODUMP);
+        after         = sj_read_maps(sh.c->pid);
+        private_after = sj_read_maps(pv.c->pid);
+        ctl_before  = devproc_debug_authorized(b, sh.c);
+        proc_seal(sh.p, PROC_FLAG_NOTRACE);
+        proc_seal(pv.p, PROC_FLAG_NOTRACE);
+        ctl_after   = devproc_debug_authorized(b, sh.c);
+        ctl_private = devproc_debug_authorized(b, pv.c);
+        pre_shared  = sj_read_maps(sb.c->pid);
+        pre_private = sj_read_maps(pb.c->pid);
+    }
+    if (b) { b->state = PROC_STATE_ZOMBIE; proc_free(b); }
+    sj_undo(&pb);
+    sj_undo(&sb);
+    sj_undo(&pv);
+    sj_undo(&sh);
+
+    TEST_ASSERT(premise, "premise: four forks, separate spaces, no child carrying a seal of its own");
+    TEST_ASSERT(before >= 0, "control: the child's maps reads before any seal");
+    TEST_EXPECT_EQ(after, (long)-T_E_ACCES,
+                   "the stamp: the parent's NODUMP after the fork seals the sharing child's maps");
+    TEST_ASSERT(private_after >= 0, "control: a private fork's child is not sealed by its parent");
+    TEST_ASSERT(ctl_before, "control: unsealed, the peer may control the child");
+    TEST_ASSERT(!ctl_after, "the stamp: the parent's NOTRACE refuses control of the sharing child");
+    TEST_ASSERT(ctl_private, "control: a private fork's child stays controllable");
+    TEST_EXPECT_EQ(pre_shared, (long)-T_E_ACCES,
+                   "the publication: NODUMP taken before the fork seals the sharing child's maps");
+    TEST_ASSERT(pre_private >= 0, "control: the same, over a private fork, does not");
+}
+
+// The taint reaches across and outlives the mapping: a debug stamp through the
+// child taints the parent's IMAGE (the record, not the parent's word), the
+// parent stays tainted after it unmaps the shared page (folded into its space's
+// record), and so it still does not elevate.
+void test_devproc_share_join_taint(void) {
+    struct sj_pair sh = { 0 }, pv = { 0 };
+    sj_fork(&sh, true, 0, 0);
+    sj_fork(&pv, false, 0, 0);
+    bool premise = false, p_tainted = false, pv_tainted = true, still = false;
+    u32 word = PROC_FLAG_DEBUG_TAINTED;
+    s64 um = -1;
+    int rc = 0;
+    if (sh.linked && pv.linked) {
+        premise = sj_premise(&sh, true) && sj_premise(&pv, false) &&
+                  ((sh.p->proc_flags | sh.c->proc_flags |
+                    pv.p->proc_flags | pv.c->proc_flags) & PROC_FLAG_DEBUG_TAINTED) == 0;
+        irq_state_t st = proc_table_lock_acquire();
+        proc_mark_debug_tainted_locked(sh.c);
+        proc_mark_debug_tainted_locked(pv.c);
+        p_tainted  = proc_image_tainted_locked(sh.p);
+        pv_tainted = proc_image_tainted_locked(pv.p);
+        word = __atomic_load_n(&sh.p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED;
+        proc_table_lock_release(st);
+        um = sys_munmap_range_for_proc(sh.p, sh.va, PAGE_SIZE);
+        st = proc_table_lock_acquire();
+        still = proc_image_tainted_locked(sh.p);
+        proc_table_lock_release(st);
+        rc = proc_become_legate(sh.p, CAP_KILL, 1u, 0u, 0u);
+    }
+    sj_undo(&pv);
+    sj_undo(&sh);
+
+    TEST_ASSERT(premise, "premise: two forks, separate spaces, nobody tainted yet");
+    TEST_ASSERT(p_tainted, "the taint through the child reaches the sharing parent's image");
+    TEST_EXPECT_EQ(word, 0u, "carried by the record, not stamped on the parent's word");
+    TEST_ASSERT(!pv_tainted, "control: a private fork's parent is not tainted by its child");
+    TEST_EXPECT_EQ(um, (s64)0, "the parent unmaps the shared page");
+    TEST_ASSERT(still, "the taint outlives the mapping (folded into the space's record)");
+    TEST_ASSERT(rc != 0, "so the parent still does not elevate");
 }

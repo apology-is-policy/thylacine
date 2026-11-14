@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-05
+updated: 2026-11-14
 ---
 ## Session registry factory
 
@@ -2471,3 +2471,30 @@ the identity check the weft clunk already made (G-2 audit F1). Without it a
 sibling thread could swap its own lazy mapping in at the VA and have it
 removed, and with the merge the orphaned slots became an extinction
 ([[sub-kernel-burrow]], OPEN-BUGS 20:36Z).
+
+## Shared anonymous memory through the mmap row (2026-11-14, votes 117 + 119)
+
+`lazy_reserve_core(p, length, align, prot, ceiling, shared)` gained the mint's
+ceiling and a shared bit. A shared reservation never extends a neighbour (an
+extension serves the range from another Burrow, which would make private
+memory shared or shared memory private), and neither does one under a ceiling
+below RW; otherwise it mints `burrow_create_anon_shared(length, p->as,
+exempt)` -- the payer set BEFORE `burrow_map`, so `vma_payer_mark_fresh` flags
+the creator's mapping ([[sub-kernel-vma]]) -- or the private lazy Burrow, then
+sets the ceiling. The two existing callers pass `(VMA_PROT_RW, false)` and are
+unchanged. `sys_mmap_anon_core(p, length, prot, ceiling, shared)` is the
+phenotype's anonymous body over it (`prot` above the ceiling `-T_E_ACCES`, a
+zero length `-T_E_INVAL`, a length past `BURROW_RESERVE_MAX` `-T_E_NOMEM`), and
+`sys_mmap_fixed_anon_core(p, addr, length, prot, ceiling, shared)` is the
+`MAP_FIXED` overlay's, which `sys_mmap_fixed_anon_for_proc` (the native door's
+arm 3) wraps at `(VMA_PROT_RW, false)`. `sys_get_mapping_spoor` reports the
+descriptor's write right beside its read right, for `viv_mmap`'s `/dev/zero`
+rules, which answer a length past the window (`ENOMEM`) before any of them
+([[sub-kernel-vivarium]] has the order and the mapping of each case).
+
+The madvise row's release split in two: `advise_release_core(p, vaddr, length,
+shared_ok)` is the shape-checking body, `sys_burrow_decommit_core` its
+`shared_ok = false` form (`MADV_FREE`; the native 84 still flattens it to -1)
+and `sys_burrow_dontneed_core` its `shared_ok = true` form (`MADV_DONTNEED`),
+which over a shared mapping only uninstalls ([[sub-kernel-burrow]]). No
+syscall number, native word or Linux row was added.

@@ -119,7 +119,7 @@ void image_cache_init(void);
 //
 // `payer` / `payer_exempt` (vote 118) name the address space the caller is
 // about to map the image into and its I-32 verdict. A PRIVATE image records it
-// as the payer of every page minted into it (burrow_file_set_payer); a cached
+// as the payer of every page minted into it (burrow_payer_set); a cached
 // image ignores both. NULL is legal (the first minting faulter pays).
 //
 // SMP: serialized by the global cache lock; the blocking burrow_create_file runs

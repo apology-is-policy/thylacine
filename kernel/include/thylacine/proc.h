@@ -3010,16 +3010,34 @@ struct ProcImageJoin {
     // is reachable. Counted as "references, minus the zombies the traversal
     // saw", which leaves an unlinked-but-unfreed Proc counted (the traversal
     // cannot see it, so it falls in the difference) and fails safe.
+    // Also true while p's space maps a shared anonymous Burrow that a fork has
+    // mapped into another space (vote 120; ever shared, while mapped).
     bool   shared;
 };
 
 // Fill `out` with the join over `p`'s address space, EXCLUDING `p` itself (the
-// caller already holds p's own caps and flags and weighs them its own way).
-// Caller holds g_proc_table_lock.
+// caller already holds p's own caps and flags and weighs them its own way),
+// plus the share record of every shared anonymous Burrow p's space maps that a
+// fork has mapped into another space (vote 120; DEBUG-FS-DESIGN 3.4).
+// Caller holds g_proc_table_lock, and no address space's lock.
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out);
+
+// A fork's publication (rfork_internal's hold): write the share record of
+// every shared anonymous Burrow the child's new space maps -- the parent's
+// whole join, the parent's own word and the child's -- and mark the parent's
+// space. A no-op unless the clone marked the child's space. Caller holds
+// g_proc_table_lock, and no address space's lock.
+void proc_image_share_fork_locked(struct Proc *parent, struct Proc *child);
 
 // Stamp PROC_FLAG_DEBUG_TAINTED across the image. Caller holds g_proc_table_lock.
 void proc_mark_debug_tainted_locked(struct Proc *p);
+
+// Is `p` tainted -- its own word, or its IMAGE beyond its word: the space's
+// record of departed holders and of tainted shared memory it unmapped, and the
+// share record of every shared anonymous Burrow it maps that another space
+// maps (vote 120). Every reader of the taint asks this, not the word alone.
+// Caller holds g_proc_table_lock, and no address space's lock.
+bool proc_image_tainted_locked(const struct Proc *p);
 
 // May `p` gain authority right now? False if its image is tainted (anywhere in
 // the join) or still SHARED -- not because caps spread to other mappers (they do

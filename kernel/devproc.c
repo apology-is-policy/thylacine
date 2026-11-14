@@ -518,11 +518,13 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //
 //   perms  4 chars: r/w/x from vma->prot, then p|s. `s` iff VMA_FLAG_SHARED_IN
 //          -- the backing Burrow is ANOTHER Proc's memory mapped cross-Proc
-//          (a netd flow ring / a tapestryd weave), which is exactly Linux's
-//          MAP_SHARED sense (writes propagate). A FILE Burrow is read-only and
+//          (a netd flow ring / a tapestryd weave) -- or the Burrow is
+//          ANON_SHARED, the memory a fork shares: exactly Linux's MAP_SHARED
+//          sense (writes propagate). A FILE Burrow is read-only and
 //          shared by the Image cache, but writes cannot propagate through it,
 //          so it is `p` -- matching Linux's MAP_PRIVATE file mapping.
-//   type   the backing: anon | lazy | file | mmio | dma | none. `none` is a
+//   type   the backing: anon | lazy | file | mmio | dma | code | hostmem |
+//          shared | none. `none` is a
 //          guard VMA (vma_alloc_guard is the only producer of a NULL burrow).
 //   file   `<devno>:<qid.path>` for a FILE Burrow, else "-". These are the
 //          cache-key SCALARS the Burrow sampled at create -- deliberately NOT
@@ -592,6 +594,7 @@ static const char *maps_type_name(const struct Vma *v) {
     // (rw-p vs r-xp).
     case BURROW_TYPE_CODE:      return "code";
     case BURROW_TYPE_HOSTMEM:   return "hostmem";
+    case BURROW_TYPE_ANON_SHARED: return "shared";
     default:                    return "?";
     }
 }
@@ -638,13 +641,17 @@ static bool maps_is_code(const struct Vma *v) {
 }
 
 // A row's permission class: r, w, x and the share flag as four bits, so the
-// class names the perms column exactly and nothing else about the row.
+// class names the perms column exactly and nothing else about the row. The
+// share flag is Linux's 's': another space's memory mapped in here, or shared
+// anonymous memory, which a fork's other side sees written.
 enum { MAPS_CLASSES = 16 };
 static u32 maps_class(const struct Vma *v) {
+    bool shared = (v->flags & VMA_FLAG_SHARED_IN) ||
+                  (v->burrow && v->burrow->type == BURROW_TYPE_ANON_SHARED);
     return ((v->prot & VMA_PROT_READ)  ? 1u : 0u) |
            ((v->prot & VMA_PROT_WRITE) ? 2u : 0u) |
            ((v->prot & VMA_PROT_EXEC)  ? 4u : 0u) |
-           ((v->flags & VMA_FLAG_SHARED_IN) ? 8u : 0u);
+           (shared ? 8u : 0u);
 }
 
 static void maps_class_perms(u32 cls, char perms[5]) {

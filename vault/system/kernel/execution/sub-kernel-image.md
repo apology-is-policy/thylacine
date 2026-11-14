@@ -57,7 +57,7 @@ versioned entry's Burrow (round 32 F4 corrected the reason given here).
 **A private image's pages are its payer's (operator vote 118, 2026-11-13).**
 `image_lookup_or_create` takes the address space the caller is about to map
 the image into and its I-32 verdict (`payer`, `payer_exempt`). The private arm
-hands both to `burrow_file_set_payer` before the Burrow is returned, so the
+hands both to `burrow_payer_set` before the Burrow is returned, so the
 image is born with a payer: the mapping cores pass the mapper's space, exec the
 space it is building. So does the BYPASS arm (audit round 34 F2): an image the
 full cache cannot register is never served to another mapper and never

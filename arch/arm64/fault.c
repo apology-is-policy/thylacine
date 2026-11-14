@@ -37,6 +37,8 @@
 
 #ifdef KERNEL_TESTS
 void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+void (*g_shared_mint_probe_for_test)(struct Proc *p, struct Burrow *v, size_t slot);
+void (*g_cluster_readahead_probe_for_test)(struct Proc *p, struct Burrow *v);
 u64 g_file_fill_syncs_for_test;
 #endif
 
@@ -421,10 +423,10 @@ struct file_fault_req {
 // charged leaves uninstalled and refunded -- before any leaf of theirs is
 // decided. A no-op for a cached image, a payer mapping, or a non-payer.
 // Caller holds p->as->lock.
-static void file_payer_adopt_if_due(struct Proc *p, struct Vma *vma, struct Burrow *v) {
-    if (v->file_private && !(vma->flags & VMA_FLAG_FILE_PAYER) &&
-        burrow_file_payer_is(v, p->as))
-        vma_file_payer_adopt_in(p->as, v);
+static void payer_adopt_if_due(struct Proc *p, struct Vma *vma, struct Burrow *v) {
+    if (v->payer_record && !(vma->flags & VMA_FLAG_PAYER) &&
+        burrow_payer_is(v, p->as))
+        vma_payer_adopt_in(p->as, v);
 }
 
 // Locked core. Caller validated p and holds p->vma_lock across the whole
@@ -535,6 +537,9 @@ static enum fault_result demand_page_locked(struct Proc *p,
     // install (step 5), whichever arm resolved the page -- the resident hit
     // below, or the slow path's own install tails.
     bool    file_charge  = false;
+    // Votes 117 + 119: a shared anonymous leaf in a space that is not the
+    // Burrow's payer is charged to that space at the install, one page.
+    bool    shared_charge = false;
     // B-1a' audit F12: the page a copy-on-write COPY replaced, whose share is
     // released only after step 5 -- while this space's own read-only leaf can
     // still translate to it, that share is what keeps the other holder from
@@ -594,8 +599,8 @@ static enum fault_result demand_page_locked(struct Proc *p,
             mair_idx = MAIR_IDX_NORMAL_WB;
             // The mapping is this space's (audit F8) -- unless it is a payer
             // mapping of a private image, whose mint paid (vote 118).
-            file_payer_adopt_if_due(p, vma, v);
-            file_charge = !(vma->flags & VMA_FLAG_FILE_PAYER);
+            payer_adopt_if_due(p, vma, v);
+            file_charge = !(vma->flags & VMA_FLAG_PAYER);
             break;                      // -> step-5 PTE install (R+X for text)
         }
         // A miss sleeps (the read, and the pin's last unref), and nothing past
@@ -787,8 +792,9 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         // the whole demand_page_locked) no sibling faulter of this address space
         // can touch the map -- they serialize on as->lock -- so the slot is still
         // empty here. The install's own re-check + loser-free is the audited
-        // FILE-arm install-once shape, defensive against a future shared-lazy
-        // mapping; the loser branch is unreachable today. B-1a': the install
+        // FILE-arm install-once shape, defensive here: the loser branch is
+        // unreachable for a Burrow one address space maps (shared anonymous
+        // memory has its own arm below, where it is live). B-1a': the install
         // also allocates the map's missing nodes -- outside v->lock, charged to
         // this address space BEFORE they are allocated -- so a cap hit or a
         // node OOM installs nothing and takes the same graceful per-Proc
@@ -811,6 +817,79 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         mair_idx = MAIR_IDX_NORMAL_WB;
         break;                              // -> step-5 PTE install at vma->prot
     }
+    case BURROW_TYPE_ANON_SHARED: {
+        // Votes 117 + 119 (ARCH 28 I-44 + I-32; specs/payer.tla): the
+        // anonymous memory a fork shares. Demand-zero like ANON_LAZY, entirely
+        // under the held as->lock (no slow path), but with three differences.
+        // (1) It is never COW: a fork maps this Burrow itself, so a write lands
+        // in the page every sharer sees, and the COW branch above is never
+        // reached (no shared VMA carries VMA_FLAG_COW). (2) The page, and any
+        // node its slot's path lacks, is paid by the Burrow's payer record,
+        // not by the faulter: the mint is charged to the payer (the creating
+        // space; after its death, the next minting faulter, which takes the
+        // residency over), and a leaf costs
+        // one page only in a space that is not the payer (step 5). (3) Sharers
+        // in OTHER address spaces fault the same slot under their OWN
+        // as->lock, so the install's loser branch is live here: the loser
+        // frees its page and refunds its mint to whoever pays now.
+        struct Burrow *v = vma->burrow;
+        size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
+        bool exempt = proc_resource_exempt(p);
+
+        spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
+        struct page *resident = pagemap_get(&v->pm, slot);
+        spin_unlock(&v->lock);
+        if (resident) {
+            // A page lives until the Burrow does (I-7: no path releases one
+            // while any space maps the Burrow), so the hit may use it outside
+            // v->lock. A space that took the record over turns its mappings
+            // into payer mappings before this leaf is decided.
+            payer_adopt_if_due(p, vma, v);
+        } else {
+            // The charge BEFORE the page, so a cap hit allocates nothing; a
+            // hand-over this charge made is adopted before anything below can
+            // bail (the FILE fill's order).
+            if (!burrow_mint_charge(v, p->as, exempt, 1))
+                return FAULT_UNHANDLED_USER;    // the payer has no headroom
+            payer_adopt_if_due(p, vma, v);
+            // The pool charge is the requesting account's (alloc_user_pages;
+            // SHARED-MEMORY-ACCOUNTING 3), whoever the record charges.
+            struct page *newpg = alloc_user_pages(0, KP_ZERO, exempt);
+            if (!newpg) {
+                burrow_mint_refund(v, 1);
+                return FAULT_UNHANDLED_USER;    // OOM -> graceful per-Proc terminate
+            }
+#ifdef KERNEL_TESTS
+            if (g_shared_mint_probe_for_test)
+                g_shared_mint_probe_for_test(p, v, slot);
+#endif
+            // The nodes the slot's path lacks are charged through the record
+            // like the page (vote 121): the map outlives any one sharer, so
+            // it is the payer that holds them.
+            int irc = burrow_record_install(v, p->as, slot, newpg, exempt, &resident);
+            // That charge can make the hand-over too: the payer's space died
+            // on another CPU after the mint's charge. Adopt before any exit,
+            // as after the mint's.
+            payer_adopt_if_due(p, vma, v);
+            if (irc < 0) {
+                free_pages(newpg, 0);
+                burrow_mint_refund(v, 1);
+                return FAULT_UNHANDLED_USER;    // node OOM -> graceful per-Proc terminate
+            }
+            if (irc == 1) {
+                // Another sharer won the slot: its page is the one every
+                // sharer sees; ours never reached a slot, so a plain free.
+                free_pages(newpg, 0);
+                burrow_mint_refund(v, 1);
+            } else {
+                resident = newpg;
+            }
+        }
+        page_pa       = page_to_pa(resident);
+        mair_idx      = MAIR_IDX_NORMAL_WB;
+        shared_charge = !(vma->flags & VMA_FLAG_PAYER);
+        break;                              // -> step-5 PTE install at vma->prot
+    }
     case BURROW_TYPE_INVALID:
     default:
         return FAULT_UNHANDLED_USER;
@@ -824,6 +903,11 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
     // charge goes back. Audit F9: the copy-on-write break replaces in place.
     if (file_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
+    // Votes 117 + 119: a sharer's leaf is anon data in its pages -- no file
+    // telemetry -- and goes back the same way (rc 1: a sibling thread's leaf
+    // is already there, paid for by its install).
+    if (shared_charge && !addrspace_charge_pages(p->as, 1, proc_resource_exempt(p)))
+        return FAULT_UNHANDLED_USER;
 #ifdef KERNEL_TESTS
     // The F12 witness fires at the last instant the original's share must
     // still be held: the leaf write is next (audit F20).
@@ -836,6 +920,7 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
            : mmu_install_user_pte_attr(p->as, proc_resource_exempt(p),
                                        page_va, page_pa, install_prot, mair_idx);
     if (rc != 0 && file_charge)          addrspace_uncharge_file(p->as, 1);
+    if (rc != 0 && shared_charge)        addrspace_uncharge_pages(p->as, 1);
     // B-1a' audit F12: the copy's original is released only now, when no leaf
     // of this space can translate to it (on a failed replace too: the Proc
     // dies, and the share must not leak). If that was the last share (the
@@ -958,26 +1043,26 @@ static enum fault_result file_install_locked(struct Proc *p,
     // payer's (vote 118): charged before the slot can take it, and refunded
     // if it does not end resident.
     u32 minted = 0;
-    if (v->file_private) {
-        minted = burrow_file_mint_charge(v, p->as, proc_resource_exempt(p), 1);
+    if (v->payer_record) {
+        minted = burrow_mint_charge(v, p->as, proc_resource_exempt(p), 1);
         if (!minted) {
             free_pages(newpg, 0);
             return FAULT_UNHANDLED_USER; // the payer has no headroom: refused as a leaf is
         }
         // A hand-over this charge made: adopt before anything below can bail.
-        file_payer_adopt_if_due(p, vma, v);
+        payer_adopt_if_due(p, vma, v);
     }
     struct page *resident = NULL;
     int irc = pagemap_install(&v->pm, &v->lock, freq->slot, newpg, NULL,
                               proc_resource_exempt(p), &resident);
     if (irc < 0) {
         free_pages(newpg, 0);
-        burrow_file_mint_refund(v, minted);
+        burrow_mint_refund(v, minted);
         return FAULT_UNHANDLED_USER;     // node OOM, or an impossible shape change; bail safe
     }
     if (irc == 1) {
         free_pages(newpg, 0);            // a sibling faulter won: discard the loser's freshly-read page
-        burrow_file_mint_refund(v, minted);
+        burrow_mint_refund(v, minted);
     } else {
         resident = newpg;                // we win -- the Burrow owns newpg now
     }
@@ -997,7 +1082,7 @@ static enum fault_result file_install_locked(struct Proc *p,
     // charge installs nothing; a leaf a sibling already installed (rc 1) was
     // paid for by the sibling, so this charge goes back. A payer mapping of a
     // private image pays no leaf: its mint did (vote 118).
-    bool leaf_charge = !(vma->flags & VMA_FLAG_FILE_PAYER);
+    bool leaf_charge = !(vma->flags & VMA_FLAG_PAYER);
     if (leaf_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
     int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
@@ -1140,13 +1225,13 @@ out:
 static struct page *file_cluster_install_slot(struct Proc *p, struct Burrow *v, size_t s,
                                               struct page **pg, bool *spent) {
     bool exempt = proc_resource_exempt(p);
-    if (v->file_private) {
+    if (v->payer_record) {
         // A resident slot mints nothing, so it is charged nothing.
         spin_lock(&v->lock);
         struct page *have = pagemap_get(&v->pm, s);
         spin_unlock(&v->lock);
         if (have) return have;
-        if (!burrow_file_mint_charge(v, p->as, exempt, 1)) { *spent = true; return NULL; }
+        if (!burrow_mint_charge(v, p->as, exempt, 1)) { *spent = true; return NULL; }
     }
     struct page *winner = NULL;
     int irc = pagemap_install(&v->pm, &v->lock, s, *pg, NULL, exempt, &winner);
@@ -1155,7 +1240,7 @@ static struct page *file_cluster_install_slot(struct Proc *p, struct Burrow *v, 
         *pg = NULL;                      // adopted: the caller must not free it
         return winner;
     }
-    if (v->file_private) burrow_file_mint_refund(v, 1);   // not minted after all
+    if (v->payer_record) burrow_mint_refund(v, 1);   // not minted after all
     return irc < 0 ? NULL : winner;      // irc 1: a sibling won; *pg stays a loser
 }
 
@@ -1197,12 +1282,21 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     struct page *fault_pg = file_cluster_install_slot(p, v, freq->slot, &clpages[fi0], &spent);
     // A hand-over this fault made turns its mappings into payer mappings
     // before any leaf of theirs is decided -- even if the fault fails below.
-    file_payer_adopt_if_due(p, vma, v);
+    payer_adopt_if_due(p, vma, v);
     if (!fault_pg) return FAULT_UNHANDLED_USER;     // refused, lost to an OOM, or no headroom
+#ifdef KERNEL_TESTS
+    if (g_cluster_readahead_probe_for_test)
+        g_cluster_readahead_probe_for_test(p, v);
+#endif
     for (size_t i = 0; i < ncluster && !spent; i++) {
         if (i == fi0) continue;
         (void)file_cluster_install_slot(p, v, cstart + i, &clpages[i], &spent);
     }
+    // A read-ahead charge can make the hand-over too: the payer's space may
+    // die (on another CPU) between the faulting slot and its read-ahead, and
+    // the first read-ahead mint then makes this space the payer. Adopt again
+    // before the faulting leaf is decided (round 35 F2).
+    payer_adopt_if_due(p, vma, v);
 
     // B-1a audit F1: the cluster is adopted (the bytes are the Burrow's), but
     // the faulting page's PTE goes in only under a prot that still admits it.
@@ -1214,7 +1308,7 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     // (a cached image's read-ahead pages are the system cache's until a fault
     // maps them; a private image's were charged to its payer as they were
     // minted, vote 118); see the single-page tail, payer mappings included.
-    bool leaf_charge = !(vma->flags & VMA_FLAG_FILE_PAYER);
+    bool leaf_charge = !(vma->flags & VMA_FLAG_PAYER);
     if (leaf_charge && !addrspace_charge_file(p->as, proc_resource_exempt(p)))
         return FAULT_UNHANDLED_USER;
     int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p), freq->page_va,
@@ -1267,8 +1361,8 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     // charge is held across the read below. A window cut short restarts at the
     // faulting slot and keeps what the payer could take; with no headroom at
     // all the fault is refused, as a refused leaf is.
-    if (v->file_private) {
-        u32 room = burrow_file_mint_headroom(v, p->as, proc_resource_exempt(p), (u32)ncluster);
+    if (v->payer_record) {
+        u32 room = burrow_mint_headroom(v, p->as, proc_resource_exempt(p), (u32)ncluster);
         if (!room) return FAULT_UNHANDLED_USER;
         if (room < ncluster) {
             cstart = freq->slot;

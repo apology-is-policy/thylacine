@@ -6,13 +6,13 @@ title: "VMAs — the per-Proc address-space description, and where W^X is actual
 code: [kernel/vma.c, kernel/include/thylacine/vma.h, kernel/test/test_anon_merge.c]
 audit: hard
 guarded-by: [inv-i12, inv-i7, inv-i32, inv-i44]
-validated-by: [spec-cow, spec-capacity, prose, gate-smp]
+validated-by: [spec-cow, spec-capacity, spec-payer, prose, gate-smp]
 locks: [lock-vma]
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-11-04
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -32,7 +32,11 @@ tearing it down.
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert_in` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
 round 4, F18); `vma_remove_in` unlinks, and extincts on a VMA its list does not
-hold (`vma_linked_in`, exact for a VMA in that list or in none);
+hold (`vma_linked_in`, exact for a VMA in that list or in none); before the
+unlink it folds a shared anonymous Burrow's share-record taint into the space's
+`guards_ever` (operator vote 120), so a taint taken through another space
+outlives this space's mapping, and the image join, which reads `guards_ever`
+after its walk of the mappings, sees it in one place or the other;
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain_in` tears the whole list down when the address
 space's last owner drops it.
@@ -170,7 +174,8 @@ nothing, not even a PTE.
 
 *Phase 2 uninstalls the range's leaf PTEs* (`vma_uninstall_range_in(as, ..)`:
 the range clear mapping by mapping, so a FILE mapping's leaves refund the
-holder's charge -- the round-2 close, `addrspace_uncharge_file` -- by subtree,
+holder's charge -- the round-2 close, `addrspace_uncharge_file` -- and a
+non-payer's shared anonymous leaves refund the sharer's -- by subtree,
 reclaiming the tables it empties -- [[sub-kernel-mmu]]) BEFORE any page is freed or any mapping
 changes: hardware resolves a PTE without `as->lock`, so a stale PTE or TLB
 entry would alias a recycled page.
@@ -184,7 +189,10 @@ names the slots -- because the only refund paths walk mappings and the
 Burrow's own free is Proc-agnostic, so a slot that stopped being mapped while
 still resident would be charged for the rest of the address space's life
 (`capacity.tla`'s `NoOrphan`; the B-1a audit's F5, and the piece-detach bug
-before it). Then the shape. A WHOLE mapping goes through `vma_remove_in` +
+before it). An `ANON_SHARED` mapping's overlap is never released
+(`lazy_release_admits` names `ANON_LAZY` alone): another space may still map
+those slots, and the pages go with the Burrow, refunded through its payer
+record ([[spec-payer]]'s `NoFreedLeaf`; [[sub-kernel-burrow]]). Then the shape. A WHOLE mapping goes through `vma_remove_in` +
 `vma_free_settled_deferred`, its Burrow chained onto `*out_dead` if that drop
 was the last, with a NULL `settle_as` (settle nothing: the form
 `vma_free_deferred` spells) unless it is the eager case below; a `SHARED_IN`
@@ -251,7 +259,7 @@ path the boundary did not see. The precheck is the whole refusal set, decided
 BEFORE the first mutation: a malformed range or word (`-T_E_INVAL`); a hole, a
 guard, or no room for the split pieces (`-T_E_NOMEM`); a shared-in mapping, a
 CODE alias, a hardware mapping (MMIO / DMA / HOSTMEM -- `reprotect_admits`
-admits only ANON, ANON_LAZY and FILE), or a `prot` above the ceiling
+admits only ANON, ANON_LAZY, ANON_SHARED and FILE), or a `prot` above the ceiling
 (`-T_E_ACCES`). A refusal leaves every mapping exactly as it was, which is
 STRONGER than Linux, where a failed `mprotect` may have changed part of the
 range.
@@ -297,17 +305,22 @@ writable at RW). A resident page costs one re-fault and nothing else: its slot
 and its charge stay, as Linux keeps a PROT_NONE mapping's contents;
 `SYS_BURROW_DECOMMIT` is how pages are returned.
 
-### A payer mapping pays no leaf (2026-11-13; operator vote 118)
+### A payer mapping pays no leaf (2026-11-13; operator vote 118; votes 117 + 119 on 2026-11-14)
 
-`VMA_FLAG_FILE_PAYER` marks a mapping of a private image ([[sub-kernel-image]])
-in the space that pays for its pages ([[sub-kernel-burrow]]). Its leaves are
-installed uncharged ([[sub-kernel-fault]]), and `vma_uninstall_range_in`
-refunds none of them. Only two places set it:
+`VMA_FLAG_PAYER` marks a mapping of a record-paid Burrow -- a private image
+([[sub-kernel-image]]) or shared anonymous memory -- in the space that pays
+for its pages ([[sub-kernel-burrow]]). Its leaves are installed uncharged
+([[sub-kernel-fault]]), and `vma_uninstall_range_in` refunds none of them; an
+unflagged mapping's leaves are refunded per type, a FILE leaf through
+`addrspace_uncharge_file` and an ANON_SHARED leaf through
+`addrspace_uncharge_pages` (the fault charged it as anon data). Only two
+places set it:
 
-- `vma_file_payer_mark_fresh` flags a just-allocated mapping, which holds no
-  leaf, when its Burrow's payer is the space being mapped into. `burrow_map_in`
+- `vma_payer_mark_fresh` flags a just-allocated mapping, which holds no
+  leaf, when its Burrow carries a payer record and the payer is the space
+  being mapped into (no type test: the record is the fact). `burrow_map_in`
   and `vma_replace_range_in` call it after `vma_alloc`.
-- `vma_file_payer_adopt_in`, under `as->lock`, runs when a space has become
+- `vma_payer_adopt_in`, under `as->lock`, runs when a space has become
   the payer by a hand-over. It uninstalls every leaf of each of the space's
   unflagged mappings of the Burrow, each refunded because the mapping is still
   unflagged, and then flags them.
@@ -791,8 +804,9 @@ and successors) and clears each one's share of the range with
 `mmu_uninstall_user_range` (which returns the valid leaves it cleared since
 the close); a FILE mapping's count is refunded to the space
 (`addrspace_uncharge_file`: the Image cache's pages are charged to each holder
-per leaf the fault installs, [[sub-kernel-fault]]), every other type's pages
-settle with their own release. Tables the range empties are reclaimed as
+per leaf the fault installs, [[sub-kernel-fault]]), as is an ANON_SHARED
+mapping's that is not the payer's (`addrspace_uncharge_pages`, since
+2026-11-14); every other type's pages settle with their own release. Tables the range empties are reclaimed as
 before; guards and holes cost nothing; the caller holds `as->lock`. The
 refund can never exceed the charge because every FILE leaf install charges
 first and refunds itself when the leaf was already there, and no other path

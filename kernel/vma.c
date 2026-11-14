@@ -312,6 +312,19 @@ void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     // the whole list head, and the clamp-safe uncharge below would hide it.
     if (!vma_linked_in(as, v))   extinction("vma_remove_in of a Vma not linked in this address space");
 
+    // Vote 120 (DEBUG-FS-DESIGN 3.4): a shared Burrow debugged through another
+    // space taints every image that held it, and the taint outlives the
+    // mapping, so it goes into this space's record before the mapping leaves
+    // the walk that would otherwise have shown it (the join reads the record
+    // after that walk, both ordered by this lock).
+    struct Burrow *sb = v->burrow;
+    if (sb && sb->type == BURROW_TYPE_ANON_SHARED &&
+        __atomic_load_n(&sb->share_spaces, __ATOMIC_ACQUIRE))
+        __atomic_fetch_or(&as->guards_ever,
+                          __atomic_load_n(&sb->share_guards, __ATOMIC_ACQUIRE)
+                              & PROC_FLAG_DEBUG_TAINTED,
+                          __ATOMIC_RELAXED);
+
     if (v->prev) v->prev->next = v->next;
     else         as->vmas      = v->next;
     if (v->next) v->next->prev = v->prev;
@@ -504,7 +517,7 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
     // mapping ref on `nb` across the detach.
     struct Vma *nv = vma_alloc(vaddr, end, prot, nb, nb_offset);
     if (!nv)                              return -(int)T_E_NOMEM;
-    vma_file_payer_mark_fresh(as, nv);
+    vma_payer_mark_fresh(as, nv);
 
     struct Burrow *dead = NULL;
     int rc = vma_detach_range_in(as, exempt, payer, vaddr, length, 1, &dead);
@@ -580,28 +593,33 @@ long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
         if (a >= b) continue;
         long n = mmu_uninstall_user_range(as, a, b);
         if (n <= 0) continue;
-        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE &&
-            !(v->flags & VMA_FLAG_FILE_PAYER))
-            addrspace_uncharge_file(as, (u32)n);
+        // The leaves the fault charged per leaf, refunded per leaf: a FILE
+        // mapping's (audit F8) and a shared anonymous one's (votes 117 + 119),
+        // each unless it is the payer's mapping, whose mints paid instead.
+        if (v->burrow && !(v->flags & VMA_FLAG_PAYER)) {
+            if (v->burrow->type == BURROW_TYPE_FILE)
+                addrspace_uncharge_file(as, (u32)n);
+            else if (v->burrow->type == BURROW_TYPE_ANON_SHARED)
+                addrspace_uncharge_pages(as, (u32)n);
+        }
         total += n;
     }
     return total;
 }
 
-void vma_file_payer_mark_fresh(struct AddrSpace *as, struct Vma *v) {
+void vma_payer_mark_fresh(struct AddrSpace *as, struct Vma *v) {
     struct Burrow *b = v ? v->burrow : NULL;
-    if (b && b->type == BURROW_TYPE_FILE && b->file_private &&
-        burrow_file_payer_is(b, as))
-        v->flags |= VMA_FLAG_FILE_PAYER;
+    if (b && b->payer_record && burrow_payer_is(b, as))
+        v->flags |= VMA_FLAG_PAYER;
 }
 
-void vma_file_payer_adopt_in(struct AddrSpace *as, struct Burrow *b) {
+void vma_payer_adopt_in(struct AddrSpace *as, struct Burrow *b) {
     for (struct Vma *v = as->vmas; v; v = v->next) {
-        if (v->burrow != b || (v->flags & VMA_FLAG_FILE_PAYER)) continue;
+        if (v->burrow != b || (v->flags & VMA_FLAG_PAYER)) continue;
         // Unflagged, so the uninstall refunds each leaf it clears; the space
         // re-faults them as payer leaves, which the mint has paid for.
         (void)vma_uninstall_range_in(as, v->vaddr_start, v->vaddr_end);
-        v->flags |= VMA_FLAG_FILE_PAYER;
+        v->flags |= VMA_FLAG_PAYER;
     }
 }
 
@@ -677,11 +695,14 @@ int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
 
 // The backing kinds a protect may touch. CODE is the I-42 pair (one charge, two
 // aliases: neither is a plain mapping); MMIO / DMA / HOSTMEM are I-34 hardware
-// windows whose permissions were conferred, not chosen.
+// windows whose permissions were conferred, not chosen. A shared anonymous
+// mapping's prot is its own space's view (each sharer's VMA is separate, its
+// leaves are its own), under a ceiling that never carries X.
 static bool reprotect_admits(const struct Burrow *b) {
     switch (b->type) {
     case BURROW_TYPE_ANON:
     case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_ANON_SHARED:
     case BURROW_TYPE_FILE:
         return true;
     default:

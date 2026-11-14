@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-14
 ---
 ## Registry creation is a role, not an Imperium capability
 
@@ -346,6 +346,10 @@ the child instead.
   authority indirectly. Note which mechanism carries which guarantee: the JOIN,
   not this refusal, is what makes the publication race safe, since a peer's
   `rfork` takes the address-space reference outside any lock.
+  Since operator vote 120 (2026-11-14) the image includes shared anonymous
+  memory a fork mapped into another space, so a Proc mapping such a Burrow is
+  refused like an RFMEM sharer, and a taint taken through the other side counts
+  (`proc_image_tainted_locked`, [[sub-kernel-proc]]).
   The taint is monotone, crosses fork and survives exec; each direction is
   necessary, since the attacker chooses what its victim execs. See
   [[sub-kernel-devproc]] for the join itself.
