@@ -818,11 +818,19 @@ no interface. There are three pieces.
     Tattach over it, stamps the opener's principal as `n_uname`, and uses `/srv`'s message size
     (32 KiB, or 128 KiB for a bulk service), where a pipe pair would give 4 KiB.
   - The driver relays bytes and parses no 9P.
-- **login** mounts `/srv/mac` at `/mnt/mac` (MREPL) in every session it starts, before the
-  session's first program runs.
+- **The session's mount** (vote M13, 2026-11-14). The kernel stamps a `/srv` attach with the
+  principal of the Proc that opens it, and login runs as SYSTEM, so login does not open
+  `/srv/mac` itself. It starts every session's program through **newns**, which it spawns as
+  the user with the shell's capabilities.
+  - newns opens `/srv/mac`, so the attach carries the user, and mounts it at `/mnt/mac`
+    (MREPL) in its own namespace.
+  - It then execs the session program (ut or halcyond) in place, as the same Proc, so the
+    program and everything it starts have the mount from their first instruction. This is
+    Plan 9's shape: login becomes the user, newns builds the namespace, then rc runs.
   - `mac` is one of login's RESIDENT names, so the boot registry's post reaches the session.
   - With no port (not on a Mac) there is no `/srv/mac`, so there is no mount, and nothing is
-    said.
+    said. With the port and no app on the line the open fails at once; newns says so in one
+    line and starts the session program anyway.
 - **The app's 9P server** runs one 9P2000.L session for each channel.
 
 **The channel framing (ABI; version `mac1`).**
