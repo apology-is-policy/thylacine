@@ -298,6 +298,9 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (prev) prev->next = v;
     else      as->vmas   = v;
     if (cur)  cur->prev  = v;
+    // Vote 122 (DEBUG-FS-DESIGN 3.4): the count the share family's join reads,
+    // paired with vma_remove_in's decrement (a linked Vma's Burrow never changes).
+    if (v->burrow && v->burrow->type == BURROW_TYPE_ANON_SHARED) as->shared_maps++;
 
     // ARCH 6.5, the merge's ONE BIAS, recorded when a mapping becomes real: a
     // VMA allocated and then refused never names its Burrow's bias.
@@ -312,18 +315,22 @@ void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     // the whole list head, and the clamp-safe uncharge below would hide it.
     if (!vma_linked_in(as, v))   extinction("vma_remove_in of a Vma not linked in this address space");
 
-    // Vote 120 (DEBUG-FS-DESIGN 3.4): a shared Burrow debugged through another
-    // space taints every image that held it, and the taint outlives the
-    // mapping, so it goes into this space's record before the mapping leaves
-    // the walk that would otherwise have shown it (the join reads the record
-    // after that walk, both ordered by this lock).
+    // Votes 120 + 122 (DEBUG-FS-DESIGN 3.4): shared memory debugged through
+    // another member of the share family taints every member image that
+    // holds it, and the taint outlives the mapping, so it goes into this
+    // space's record before the count that lets the join read the family
+    // drops -- one hold of this lock, which the join takes to read both, so
+    // it sees the mapping or the fold, never neither.
     struct Burrow *sb = v->burrow;
-    if (sb && sb->type == BURROW_TYPE_ANON_SHARED &&
-        __atomic_load_n(&sb->share_spaces, __ATOMIC_ACQUIRE))
-        __atomic_fetch_or(&as->guards_ever,
-                          __atomic_load_n(&sb->share_guards, __ATOMIC_ACQUIRE)
-                              & PROC_FLAG_DEBUG_TAINTED,
-                          __ATOMIC_RELAXED);
+    if (sb && sb->type == BURROW_TYPE_ANON_SHARED) {
+        if (as->family)
+            __atomic_fetch_or(&as->guards_ever,
+                              __atomic_load_n(&as->family->guards, __ATOMIC_ACQUIRE)
+                                  & PROC_FLAG_DEBUG_TAINTED,
+                              __ATOMIC_RELAXED);
+        if (as->shared_maps == 0) extinction("vma_remove_in: shared mapping count underflow");
+        as->shared_maps--;
+    }
 
     if (v->prev) v->prev->next = v->next;
     else         as->vmas      = v->next;

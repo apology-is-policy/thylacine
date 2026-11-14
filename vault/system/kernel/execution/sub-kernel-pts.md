@@ -363,7 +363,7 @@ at the syscall front, a live sealed and untainted binder, and a live exact
 observer service-poster incarnation. "Untainted" is the binder's IMAGE
 (`proc_image_tainted_locked`, operator vote 120): a taint taken through memory it
 shares with another space counts. It is asked before [[lock-pts]], because it
-walks the binder's mappings under `as->lock`, an edge the pts lock must not gain;
+reads the binder's share family under `as->lock` (vote 122), an edge the pts lock must not gain;
 the lifecycle lock held across both keeps the answer current. Witness:
 `pts.bind_weighs_shared_taint` (a sealed host whose shared memory was debugged
 from another space is refused; over a private fork it binds). A live binding cannot be replaced. Positive

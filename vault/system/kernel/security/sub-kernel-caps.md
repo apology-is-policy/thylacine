@@ -346,10 +346,11 @@ the child instead.
   authority indirectly. Note which mechanism carries which guarantee: the JOIN,
   not this refusal, is what makes the publication race safe, since a peer's
   `rfork` takes the address-space reference outside any lock.
-  Since operator vote 120 (2026-11-14) the image includes shared anonymous
-  memory a fork mapped into another space, so a Proc mapping such a Burrow is
-  refused like an RFMEM sharer, and a taint taken through the other side counts
-  (`proc_image_tainted_locked`, [[sub-kernel-proc]]).
+  Since operator votes 120 + 122 (2026-11-14) the image includes shared
+  anonymous memory a fork mapped into another space, through the share family
+  of the spaces such forks joined, so a Proc whose space is in a family and maps
+  shared anonymous memory is refused like an RFMEM sharer, and a taint taken
+  through any member counts (`proc_image_tainted_locked`, [[sub-kernel-proc]]).
   The taint is monotone, crosses fork and survives exec; each direction is
   necessary, since the attacker chooses what its victim execs. See
   [[sub-kernel-devproc]] for the join itself.

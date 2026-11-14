@@ -288,17 +288,6 @@ struct Burrow {
     struct AddrSpace *payer;
     struct Burrow    *paid_next;
     struct Burrow    *paid_prev;
-    // Vote 120 (I-39; DEBUG-FS-DESIGN 3.4), ANON_SHARED only: the image guards of
-    // every Proc that maps this Burrow or ever has, from any address space --
-    // share_caps the OR of their caps, share_guards of their PROC_IMAGE_GUARDS
-    // bits -- and share_spaces, set once a fork has mapped it into a second
-    // space. Written (atomic OR) at that fork's publication and by every image
-    // stamp on a space that maps it, both under g_proc_table_lock; read
-    // (atomic) by the image join under that lock and by vma_remove_in under
-    // as->lock, which folds the taint into the space. Never cleared.
-    u64               share_caps;
-    u32               share_guards;
-    bool              share_spaces;
     struct pagemap    pm;           // FILE / ANON_LAZY / CODE / ANON_SHARED: the sparse slot table; not live for other types
 
     // #131/#132: WHO PAID the I-32 page_count for this region, and how much.

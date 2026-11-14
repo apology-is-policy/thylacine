@@ -32,11 +32,16 @@ tearing it down.
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert_in` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
 round 4, F18); `vma_remove_in` unlinks, and extincts on a VMA its list does not
-hold (`vma_linked_in`, exact for a VMA in that list or in none); before the
-unlink it folds a shared anonymous Burrow's share-record taint into the space's
-`guards_ever` (operator vote 120), so a taint taken through another space
-outlives this space's mapping, and the image join, which reads `guards_ever`
-after its walk of the mappings, sees it in one place or the other;
+hold (`vma_linked_in`, exact for a VMA in that list or in none); `vma_insert_in`
+and `vma_remove_in` keep the space's `shared_maps` count of shared anonymous
+mappings (votes 120 + 122; the only two places a mapping is linked or unlinked,
+and a linked VMA's Burrow never changes, so the count is exact), and before the
+count drops `vma_remove_in` folds the share family's taint into the space's
+`guards_ever`, so a taint taken through another member outlives this space's
+mapping; the image join reads the count, the family and `guards_ever` in one
+hold of the same lock, so it sees the mapping or the fold, never neither (an
+`mprotect` split shrinks the original and inserts the pieces, so the count never
+passes through zero);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain_in` tears the whole list down when the address
 space's last owner drops it.

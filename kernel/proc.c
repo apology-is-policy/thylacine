@@ -2184,10 +2184,11 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELAXED);
 
     // Shared anonymous memory the clone mapped into the child's new space
-    // (vote 120; DEBUG-FS-DESIGN 3.4): its record takes the parent's whole join
-    // and both words in this hold, before any gate can see the child, so from
-    // here every guard on either image weighs the other side too.
-    proc_image_share_fork_locked(parent, child);
+    // (votes 120 + 122; DEBUG-FS-DESIGN 3.4): the share family links both
+    // spaces and takes the parent's whole join and both words in this hold,
+    // before any gate can see the child, so from here every guard on either
+    // image weighs the other side too. A spare record is put after the hold.
+    struct ShareFamily *spare_family = proc_image_share_fork_locked(parent, child);
 
     // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication
     // and for the taint's reason: the orphan rule runs under this lock at the
@@ -2201,6 +2202,7 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
 
     proc_link_child(parent, child);
     proc_table_lock_release(s);
+    share_family_put(spare_family);
 
     // Capture the pid BEFORE the child can run, and do not dereference `child`
     // past this point. Once ready() has published the thread, a PEER THREAD of
@@ -2980,55 +2982,48 @@ static void proc_image_join_one(struct Proc *q, struct proc_image_walk *w) {
     if (q->state == PROC_STATE_ZOMBIE) w->zombies++;
 }
 
-// Vote 120 (DEBUG-FS-DESIGN 3.4): visit every shared anonymous Burrow `as` maps
-// that a fork has mapped into another space. A Burrow split into several VMAs
-// is visited once per VMA, which only repeats an OR. Caller holds
-// g_proc_table_lock; the walk takes as->lock under it (the g_proc_table_lock ->
-// as->lock edge format_maps and the mem copy take; nothing under as->lock takes
-// g_proc_table_lock).
-static void proc_image_shared_visit(struct AddrSpace *as,
-                                    void (*fn)(struct Burrow *, void *), void *arg) {
-    if (!as || !as->xshare) return;
-    irq_state_t vs = spin_lock_irqsave(&as->lock);
-    for (struct Vma *v = as->vmas; v; v = v->next) {
-        if (v->magic != VMA_MAGIC) extinction("proc_image_shared_visit: corrupted VMA list entry");
-        struct Burrow *b = v->burrow;
-        if (b && b->type == BURROW_TYPE_ANON_SHARED &&
-            __atomic_load_n(&b->share_spaces, __ATOMIC_ACQUIRE))
-            fn(b, arg);
+// What `as`'s records add to its image: the space's own record of departed
+// holders, and -- while the space maps shared anonymous memory -- its share
+// family's (votes 120 + 122; DEBUG-FS-DESIGN 3.4). O(1): the family replaced a
+// walk of the space's mappings that had no practical bound (audit round 36
+// F1). The family pointer is stable under g_proc_table_lock, which the caller
+// holds (the publication writes a published space's under it); shared_maps
+// and the unmap fold change only under as->lock, so the three are read in one
+// hold of it and an unmap is seen whole -- the mapping counted, or the
+// family's taint folded into guards_ever -- never neither. A space with no
+// family has no fold and no count to weigh, so it skips the lock.
+struct proc_image_record {
+    caps_t caps;
+    u32    guards;
+    bool   shared;
+};
+
+static void proc_image_record_locked(struct AddrSpace *as, struct proc_image_record *r) {
+    r->caps = CAP_NONE;
+    r->guards = 0;
+    r->shared = false;
+    if (!as) return;
+    struct ShareFamily *f = as->family;
+    irq_state_t vs = 0;
+    if (f) {
+        vs = spin_lock_irqsave(&as->lock);
+        if (as->shared_maps) {
+            r->caps   = __atomic_load_n(&f->caps, __ATOMIC_ACQUIRE);
+            r->guards = __atomic_load_n(&f->guards, __ATOMIC_ACQUIRE);
+            r->shared = true;
+        }
     }
-    spin_unlock_irqrestore(&as->lock, vs);
-}
-
-static void proc_image_join_shared_one(struct Burrow *b, void *arg) {
-    struct ProcImageJoin *out = arg;
-    out->caps  |= __atomic_load_n(&b->share_caps, __ATOMIC_ACQUIRE);
-    out->flags |= __atomic_load_n(&b->share_guards, __ATOMIC_ACQUIRE);
-    out->shared = true;
-}
-
-static void proc_image_taint_one(struct Burrow *b, void *arg) {
-    if (__atomic_load_n(&b->share_guards, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED)
-        *(bool *)arg = true;
-}
-
-// Is `as`'s image tainted beyond what its Procs' own words say? The space's
-// record of departed holders (which vma_remove_in also feeds when a tainted
-// shared Burrow is unmapped) and the record of every shared anonymous Burrow
-// it maps that another space maps. The walk runs FIRST: an unmap folds into
-// guards_ever under as->lock before it unlinks, so a read of guards_ever after
-// the walk sees whatever the walk missed. Caller holds g_proc_table_lock.
-static bool proc_image_record_tainted_locked(struct AddrSpace *as) {
-    if (!as) return false;
-    bool t = false;
-    proc_image_shared_visit(as, proc_image_taint_one, &t);
-    return t || (__atomic_load_n(&as->guards_ever, __ATOMIC_RELAXED) & PROC_FLAG_DEBUG_TAINTED);
+    r->caps   |= __atomic_load_n(&as->caps_ever, __ATOMIC_RELAXED);
+    r->guards |= __atomic_load_n(&as->guards_ever, __ATOMIC_RELAXED);
+    if (f) spin_unlock_irqrestore(&as->lock, vs);
 }
 
 bool proc_image_tainted_locked(const struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) extinction("proc_image_tainted_locked: NULL or corrupted Proc");
-    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) ||
-           proc_image_record_tainted_locked(p->as);
+    if (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) return true;
+    struct proc_image_record r;
+    proc_image_record_locked(p->as, &r);
+    return (r.guards & PROC_FLAG_DEBUG_TAINTED) != 0;
 }
 
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
@@ -3038,22 +3033,22 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     out->shared = false;
     if (!p || !p->as) return;
 
-    // The other address spaces this image reaches through shared anonymous
-    // memory: each such Burrow's record holds every sharer's caps and guards,
-    // departed ones included, and any one of them makes the image shared.
-    // Asked before the sole-owner return below, which knows only this space,
-    // and before the space's own record is read, because an unmap folds a
-    // shared Burrow's taint into that record before it unlinks the mapping.
-    proc_image_shared_visit(p->as, proc_image_join_shared_one, out);
-
-    // The holders that have LEFT the image, sole mapper or not: what they held is
-    // still in the bytes (a creator's code aliases, a driver's device windows, a
-    // sealed parent's secrets), and no live mapper's word names it any more. The
-    // record is written under this lock at the ZOMBIE transition and the exec
-    // swap, so a holder is in the record before a reap can take it out of the
-    // walk below.
-    out->caps  |= __atomic_load_n(&p->as->caps_ever, __ATOMIC_RELAXED);
-    out->flags |= __atomic_load_n(&p->as->guards_ever, __ATOMIC_RELAXED);
+    // The records: the holders that have LEFT the image, sole mapper or not --
+    // what they held is still in the bytes (a creator's code aliases, a
+    // driver's device windows, a sealed parent's secrets), and no live
+    // mapper's word names it any more; the record is written under this lock
+    // at the ZOMBIE transition and the exec swap, so a holder is in the record
+    // before a reap can take it out of the walk below. And the other address
+    // spaces this image reaches through shared anonymous memory: the share
+    // family's record holds every member's caps and guards, departed ones
+    // included, and while this space maps shared anonymous memory it makes
+    // the image shared. Asked before the sole-owner return below, which knows
+    // only this space.
+    struct proc_image_record r;
+    proc_image_record_locked(p->as, &r);
+    out->caps  |= r.caps;
+    out->flags |= r.guards;
+    if (r.shared) out->shared = true;
 
     // No other reference at all: nothing to join, and no traversal to pay for.
     // This is the overwhelmingly common case, which is what keeps a per-operation
@@ -3093,49 +3088,52 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     if (others > w.zombies) out->shared = true;
 }
 
-struct proc_image_share_note {
-    caps_t caps;
-    u32    guards;
-};
-
-static void proc_image_share_fork_one(struct Burrow *b, void *arg) {
-    const struct proc_image_share_note *n = arg;
-    __atomic_fetch_or(&b->share_caps, n->caps, __ATOMIC_RELAXED);
-    __atomic_fetch_or(&b->share_guards, n->guards, __ATOMIC_RELAXED);
-    __atomic_store_n(&b->share_spaces, true, __ATOMIC_RELEASE);
-}
-
-void proc_image_share_fork_locked(struct Proc *parent, struct Proc *child) {
+struct ShareFamily *proc_image_share_fork_locked(struct Proc *parent, struct Proc *child) {
     if (!parent || parent->magic != PROC_MAGIC || !child || child->magic != PROC_MAGIC)
         extinction("proc_image_share_fork_locked: NULL or corrupted Proc");
-    struct AddrSpace *cas = child->as;
-    if (!cas || cas == parent->as || !cas->xshare) return;
+    struct AddrSpace *cas = child->as, *pas = parent->as;
+    if (!cas || !pas || cas == pas) return NULL;
+    // The clone puts a child that maps shared anonymous memory in a family; the
+    // child is unpublished, so nothing has unmapped anything of it yet.
+    if (cas->shared_maps && !cas->family)
+        extinction("proc_image_share_fork_locked: a sharing child space outside any family");
+    if (!cas->family) return NULL;
+
+    // Link the parent's space to the child's family -- or, if a rival fork by
+    // a peer thread gave the parent one after this fork's clone read it, move
+    // the child onto the parent's: a space is in one family, and the parent's
+    // is published. The parent's pointer is written under its as->lock as well
+    // as this one, for the unmap fold, which holds only the former.
+    struct ShareFamily *spare = NULL;
+    irq_state_t vs = spin_lock_irqsave(&pas->lock);
+    if (!pas->family) {
+        share_family_get(cas->family);
+        pas->family = cas->family;
+    } else if (pas->family != cas->family) {
+        share_family_get(pas->family);
+        spare = cas->family;
+        cas->family = pas->family;
+    }
+    spin_unlock_irqrestore(&pas->lock, vs);
+
     // Everything that could drive these bytes from the parent's side: its
     // whole join (the Procs on its space, the space's departed holders, and
-    // the records of what it already shares), its own word, and the child's.
-    // Read in the hold that publishes the child, the one every elevation path
-    // holds, so an elevation that raced ahead is weighed here and one that
-    // comes after finds the Burrow shared and is refused.
+    // its family's record), its own word, and the child's. Read in the hold
+    // that publishes the child, the one every elevation path holds, so an
+    // elevation that raced ahead is weighed here and one that comes after
+    // finds the image shared and is refused.
     struct ProcImageJoin j;
     proc_image_join_locked(parent, &j);
-    struct proc_image_share_note n;
-    n.caps   = j.caps
-             | __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE)
-             | __atomic_load_n(&child->caps, __ATOMIC_ACQUIRE);
-    n.guards = (j.flags
-                | __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE)
-                | __atomic_load_n(&child->proc_flags, __ATOMIC_ACQUIRE))
-             & PROC_IMAGE_GUARDS;
-    // The child's space is unpublished, so no visitor marks it shared yet;
-    // walk it directly (its xshare came from the clone).
-    irq_state_t vs = spin_lock_irqsave(&cas->lock);
-    for (struct Vma *v = cas->vmas; v; v = v->next) {
-        if (v->magic != VMA_MAGIC) extinction("proc_image_share_fork_locked: corrupted VMA list entry");
-        struct Burrow *b = v->burrow;
-        if (b && b->type == BURROW_TYPE_ANON_SHARED) proc_image_share_fork_one(b, &n);
-    }
-    spin_unlock_irqrestore(&cas->lock, vs);
-    if (parent->as) parent->as->xshare = 1u;
+    caps_t caps = j.caps
+                | __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE)
+                | __atomic_load_n(&child->caps, __ATOMIC_ACQUIRE);
+    u32 guards = (j.flags
+                  | __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE)
+                  | __atomic_load_n(&child->proc_flags, __ATOMIC_ACQUIRE))
+               & PROC_IMAGE_GUARDS;
+    __atomic_fetch_or(&cas->family->caps, caps, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&cas->family->guards, guards, __ATOMIC_RELEASE);
+    return spare;
 }
 
 static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
@@ -3143,24 +3141,21 @@ static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
         __atomic_fetch_or(&q->proc_flags, w->bits, __ATOMIC_RELAXED);
 }
 
-static void proc_image_stamp_shared_one(struct Burrow *b, void *arg) {
-    __atomic_fetch_or(&b->share_guards, *(const u32 *)arg, __ATOMIC_RELEASE);
-}
-
 // OR `bits` into `p` AND into every other mapper of its address space (zombies
-// included), and into the share record of every shared anonymous Burrow its
-// space maps that another space maps too -- a restriction on the image binds
-// every door to it. Caller holds g_proc_table_lock, and no address space's lock.
+// included), and into its space's share family record -- a restriction on the
+// image binds every door to it. Caller holds g_proc_table_lock, and no address
+// space's lock.
 
 static void proc_image_stamp_locked(struct Proc *p, u32 bits) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_image_stamp_locked: NULL or corrupted Proc");
     __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
     // And every other space this image reaches through shared anonymous
-    // memory (vote 120): the bits go on each such Burrow's record, which those
-    // spaces' joins read.
+    // memory (votes 120 + 122): the bits go on the share family's record,
+    // which every member's join reads. The pointer is stable under this lock.
     u32 guards = bits & PROC_IMAGE_GUARDS;
-    if (p->as && guards) proc_image_shared_visit(p->as, proc_image_stamp_shared_one, &guards);
+    if (p->as && p->as->family && guards)
+        __atomic_fetch_or(&p->as->family->guards, guards, __ATOMIC_RELEASE);
     if (!p->as || addrspace_owner_count(p->as) <= 1) return;
     struct proc_image_walk w = { .target = p, .out = NULL, .zombies = 0, .bits = bits };
     proc_image_visit(proc_image_stamp_one, &w);

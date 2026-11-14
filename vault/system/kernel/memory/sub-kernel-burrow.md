@@ -484,14 +484,14 @@ and neither the record nor the payer keeps a part) and
 the path in the first installer's window, and the first installer refunds the
 two nodes it no longer needs).
 
-**The share record (operator vote 120, 2026-11-14; DEBUG-FS-DESIGN 3.4).** An
-ANON_SHARED Burrow also carries `share_caps`, `share_guards` (the
-`PROC_IMAGE_GUARDS` bits) and `share_spaces`: the image guards of every Proc that
-maps it or ever has, from any address space, and whether a fork has mapped it
-into a second space. The fork's publication writes it and every image stamp on a
-space that maps it ORs into it, both with atomic ORs under `g_proc_table_lock`;
-the image join reads it, and `vma_remove_in` reads its taint to fold into the
-unmapping space. Nothing clears it. Its rules are [[sub-kernel-proc]]'s.
+**No share record on the Burrow (operator vote 122, 2026-11-14; DEBUG-FS-DESIGN
+3.4).** Vote 120's first build kept the image guards of every sharer on each
+ANON_SHARED Burrow (`share_caps`, `share_guards`, `share_spaces`), found by a walk
+of the target's mappings; audit round 36 F1 showed that walk unbounded, and the
+record moved to the share family of the address spaces
+([[sub-kernel-addrspace]], [[sub-kernel-proc]]). A Burrow carries nothing for the
+image join; its type alone (`BURROW_TYPE_ANON_SHARED`) is what `vma_insert_in`
+counts.
 
 ### The cross-Proc share
 

@@ -637,12 +637,12 @@ always, so the ordinary debug operation pays nothing for it.
 
 Since operator vote 120 (2026-11-14; DEBUG-FS-DESIGN 3.4) the image also reaches
 across address spaces: a shared anonymous Burrow a fork mapped into a second
-space is part of both images, and its share record holds every sharer's caps and
-guards ([[sub-kernel-proc]]). So cover must cover the sharers in every space,
-`NOTRACE` or `NODUMP` on any of them refuses, and a debug write through one side
-taints the other side's image. The witnesses fork a real `addrspace_clone` and
-run the publication's record write as `rfork_internal` does, each against the
-same fork over a private map: `devproc.share_join_cover` (a peer covering only
+space is part of both images, and since vote 122 the share family's record holds
+every member's caps and guards ([[sub-kernel-proc]]). So cover must cover every
+Proc in the family, `NOTRACE` or `NODUMP` on any of them refuses, and a debug
+write through one side taints the other side's image. The witnesses fork a real
+`addrspace_clone` and run the publication as `rfork_internal` does, each against
+the same fork over a private map: `devproc.share_join_cover` (a peer covering only
 the stripped child is refused it), `devproc.share_join_elevation` (neither side
 elevates while mapping the Burrow; unmapped, the parent does),
 `devproc.share_join_seals` (`NODUMP` taken after the fork reaches the child
@@ -653,11 +653,18 @@ still refuses its elevation). `devproc.share_join_fork_and_exec` runs the
 fork's taint inheritance and the exec swap on a kernel-thread child's own
 thread: its grandchild is born tainted and its exec puts the taint on its word,
 and over a private map neither happens. `pts.bind_weighs_shared_taint`
-([[sub-kernel-pts]]) is the interaction gate's witness. Only a fork from EL0
-clones a space, so the publication's call site in `rfork_internal` is checked by
-review alone. The join's walk of the space's mappings is audit round 36 F1: it
-is unbounded in practice under the global lock, and its replacement awaits the
-operator's vote.
+([[sub-kernel-pts]]) is the interaction gate's witness. Three cover the family
+itself: `devproc.share_family_rival_fork` (two clones before either publication;
+the second publication moves its child onto the parent's family and hands its
+spare back, so a stamp through that child reaches the parent; one live record
+after), `devproc.share_family_counts_every_piece` (an `mprotect` split counts
+three pieces; with two left the parent does not elevate, with none it does) and
+`devproc.share_family_lifetime` (one record per sharing fork, kept by the parent
+after the child's space goes, freed with the parent's; none for a private fork).
+Only a fork from EL0 clones a space, so the publication's call site in
+`rfork_internal` is checked by review alone. The join reads the family in O(1);
+vote 120's walk of the space's mappings, unbounded under the global lock (audit
+round 36 F1), is gone.
 
 ### The register write has a privilege guard
 
