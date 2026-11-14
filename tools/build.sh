@@ -967,6 +967,14 @@ DOSBOXCONF
         || { echo "==> expect form check FAILED -- see tools/check-expect-forms.py" >&2
              exit 1; }
 
+    # libthyla-rs runs on no host, so its errno tables are checked here: each
+    # variant's errno decodes back to it, and each has a text.
+    echo "==> libthyla-rs errno tables (err.rs encode, decode and text agree)"
+    python3 "$REPO_ROOT/tools/check-err-rs.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-err-rs.py" --root "$REPO_ROOT" \
+        || { echo "==> errno table check FAILED -- see tools/check-err-rs.py" >&2
+             exit 1; }
+
     # ERRORS.md principle 6: a syscall argument that does not fit is refused,
     # never cast down. Fatal, self-testing, sub-second.
     echo "==> argument width check (ERRORS.md principle 6)"
