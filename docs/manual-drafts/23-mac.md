@@ -54,10 +54,10 @@ mv /mnt/mac/folders/work/drafts /tmp/drafts
 
 `/tmp/report.txt` and `drafts` are illustrative names. `mv` makes the copy under a new name beside the destination, beginning with `.mv-`, and writes each file to the disk before it closes it. It then renames the copy over the destination, which replaces the destination in one step: a program on the Mac sees the old destination or the whole copy, never part of one. Once that rename is on the disk, `mv` removes the original, so for a moment both exist. A destination that is a directory with something in it is refused before anything is copied.
 
-If the copy fails, `mv` removes its copy and leaves the original and the destination as they were; if even its copy cannot be removed, `mv` names the `.mv-` name it left. `mv` removes only what it copied. A file that appeared in the original while the copy was being made is left where it is, and `mv` names it and fails:
+If the copy fails, `mv` removes its copy and leaves the original and the destination as they were; if even its copy cannot be removed, `mv` names the `.mv-` name it left. `mv` removes only what it copied, and a file only as it was when copied. A file that appeared in the original while the copy was being made, or that a program changed after `mv` copied it, is left where it is, and `mv` names it and fails:
 
 ```text
-mv: '/mnt/mac/folders/work/drafts/late.txt' was not copied; left in place
+mv: '/mnt/mac/folders/work/drafts/late.txt' changed or appeared after the copy; left in place
 ```
 
 `late.txt` is an illustrative name. If the original cannot be removed, the copy remains, and so does whatever of the original could not be removed; `mv` says what and fails. If the rename cannot be written to the disk, `mv` keeps the original too, and says so.
@@ -111,7 +111,7 @@ The `Uid` that `stat` prints is the `uid` that `id` prints, and the `Gid` is tha
 
 A symbolic link in a shared folder is followed within `/mnt/mac`. A relative target is resolved from the directory that holds the link. An absolute target is resolved from `/mnt/mac`, so a link whose target is `/folders/work/notes.txt` names `/mnt/mac/folders/work/notes.txt`. A link that the Mac uses to reach a file outside the shared folder, such as `config -> /Users/me/.config/app`, names `/mnt/mac/Users/me/.config/app` in the guest, and a command that follows it fails as for a missing file. To make such a file available, move it into a shared folder or share its folder.
 
-`rm` removes a link itself, never what it points to, and a link to a directory needs no `-r`.
+`rm` removes a link itself, never what it points to, and a link to a directory needs no `-r`. Written with a trailing slash, as in `link/`, the name means the directory the link points to, as POSIX has it: `rm -r link/` removes what that directory holds and then fails, because the link is not a directory.
 
 The Mac app never follows a link on the Mac. If the Mac replaces a directory that a program is using with a link, nothing outside the shared folder is read through it. A working directory is kept as a name, so the next lookup beside it walks down from the root again, meets the link, and follows it within `/mnt/mac` as any link there is followed. A link to a Mac folder outside the share then names nothing, and the lookup fails with `no such file or namespace entry`.
 
@@ -152,9 +152,9 @@ The Mac app performs every operation on the Mac as the user who runs it, and rep
 
 A rename is one operation within one 9P session. The guest's own files are served by other sessions than `/mnt/mac`, so the kernel refuses a rename between them and `/mnt/mac` with `invalid cross-device link` before it asks either side. The Mac app refuses a rename between two shared folders with the same error, because they are separate folders on the Mac. `mv` answers that error by copying and then removing, as POSIX `mv` does.
 
-`mv` walks the original by directory handles. It opens each entry from the handle of the directory it was listed in, without following a link, and removes it by name through that same handle, so a link that a Mac program puts in place of a directory while `mv` works cannot lead the removal outside the original. `rm -r` removes a tree the same way. `mv` also checks the original's identity before and after the copy: if the original was replaced while it was being copied, `mv` removes its copy, says the original changed, and leaves both names as they were.
+`mv` walks the original by directory handles. It opens each entry from the handle of the directory it was listed in, without following a link, and removes it by name through that same handle, so a link that a Mac program puts in place of a directory while `mv` works cannot lead the removal outside the original. `rm -r` removes a tree the same way, and names each entry it cannot remove and goes on with the rest. The copy opens each file and directory without following a link and checks that it is the entry it found, so a link put in place during the copy is refused, not followed. `mv` checks the original's identity when the copy begins and again when it removes it. If the original was replaced before the copy began, `mv` removes its copy, says the original changed, and leaves both names as they were; if it was replaced later, the copy is in place, and `mv` leaves the new original, names it, and fails. Before the rename, `mv` checks that the `.mv-` name still holds its copy. A file's removal also compares the file's version, which the Mac app moves on every change to its content, size, mode or owner, reading the file's change time to the nanosecond.
 
-`/srv/mac` and every other posted service read as regular files until they are opened, so `cp` and `mv` can tell that one is special only by opening it: copying or moving a service connects to it once, and the connection is closed at once. A write to the disk that `mv` waits for is a sync, and the Mac app commits each sync past the drive's own cache, so a copy in a shared folder that `mv` has synced survives the Mac losing power.
+`/srv/mac` and every other posted service read as regular files until they are opened, so `cp` and `mv` can tell that one is special only by opening it: copying or moving a service connects to it once, and the connection is closed at once. A write to the disk that `mv` waits for is a sync, and the Mac app commits each sync past the drive's own cache, so a copy in a shared folder that `mv` has synced survives the Mac losing power. On a disk that cannot commit past its cache, such as a network share, the Mac app makes an ordinary sync instead, and the drive may still hold the data when the power goes.
 
 ### Errors
 

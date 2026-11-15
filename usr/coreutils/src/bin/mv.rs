@@ -8,14 +8,18 @@
 // destination, each file and directory synced; the temporary name is renamed
 // over the destination (an atomic replace on that device) and the
 // destination's directory synced; only then is the source removed
-// (coreutils::rmtree), and only the entries copied: one that appeared during
-// the copy is named and left. A copy that fails removes the temporary name and
-// leaves the source and the destination as they were. A union can make two
-// names one file, or point a name at a different file between two lookups, so
-// mv compares identities (Dev instance, qid path): a destination that is the
-// source is refused, and a source that no longer names the file copied is not
-// removed. -n is asked before the move: a destination created after that is
-// replaced (no rename here refuses to replace).
+// (coreutils::rmtree), and only the entries copied, each file as it was
+// copied: one that appeared during the copy, or changed after it, is named and
+// left. A copy that fails removes the temporary name and leaves the source and
+// the destination as they were. A union can make two names one file, or point
+// a name at a different file between two lookups, so mv compares identities
+// (Dev instance, qid path): a destination that is the source is refused, the
+// name renamed into place must be the copy, and a source that no longer names
+// the file copied is not removed. A file's removal also compares its qid
+// version, which its server moves on every change and gives anew to a file
+// that reuses a removed one's number. -n is asked before the move: a
+// destination created after that is replaced (no rename here refuses to
+// replace).
 
 #![no_std]
 #![no_main]
@@ -261,6 +265,22 @@ fn move_across(src: &str, dst: &str, verbose: bool) -> bool {
         undo(&dparent, &tname, &tpath, done.dst_top, src);
         return false;
     }
+    // The copy was made by path; the rename goes through the directory mv
+    // opened, so the entry it renames must be the copy.
+    match stat_at(&dparent, &tname) {
+        Ok(tm) if Some(id_of(&tm)) == done.dst_top => {}
+        Ok(_) | Err(Error::NotFound) => {
+            eprintln!(
+                "mv: '{}' is no longer the copy mv made; '{}' is kept",
+                tpath, src
+            );
+            return false;
+        }
+        Err(e) => {
+            eprintln!("mv: cannot stat '{}': {}; '{}' is kept", tpath, e, src);
+            return false;
+        }
+    }
     if let Err(e) = dparent.rename_at(&tname, &dparent, dname) {
         eprintln!("mv: cannot move '{}' to '{}': {}", src, dst, e);
         undo(&dparent, &tname, &tpath, done.dst_top, src);
@@ -274,15 +294,11 @@ fn move_across(src: &str, dst: &str, verbose: bool) -> bool {
     let r = Rm {
         tool: "mv",
         recursive: true,
-        keep_going: true,
         verbose: false,
         missing_ok: true,
         only: Some(done.copied.as_slice()),
     };
-    if !matches!(
-        rmtree::remove_at(&sparent, sname, src, false, Some(sid), &r),
-        Ok(true)
-    ) {
+    if !rmtree::remove_at(&sparent, sname, src, false, Some(sid), &r) {
         return false;
     }
     if verbose {
@@ -307,24 +323,20 @@ fn temp_name(dir: &File) -> Result<String, Error> {
 }
 
 /// Remove what a failed move made at the temporary name, if it is still what
-/// the copy created; the source and the destination are not touched.
+/// the copy created; the source and the destination are not touched. Without
+/// the identity the copy recorded (its own error named the path), nothing is.
 fn undo(dparent: &File, tname: &str, tpath: &str, made: Option<Id>, src: &str) {
+    let Some(id) = made else {
+        return;
+    };
     let r = Rm {
         tool: "mv",
         recursive: true,
-        keep_going: true,
         verbose: false,
         missing_ok: true,
         only: None,
     };
-    let gone = match made {
-        Some(id) => matches!(
-            rmtree::remove_at(dparent, tname, tpath, false, Some(id), &r),
-            Ok(true)
-        ),
-        None => matches!(stat_at(dparent, tname), Err(Error::NotFound)),
-    };
-    if !gone {
-        eprintln!("mv: '{}' is left partly copied; '{}' is whole", tpath, src);
+    if !rmtree::remove_at(dparent, tname, tpath, false, Some(id), &r) {
+        eprintln!("mv: the copy '{}' is left; '{}' is whole", tpath, src);
     }
 }

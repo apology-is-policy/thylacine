@@ -5,34 +5,40 @@
 // io::copy. Recursion skips "." / ".." (fs::read_dir yields them).
 //
 // File identity is (dev, qid path) from a stat that follows links, as the
-// opens do. A destination that IS its source is refused before the truncating
-// open could empty it, wherever in a tree it occurs; a directory met again
-// below itself (a symlink cycle), or the destination tree met inside the
-// source, is not descended. Keeping attributes keeps the source's times, owner
-// and mode (an owner or group the caller may not give is left without a word,
-// as GNU cp and mv leave it for an unprivileged caller; the mode carries no
-// setuid or setgid bit, so none survives a refused owner). Copying a symlink as
-// a symlink needs a creation call native code does not have yet, so a symlink
-// source is refused when links are not followed. Every destination file is
-// closed with its error checked: a write the server had not yet taken fails the
-// copy there. A file's mode, times and identity come from its open handle, the
-// file actually copied; a special file is refused on what that handle says (an
-// unconnected /srv entry stats as a regular file, and the open that tells
-// connects to the service, a connection dropped at once).
+// opens do -- or, when links are not followed, from one that does not, and
+// each file and directory is then opened without following a final link and
+// checked to be the entry that stat found, so a link swapped in during the
+// copy cannot lead it out of the tree. A destination that IS its source is
+// refused before the truncating open could empty it, wherever in a tree it
+// occurs; a directory met again below itself (a symlink cycle), or the
+// destination tree met inside the source, is not descended. Keeping attributes
+// keeps the source's times, owner and mode (an owner or group the caller may
+// not give is left without a word, as GNU cp and mv leave it for an
+// unprivileged caller; the mode carries no setuid or setgid bit, so none
+// survives a refused owner). Copying a symlink as a symlink needs a creation
+// call native code does not have yet, so a symlink source is refused when
+// links are not followed. Every destination file is closed with its error
+// checked: a write the server had not yet taken fails the copy there. A file's
+// mode, times and identity come from its open handle, the file actually
+// copied; a special file is refused on what that handle says (an unconnected
+// /srv entry stats as a regular file, and the open that tells connects to the
+// service, a connection dropped at once).
 //
 // A directory's attributes and sync wait until the whole walk is done (its
 // entries change it until then, and a kept read-only mode would refuse them),
 // and are applied deepest first, each to the directory the copy made, checked
 // by identity. mv asks three more things: every entry created new (its
 // temporary tree), each file and directory synced, and directory attributes
-// kept only when the whole copy succeeded, since a failed one is removed.
+// kept only when the whole copy succeeded, since a failed one is removed. It
+// is told each entry reproduced, a file with the version its open found, so
+// that its removal of the source can leave a file changed since.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use libthyla_rs::env;
 use libthyla_rs::err::Error;
-use libthyla_rs::fs::{self, File, FileTimes, Metadata, OpenOptions, Path};
+use libthyla_rs::fs::{self, File, FileTimes, Metadata, OpenOptions, Path, ReadDir};
 use libthyla_rs::{eprintln, io, println, T_OREAD};
 
 /// How a copy behaves, and the tool its diagnostics name.
@@ -64,6 +70,18 @@ pub fn id_of(m: &Metadata) -> Id {
     (m.dev(), m.qid_path())
 }
 
+/// An entry as it was copied: its identity and, for anything but a directory,
+/// its qid version, which the server moves on every change to the file and
+/// gives anew to a file that reuses a removed one's number. A directory's
+/// entries change it, and one entry added must not stand for every file copied
+/// below it, so a directory is its identity alone.
+pub type Ver = (u64, u64, Option<u32>);
+
+pub fn ver_of(m: &Metadata) -> Ver {
+    let v = if m.is_dir() { None } else { Some(m.qid_vers()) };
+    (m.dev(), m.qid_path(), v)
+}
+
 /// What a copy did, for a caller that removes its source or undoes it (mv).
 #[derive(Default)]
 pub struct Done {
@@ -71,8 +89,8 @@ pub struct Done {
     pub src_top: Option<Id>,
     /// The top destination entry, when the copy created it.
     pub dst_top: Option<Id>,
-    /// Every source entry reproduced, sorted.
-    pub copied: Vec<Id>,
+    /// Every source entry reproduced, as it was when copied, sorted.
+    pub copied: Vec<Ver>,
 }
 
 /// A directory the copy made or filled, whose attributes and sync wait for the
@@ -117,23 +135,19 @@ pub fn copy_tracked(src: &str, dst: &str, o: &Opts, done: &mut Done) -> bool {
 }
 
 fn copy_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
-    if o.no_deref {
-        match File::open_link(src).and_then(|f| f.metadata()) {
-            Ok(m) if m.is_symlink() => {
-                eprintln!(
-                    "{}: cannot copy symbolic link '{}': creating a link is not supported",
-                    o.tool, src
-                );
-                return false;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("{}: cannot stat '{}': {}", o.tool, src, e);
-                return false;
-            }
+    let stat = if o.no_deref {
+        File::open_link(src).and_then(|f| f.metadata())
+    } else {
+        fs::metadata(src)
+    };
+    match stat {
+        Ok(m) if m.is_symlink() => {
+            eprintln!(
+                "{}: cannot copy symbolic link '{}': creating a link is not supported",
+                o.tool, src
+            );
+            false
         }
-    }
-    match fs::metadata(src) {
         Ok(m) if m.is_dir() => copy_dir(src, dst, &m, o, w),
         Ok(m) => copy_file(src, dst, &m, o, w),
         Err(e) => {
@@ -211,12 +225,12 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
     if o.verbose && created {
         println!("'{}' -> '{}'", src, dst);
     }
-    w.done.copied.push(id);
+    w.done.copied.push(ver_of(m));
 
     w.ancestors.push(id);
     let mut ok = true;
-    match fs::read_dir(src) {
-        Ok(entries) => {
+    match list(src, id, o) {
+        Some(entries) => {
             for ent in entries {
                 match ent {
                     Ok(e) => {
@@ -236,10 +250,7 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
                 }
             }
         }
-        Err(e) => {
-            eprintln!("{}: cannot read directory '{}': {}", o.tool, src, e);
-            ok = false;
-        }
+        None => ok = false,
     }
     w.ancestors.pop();
     if o.preserve || o.sync {
@@ -250,6 +261,31 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
         });
     }
     ok
+}
+
+/// The entries of the directory `src`, whose identity is `id`. When links are
+/// not followed, a final link is not, and what the open finds must be that
+/// directory: a link or another entry swapped in after the stat is refused.
+fn list(src: &str, id: Id, o: &Opts) -> Option<ReadDir> {
+    let listed = if o.no_deref {
+        File::open_nofollow(src).and_then(|f| {
+            let same = id_of(&f.metadata()?) == id;
+            Ok(same.then(|| ReadDir::from_file(f)))
+        })
+    } else {
+        fs::read_dir(src).map(Some)
+    };
+    match listed {
+        Ok(Some(entries)) => Some(entries),
+        Ok(None) => {
+            eprintln!("{}: '{}' changed during the copy; not copied", o.tool, src);
+            None
+        }
+        Err(e) => {
+            eprintln!("{}: cannot read directory '{}': {}", o.tool, src, e);
+            None
+        }
+    }
 }
 
 fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool {
@@ -265,7 +301,12 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool
             }
         }
     }
-    let mut r = match File::open(src) {
+    let opened = if o.no_deref {
+        File::open_nofollow(src)
+    } else {
+        File::open(src)
+    };
+    let mut r = match opened {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{}: cannot open '{}' for reading: {}", o.tool, src, e);
@@ -282,6 +323,13 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool
     };
     if o.refuse_special && !sm.is_file() {
         eprintln!("{}: cannot copy special file '{}'", o.tool, src);
+        return false;
+    }
+    // Not following links, the file opened must be the one the stat found: a
+    // link swapped in is refused by the open, another entry here. (A service's
+    // stream has its own identity; it is refused above when that is asked.)
+    if o.no_deref && (sm.is_file() || sm.is_dir()) && id_of(&sm) != id_of(m) {
+        eprintln!("{}: '{}' changed during the copy; not copied", o.tool, src);
         return false;
     }
     if w.ancestors.is_empty() {
@@ -329,7 +377,7 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool
         eprintln!("{}: error writing '{}': {}", o.tool, dst, e);
         return false;
     }
-    w.done.copied.push(id_of(&sm));
+    w.done.copied.push(ver_of(&sm));
     if o.verbose {
         println!("'{}' -> '{}'", src, dst);
     }
@@ -346,7 +394,7 @@ fn finish(made: &[Made], whole: bool, o: &Opts) -> bool {
         return true;
     }
     let mut ok = true;
-    for d in made.iter().rev() {
+    for d in made.iter() {
         let nav = match File::open_link(d.path.as_str()) {
             Ok(f) => f,
             Err(e) => {

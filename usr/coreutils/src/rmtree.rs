@@ -6,7 +6,11 @@
 // a path walked again from the top could. The unlink itself still names the
 // entry (there is no unlink by identity): an entry replaced between its check
 // and its unlink is the one removed, and a directory replaced so only if it is
-// empty. Recursion depth follows the tree's depth.
+// empty. mv removes only what it copied, each file as it was copied (its qid
+// version too), so a file written since, or a new one given a removed one's
+// number, is left. A failure is said with the entry's own path and the walk
+// goes on, as POSIX rm and Plan 9's do. Recursion depth follows the tree's
+// depth.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,36 +19,31 @@ use libthyla_rs::err::Error;
 use libthyla_rs::fs::{File, ReadDir};
 use libthyla_rs::{eprintln, println, T_ONOFOLLOW, T_OPATH, T_OREAD};
 
-use crate::copy::{id_of, join, Id};
+use crate::copy::{id_of, join, ver_of, Id, Ver};
 
 /// How a removal reports, and what it may remove.
 pub struct Rm<'a> {
     pub tool: &'static str,
     /// A directory's contents go too; without it a directory is refused.
     pub recursive: bool,
-    /// Say each failure and go on (mv); otherwise the first failure ends the
-    /// walk and is returned for the caller to say once (rm).
-    pub keep_going: bool,
     pub verbose: bool,
     /// An entry already gone counts as removed (rm -f; mv).
     pub missing_ok: bool,
-    /// Remove only these entries, sorted (mv: what it copied). Anything else is
-    /// named and left, and with it each directory above it.
-    pub only: Option<&'a [Id]>,
+    /// Remove only these entries, sorted (mv: what it copied, each file as it
+    /// was copied). Anything else -- a file that appeared, or changed since --
+    /// is named and left, and with it each directory above it.
+    pub only: Option<&'a [Ver]>,
 }
 
 impl Rm<'_> {
-    /// A failure at `disp`: Ok(true) for an entry already gone when that is
-    /// allowed, Ok(false) once said when going on, else the error.
-    fn fail(&self, disp: &str, e: Error) -> Result<bool, Error> {
+    /// A failure at `disp`: true for an entry already gone when that is
+    /// allowed, else said, and false.
+    fn fail(&self, disp: &str, e: Error) -> bool {
         if self.missing_ok && matches!(e, Error::NotFound) {
-            return Ok(true);
+            return true;
         }
-        if self.keep_going {
-            eprintln!("{}: cannot remove '{}': {}", self.tool, disp, e);
-            return Ok(false);
-        }
-        Err(e)
+        eprintln!("{}: cannot remove '{}': {}", self.tool, disp, e);
+        false
     }
 }
 
@@ -52,8 +51,7 @@ impl Rm<'_> {
 /// with `recursive` everything below it; `disp` names it in messages. `follow`
 /// follows a final link (an operand written with a trailing slash names a
 /// directory, POSIX 4.13), and `expect` is the identity the entry must still
-/// have. Ok(true) when it is gone, Ok(false) when something was left (each
-/// said), Err at the first failure when not going on.
+/// have. True when it is gone, false when something was left (each said).
 pub fn remove_at(
     parent: &File,
     name: &str,
@@ -61,7 +59,7 @@ pub fn remove_at(
     follow: bool,
     expect: Option<Id>,
     r: &Rm,
-) -> Result<bool, Error> {
+) -> bool {
     let omode = if follow {
         T_OPATH
     } else {
@@ -81,11 +79,15 @@ pub fn remove_at(
             "{}: '{}' is no longer the file it was; not removed",
             r.tool, disp
         );
-        return Ok(false);
+        return false;
     }
-    if r.only.is_some_and(|set| set.binary_search(&id).is_err()) {
-        eprintln!("{}: '{}' was not copied; left in place", r.tool, disp);
-        return Ok(false);
+    let ver = ver_of(&m);
+    if r.only.is_some_and(|set| set.binary_search(&ver).is_err()) {
+        eprintln!(
+            "{}: '{}' changed or appeared after the copy; left in place",
+            r.tool, disp
+        );
+        return false;
     }
     if !m.is_dir() {
         if follow {
@@ -96,7 +98,7 @@ pub fn remove_at(
                 if r.verbose {
                     println!("removed '{}'", disp);
                 }
-                Ok(true)
+                true
             }
             Err(e) => r.fail(disp, e),
         };
@@ -110,19 +112,19 @@ pub fn remove_at(
     };
     let mut whole = true;
     for n in &names {
-        if !remove_at(&nav, n, &join(disp, n), false, None, r)? {
+        if !remove_at(&nav, n, &join(disp, n), false, None, r) {
             whole = false;
         }
     }
     if !whole {
-        return Ok(false);
+        return false;
     }
     match parent.unlink_at(name, true) {
         Ok(()) => {
             if r.verbose {
                 println!("removed directory '{}'", disp);
             }
-            Ok(true)
+            true
         }
         Err(e) => r.fail(disp, e),
     }

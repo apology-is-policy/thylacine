@@ -106,20 +106,21 @@ fn run(args: Args) -> i64 {
         let r = Rm {
             tool: "rm",
             recursive,
-            keep_going: false,
             verbose,
             missing_ok: force,
             only: None,
         };
-        let gone = File::open_with_opath(dir).and_then(|parent| {
-            rmtree::remove_at(&parent, name, path, path.ends_with('/'), None, &r)
-        });
-        match gone {
-            Ok(_) => {}
+        // Each entry that could not be removed is said by the walk, which goes on.
+        match File::open_with_opath(dir) {
+            Ok(parent) => {
+                if !rmtree::remove_at(&parent, name, path, path.ends_with('/'), None, &r) {
+                    status = 1;
+                }
+            }
             // -f: a missing target is success, not an error.
             Err(Error::NotFound) if force => {}
             Err(e) => {
-                eprintln!("rm: {}: {}", path, e);
+                eprintln!("rm: cannot remove '{}': {}", path, e);
                 status = 1;
             }
         }
