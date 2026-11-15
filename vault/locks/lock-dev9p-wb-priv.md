@@ -6,12 +6,15 @@ kind: spin
 orders-before: []
 guards: "the per-open-file append-run state (wb_buf/off/len/cap/base/known/eligible/flushers/err)"
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-11-15
 ---
 A PURE LEAF: only byte copies and state reads happen under it — wire I/O
 NEVER (blocking 9P under a spinlock is the #360 violation). The only
 thing ever acquired below it is the buddy zone lock via kmalloc/kfree
-(the established Larder-leaf → buddy order; both non-blocking). The
+(the established Larder-leaf → buddy order; both non-blocking). Since vote
+M23 (2026-11-15) one lock may be held when it is taken: a bucket lock of the
+holder registry ([[lock-dev9p-wb-reg]]), by a leg reading another open's run
+and by `wb_close_swap`; never the reverse. The
 flush drops it across the wire Twrites and re-takes it to retire —
 sound because `wb_flushers != 0` FREEZES the run (no stage, no growth
 realloc), so the out-of-lock reads of the captured buffer cannot race a

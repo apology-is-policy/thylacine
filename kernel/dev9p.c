@@ -703,20 +703,22 @@ static void wb_patch_stat_size(struct dev9p_priv *p, struct t_stat *out) {
 // =============================================================================
 // The file's holder (LARDER-DESIGN 12.6, vote M23): on one client a file's held
 // bytes are the client's, so another open's operation on the file lands them
-// first. One registered holder per client and file; the entry is the priv.
+// first. One entry per client and file: the holder's, or past its last
+// reference the closer job carrying its run.
 // =============================================================================
 
-// A bucket lock guards its chain and every wb_registered in it. It is taken
-// before a holder's wb_lock and never under one. The array starts zeroed, and a
-// zeroed lock is unlocked (SPIN_LOCK_INIT).
+// A bucket lock guards its chain and the linked flag of every entry in it. It is
+// taken before a holder's wb_lock and never under one. The array starts zeroed,
+// and a zeroed lock is unlocked (SPIN_LOCK_INIT).
 #define WB_REG_BUCKETS 64u
 struct wb_reg_bucket {
-    spin_lock_t         lock;
-    struct dev9p_priv  *head;
+    spin_lock_t          lock;
+    struct dev9p_wb_reg *head;
 };
 static struct wb_reg_bucket g_wb_reg[WB_REG_BUCKETS];
-static u32 g_wb_reg_count;          // registered holders: the legs' fast path
+static u32 g_wb_reg_count;          // linked entries: the legs' fast path
 static u64 g_wb_holder_flushes;
+static u64 g_wb_leg_waits;
 
 #ifdef KERNEL_TESTS
 u64 dev9p_wb_holder_flushes(void) {
@@ -726,6 +728,10 @@ u64 dev9p_wb_holder_flushes(void) {
 u32 dev9p_wb_holders(void) {
     return __atomic_load_n(&g_wb_reg_count, __ATOMIC_RELAXED);
 }
+
+u64 dev9p_wb_leg_waits(void) {
+    return __atomic_load_n(&g_wb_leg_waits, __ATOMIC_RELAXED);
+}
 #endif // KERNEL_TESTS
 
 static struct wb_reg_bucket *wb_reg_bucket_of(const struct p9_client *cl, u64 path) {
@@ -734,45 +740,79 @@ static struct wb_reg_bucket *wb_reg_bucket_of(const struct p9_client *cl, u64 pa
     return &g_wb_reg[h & (u64)(WB_REG_BUCKETS - 1u)];
 }
 
+static struct dev9p_wb_reg *wb_reg_find_locked(struct wb_reg_bucket *b,
+                                               const struct p9_client *cl, u64 path) {
+    struct dev9p_wb_reg *e = b->head;
+    while (e && !(e->cl == cl && e->path == path)) e = e->next;
+    return e;
+}
+
+// Under b's lock: the link that points at e.
+static struct dev9p_wb_reg **wb_reg_link_locked(struct wb_reg_bucket *b,
+                                                const struct dev9p_wb_reg *e) {
+    struct dev9p_wb_reg **pp = &b->head;
+    while (*pp && *pp != e) pp = &(*pp)->next;
+    if (*pp != e) extinction("dev9p: a registered holder missing from its bucket");
+    return pp;
+}
+
 // A create- or OTRUNC-born open becomes the file's holder, or stays ineligible
-// when another open already holds the file. Before c is published, so p's own
-// fields take plain stores; the chain is the bucket's.
+// when another open, or a closer job carrying a run, already holds the file.
+// Before c is published, so p's own fields take plain stores; the chain is the
+// bucket's.
 static bool wb_register(struct dev9p_priv *p, struct Spoor *c) {
     u64 path = c->qid.path;
     struct wb_reg_bucket *b = wb_reg_bucket_of(p->client, path);
     spin_lock(&b->lock);
-    for (struct dev9p_priv *h = b->head; h; h = h->wb_reg_next) {
-        if (h->client == p->client && h->wb_reg_path == path) {
-            spin_unlock(&b->lock);
-            return false;
-        }
+    if (wb_reg_find_locked(b, p->client, path)) {
+        spin_unlock(&b->lock);
+        return false;
     }
-    p->wb_reg_path = path;
-    p->wb_spoor    = c;
-    p->wb_reg_next = b->head;
-    b->head        = p;
-    __atomic_store_n(&p->wb_registered, true, __ATOMIC_RELEASE);
+    p->wb_reg.cl     = p->client;
+    p->wb_reg.holder = p;
+    p->wb_reg.path   = path;
+    p->wb_spoor      = c;
+    p->wb_reg.next   = b->head;
+    b->head          = &p->wb_reg;
+    __atomic_store_n(&p->wb_reg.linked, true, __ATOMIC_RELEASE);
     __atomic_fetch_add(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
     spin_unlock(&b->lock);
     return true;
 }
 
-// Leave the registry: at the last close once the run is gone, or at the last
-// reference, before anything of the priv is torn down.
-static void wb_unregister(struct dev9p_priv *p) {
-    if (!__atomic_load_n(&p->wb_registered, __ATOMIC_ACQUIRE)) return;
-    struct wb_reg_bucket *b = wb_reg_bucket_of(p->client, p->wb_reg_path);
+// Leave the registry. Only e's owner calls it, and only once e can no longer
+// be linked by anyone else, so the unlocked look at `linked` is its own store.
+static void wb_reg_leave(struct dev9p_wb_reg *e) {
+    if (!__atomic_load_n(&e->linked, __ATOMIC_ACQUIRE)) return;
+    struct wb_reg_bucket *b = wb_reg_bucket_of(e->cl, e->path);
     spin_lock(&b->lock);
-    if (p->wb_registered) {
-        struct dev9p_priv **pp = &b->head;
-        while (*pp && *pp != p) pp = &(*pp)->wb_reg_next;
-        if (*pp != p) extinction("dev9p: a registered holder missing from its bucket");
-        *pp = p->wb_reg_next;
-        p->wb_reg_next = NULL;
-        __atomic_store_n(&p->wb_registered, false, __ATOMIC_RELEASE);
+    if (e->linked) {
+        struct dev9p_wb_reg **pp = wb_reg_link_locked(b, e);
+        *pp     = e->next;
+        e->next = NULL;
+        __atomic_store_n(&e->linked, false, __ATOMIC_RELEASE);
         __atomic_fetch_sub(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
     }
     spin_unlock(&b->lock);
+}
+
+// The holder leaves: at its last close once its run is gone, or at its last
+// reference when it holds none, before anything of the priv is torn down.
+static void wb_unregister(struct dev9p_priv *p) {
+    wb_reg_leave(&p->wb_reg);
+}
+
+// Waiting out a run on its way to a closer (12.6), which no leg can flush: a
+// closer job carries it, or a holder whose last reference has gone is handing
+// it on. As wb_flush_wait; a death or a caught note first, and the operation
+// does not happen.
+static int wb_leg_wait(u64 *backoff) {
+    struct Thread *t = current_thread();
+    if (thread_die_pending(t))        return -T_E_IO;
+    if (thread_caught_note_unwinds(t)) return -T_E_INTR;
+    __atomic_fetch_add(&g_wb_leg_waits, 1u, __ATOMIC_RELAXED);
+    wb_flush_wait(backoff);
+    return 0;
 }
 
 // Before another open's operation on a plain file: land what the file's holder
@@ -781,36 +821,51 @@ static void wb_unregister(struct dev9p_priv *p) {
 // Loom registration) also drops the holder's anchor, so its later writes go
 // through. 0: nothing was held. 1: a run was flushed -- landed, or dropped on a
 // server failure, which latched on the holder for its next write, fsync or last
-// close. Negative: the operation must not go on, and the run stays held for the
-// next flusher -- -T_E_INTR when this thread's caught note cancelled the flush
-// (flush(5): never applied), -T_E_IO when a death reached this thread.
+// close -- or a run on its way to a closer was waited out. Negative: the
+// operation must not go on, and a run this leg flushed stays held for the next
+// flusher -- -T_E_INTR when this thread's caught note cancelled the flush
+// (flush(5): never applied) or ended a wait, -T_E_IO when a death reached this
+// thread.
 static int wb_holder_flush(struct p9_client *cl, u64 path,
                            const struct dev9p_priv *self, bool changing) {
     if (__atomic_load_n(&g_wb_reg_count, __ATOMIC_ACQUIRE) == 0) return 0;
     struct wb_reg_bucket *b = wb_reg_bucket_of(cl, path);
-    spin_lock(&b->lock);
-    struct dev9p_priv *h = b->head;
-    while (h && !(h->client == cl && h->wb_reg_path == path)) h = h->wb_reg_next;
-    if (!h || h == self) {
+    u64 backoff = WB_FLUSH_WAIT_NS_MIN;
+    int waited  = 0;
+    struct dev9p_priv *h;
+    struct Spoor *s;
+    for (;;) {
+        spin_lock(&b->lock);
+        struct dev9p_wb_reg *e = wb_reg_find_locked(b, cl, path);
+        h = e ? e->holder : NULL;
+        if (!e || (h && h == self)) {
+            spin_unlock(&b->lock);
+            return waited;
+        }
+        s = NULL;
+        if (h) {
+            spin_lock(&h->wb_lock);
+            bool held = h->wb_len || h->wb_flushers;
+            if (!held && changing && h->wb_known) {
+                h->wb_known = false;
+                wb_release_dead_locked(h);
+            }
+            spin_unlock(&h->wb_lock);
+            if (!held) {
+                spin_unlock(&b->lock);
+                return waited;
+            }
+            // A Spoor whose last reference has gone is closing (spoor_tryref
+            // refuses it), and its dev9p_close hands the run to a job that
+            // takes this entry, under this lock.
+            if (spoor_tryref(h->wb_spoor)) s = h->wb_spoor;
+        }
         spin_unlock(&b->lock);
-        return 0;
+        if (s) break;
+        int wr = wb_leg_wait(&backoff);
+        if (wr < 0) return wr;
+        waited = 1;
     }
-    spin_lock(&h->wb_lock);
-    bool held = h->wb_len || h->wb_flushers;
-    if (!held && changing && h->wb_known) {
-        h->wb_known = false;
-        wb_release_dead_locked(h);
-    }
-    spin_unlock(&h->wb_lock);
-    // A Spoor whose last reference has gone is closing: its dev9p_close leaves the
-    // registry first, under this lock, so it is refused here, and a run it still
-    // holds goes with that close.
-    struct Spoor *s = h->wb_spoor;
-    if (!held || !spoor_tryref(s)) {
-        spin_unlock(&b->lock);
-        return 0;
-    }
-    spin_unlock(&b->lock);
 
     spin_lock(&h->wb_lock);
     int rc = 0;
@@ -2108,7 +2163,8 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
 
 // The rest of a last close that may not wait for its server (ARCH 7.9.1 part
 // C): a closer writes the staged run, then clunks the fid. The job owns the
-// run's buffer and its budget charge until released.
+// run's buffer and its budget charge until released, and holds the open's
+// place in the holder registry until then (LARDER-DESIGN 12.6).
 struct dev9p_close_job {
     struct p9_close_job job;     // first: the closer hands back this pointer
     u8                 *buf;
@@ -2116,6 +2172,7 @@ struct dev9p_close_job {
     u32                 len;
     u64                 off;
     u64                 qid_path;
+    struct dev9p_wb_reg reg;
 };
 
 static int dev9p_close_job_run(struct p9_close_job *job, struct p9_client *c,
@@ -2131,6 +2188,9 @@ static int dev9p_close_job_run(struct p9_close_job *job, struct p9_client *c,
 
 static void dev9p_close_job_release(struct p9_close_job *job) {
     struct dev9p_close_job *j = (struct dev9p_close_job *)job;
+    // The run has landed, or is lost and was reported: the client's other opens
+    // stop waiting for it (12.6).
+    wb_reg_leave(&j->reg);
     kfree(j->buf);
     wb_budget_uncharge((u64)j->cap);
     kfree(j);
@@ -2144,26 +2204,64 @@ static bool close_may_wait(void) {
     return t && !thread_die_pending(t);
 }
 
+// The run moves from p to j, and j takes p's entry in the holder registry, in
+// one step under the bucket lock, where a leg reads p (12.6). Before j is
+// queued: the closer's release of j unlinks it.
+static void wb_close_swap(struct dev9p_priv *p, struct dev9p_close_job *j,
+                          u64 qid_path) {
+    j->reg = (struct dev9p_wb_reg){ .cl = p->client, .holder = NULL,
+                                    .path = qid_path };
+    bool linked = __atomic_load_n(&p->wb_reg.linked, __ATOMIC_ACQUIRE);
+    struct wb_reg_bucket *b = linked ? wb_reg_bucket_of(p->client, p->wb_reg.path)
+                                     : NULL;
+    if (b) spin_lock(&b->lock);
+    spin_lock(&p->wb_lock);
+    j->buf    = p->wb_buf;
+    j->cap    = p->wb_cap;
+    j->len    = p->wb_len;
+    j->off    = p->wb_off;
+    p->wb_buf = NULL;
+    p->wb_len = 0;
+    spin_unlock(&p->wb_lock);
+    if (b) {
+        j->reg.path = p->wb_reg.path;
+        struct dev9p_wb_reg **pp = wb_reg_link_locked(b, &p->wb_reg);
+        j->reg.next     = p->wb_reg.next;
+        *pp             = &j->reg;
+        p->wb_reg.next  = NULL;
+        __atomic_store_n(&p->wb_reg.linked, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&j->reg.linked, true, __ATOMIC_RELEASE);
+        spin_unlock(&b->lock);
+    }
+}
+
 // Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
 // negative errno when it cannot -- the priv owns no fid or no session
-// reference (a test's bare client), or no memory.
+// reference (a test's bare client), or no memory. Either way p has left the
+// holder registry; on success the job stands in its place.
 static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
-    if (!p->fid_owned || !p->attached_owner) return -T_E_IO;
+    if (!p->fid_owned || !p->attached_owner) {
+        wb_unregister(p);
+        return -T_E_IO;
+    }
     struct dev9p_close_job *j = kmalloc(sizeof(*j), 0);
-    if (!j) return -T_E_NOMEM;
+    if (!j) {
+        wb_unregister(p);
+        return -T_E_NOMEM;
+    }
     j->job.run     = dev9p_close_job_run;
     j->job.release = dev9p_close_job_release;
-    j->buf         = p->wb_buf;
-    j->cap         = p->wb_cap;
-    j->len         = p->wb_len;
-    j->off         = p->wb_off;
     j->qid_path    = qid_path;
+    wb_close_swap(p, j, qid_path);
     if (p9_attached_defer_close(p->attached_owner, p->fid, &j->job) != 0) {
+        // Lost, and reported by the caller: the buffer goes back to p, whose
+        // close frees it.
+        wb_reg_leave(&j->reg);
+        p->wb_buf = j->buf;
+        p->wb_len = j->len;
         kfree(j);
         return -T_E_NOMEM;
     }
-    p->wb_buf = NULL;
-    p->wb_len = 0;
     return 0;
 }
 
@@ -2171,9 +2269,12 @@ static int dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
 
-    // LARDER-DESIGN 12.6: leave the holder registry before anything of the priv
-    // goes. A leg that found it already refused it (its count is 0).
-    wb_unregister(p);
+    // LARDER-DESIGN 12.6: with nothing staged, leave the holder registry before
+    // anything of the priv goes. A run keeps the entry until its closer job takes
+    // it (wb_close_hand_off, below), and a leg that finds it meanwhile waits:
+    // spoor_tryref refuses it. Nothing stages or flushes past the last
+    // reference, so wb_len is settled.
+    if (!p->wb_len) wb_unregister(p);
 
     // net-6b-2b + #294: release the readiness poll-state (if this was a netd
     // `ready` file). A registered poller holds the Spoor obj-ref, so poll_list is
@@ -2251,7 +2352,8 @@ static int dev9p_close(struct Spoor *c) {
     // thread could wait. One still staged here -- a death ended that flush, or
     // the Spoor never had a descriptor -- goes to a closer with the fid's clunk
     // (ARCH 7.9.1 part C), since this thread may not wait for the server, and is
-    // no loss yet. LAST-ref runs here (the cached-open/weft invariant), so no
+    // no loss yet. Its job keeps the run findable in the holder registry until
+    // it lands (12.6). LAST-ref runs here (the cached-open/weft invariant), so no
     // concurrent op exists on this priv: the plain wb_len reads are sound and
     // wb_flushers is 0. Then release the buffer + the global budget
     // (unconditional on wb_buf: a priv that stopped staging may still own its
@@ -3005,7 +3107,9 @@ static int dev9p_lock_sync(struct Spoor *c, u32 how) {
 // send, and an exit's close cannot wait for memory. With nothing else holding
 // c, its last reference follows at once and hands the run to a closer with the
 // clunk, which releases the locks. With a holder that might never let go, a
-// closer does the flush and the unlock now.
+// closer does the flush and the unlock now. Either way the run stays in the
+// holder registry until it lands (LARDER-DESIGN 12.6): c stays registered
+// while staged, and the clunk's job takes c's place.
 //
 // Reads the grant after spoor_fd_drop, as a lock call reads spoor_fd_open after
 // storing it: a grant this close misses, that call sees it missed.

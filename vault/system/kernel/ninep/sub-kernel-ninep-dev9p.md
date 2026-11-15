@@ -10,12 +10,12 @@ code:
 audit: hard
 guarded-by: [inv-i38]
 validated-by: [spec-fs-cache, gate-smp]
-locks: [lock-dev9p-wb-priv]
+locks: [lock-dev9p-wb-priv, lock-dev9p-wb-reg]
 hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-09
+updated: 2026-11-15
 ---
 ## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
 
@@ -346,7 +346,9 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    never tried, or kept by a death that ended the flush -- goes to a closer with the fid's
    clunk (`wb_close_hand_off` -> `p9_attached_defer_close`, a
    `dev9p_close_job` owning the buffer and its budget charge), and the close
-   returns 0: nothing is lost yet. The closer writes the run
+   returns 0: nothing is lost yet. Until its release the job stands in the
+   open's place in the holder registry (`wb_close_swap`; "The file's holder"
+   below), so the client's other opens wait for the run. The closer writes the run
    (`wb_write_run`, the loop `wb_flush_locked` uses), then drops the file's
    cached attr and pages rather than installing them, since that write lands
    unordered with the file's later writers; then it clunks. A hand-off that
@@ -657,6 +659,60 @@ the `fs_cache_buggy_populate_unflushed` counterexample cfg). An own page
 serves without the cvers gate and the boundary page extends only an OWN
 page ending exactly at the run start — sound under the loose single-writer
 premise the wb already asserts.
+
+### The file's holder (LARDER-DESIGN 12.6, vote M23, 2026-11-15)
+
+On one client a file's held bytes are the client's: another open's operation
+on the file lands them first, as one page cache per file per client would.
+**The registry**: 64 buckets of entries keyed by client and qid.path
+([[lock-dev9p-wb-reg]], ordered before `wb_lock`), at most one per file. An
+entry is a holder's `wb_reg` -- `wb_register`, at the eligibility gate of a
+create-born open (`dev9p_create`) or an OTRUNC open (`dev9p_open`), so a second
+open of a held file stays ineligible and writes through -- or a closer job's.
+The holder leaves at its last close once nothing is staged (`dev9p_fd_close`)
+or at its last reference with no run (`dev9p_close`, first thing). With a run
+at the last reference, `wb_close_swap` moves the run into the hand-off job and
+the job into the holder's place, under the bucket lock and before the job is
+queued; the job's release leaves (`wb_reg_leave`), after the closer's write and
+Tclunk. A hand-off that fails leaves the registry too. `g_wb_reg_count` (all
+entries) is the legs' fast path.
+
+**`wb_holder_flush(cl, path, self, changing)`** -- the leg. Observing legs:
+`dev9p_open` (any mode, before the Tlopen), `dev9p_open_cached` (a held leaf ->
+NULL, the normal path), `dev9p_read`, `dev9p_stat_native`, `dev9p_fsync`, and
+the walk-fused getattr. Changing legs, which also drop the holder's anchor so
+it stops staging: `dev9p_write`, an OTRUNC `dev9p_open`, `dev9p_wstat_native`,
+`dev9p_loom_register`. The holder's own operations pass (`self`). Under the
+bucket lock the leg finds the entry. A holder with nothing held: 0 (a changing
+leg drops the anchor in place). A holder holding a run or a flush: the leg
+takes a reference on its Spoor only while one is held (`spoor_tryref`; a
+closing holder is refused), and flushes outside every lock through
+`wb_flush_locked` (single-flight). A job, or a holder refused as closing:
+`wb_leg_wait` (`wb_flush_wait`'s yield or doubling sleep, counted in
+`g_wb_leg_waits`), then look again. Returns 0, 1 (a run landed, was dropped
+and latched on the holder, or was waited out), `-T_E_INTR` (this thread's
+caught note cancelled the flush or ended the wait: `wb_note_cancelled`,
+`thread_caught_note_unwinds`) or `-T_E_IO` (a death); on a negative return the
+operation does not happen and a run it flushed stays held.
+
+**The stat by name** (`walk_attrs_pass(..., asked)`, wrapped by
+`dev9p_walk_attrs`): the Larder serve skips a held leaf (asks the server
+instead); a wire answer naming a held file lands the run, gives back a bound
+fid (bind form) and walks once more with `asked`, so it reports the file after
+the flush.
+
+Witnesses: `dev9p.m23_peer_open_lands_the_run`,
+`.m23_peer_read_fstat_fsync_land_the_run`,
+`.m23_stat_by_name_lands_and_asks_again` (wire, Larder and bind arms),
+`.m23_peer_write_lands_the_run_first`,
+`.m23_truncating_open_wstat_loom_change_the_file`,
+`.m23_one_holder_per_file`, `.m23_leg_flush_failure_latches_on_the_holder`,
+`.m23_interrupted_leg_keeps_the_run` (EINTR and EIO),
+`.m23_cached_open_of_a_held_file_falls_back`, and
+`p9_closer.peer_waits_out_a_handed_off_run` (the job's place). KERNEL_TESTS
+diagnostics: `dev9p_wb_holder_flushes`, `dev9p_wb_holders`,
+`dev9p_wb_leg_waits`. Spec: `fs_cache.tla`'s named opens (OneHolder; the
+`buggy_peer_skips_staged` and `buggy_peer_unordered` cfgs).
 
 ### The weft data-drive arms
 

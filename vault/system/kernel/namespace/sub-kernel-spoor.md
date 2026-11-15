@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-15
 ---
 ## Purpose
 
@@ -37,6 +37,7 @@ its own note because its lifetime rules are separable.
 void          spoor_init(void);                       // SLUB cache; extincts on re-call
 struct Spoor *spoor_alloc(struct Dev *d);             // ref 1; NULL on d==NULL / OOM
 void          spoor_ref(struct Spoor *c);             // +1; extincts on NULL/corrupt/pre<=0
+bool          spoor_tryref(struct Spoor *c);          // +1 only while ref > 0; false once it reached 0
 void          spoor_unref(struct Spoor *c);           // -1, free at 0; NO dev->close
 void          spoor_clunk(struct Spoor *c);           // -1, dev->close THEN free at 0
 int           spoor_clunk_rc(struct Spoor *c);        // spoor_clunk; returns dev->close's result
@@ -222,6 +223,14 @@ two CPUs **exactly one sees `pre == 1`** and owns the free — and, in
 the decrement (so the count reads 0) but before the free, so it can
 still safely read `aux`, `dev` and `qid`. A `pre <= 0` on any path is
 treated as a use-after-free diagnostic and extincts.
+
+`spoor_tryref` (2026-11-15, vote M23) is the one exception to that: a CAS loop
+that increments only while the count is above 0 and returns false once it
+reached 0, when the last holder's close is running. It is for a caller that
+finds the Spoor through a registry its close leaves, under that registry's
+lock, so the storage is still valid when it looks (dev9p's holder registry,
+[[sub-kernel-ninep-dev9p]]; a refused leg waits for the close to hand the run
+on).
 
 `fd_refs` counts handle slots and a spawn's endowments in flight (`handle_endow_spoor`,
 `handle_endow_drop`), where `ref` counts every holder (B-3h audit round

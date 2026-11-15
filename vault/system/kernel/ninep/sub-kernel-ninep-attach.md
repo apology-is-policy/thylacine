@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-11-09
+updated: 2026-11-15
 ---
 ## A closer entry may be a job alone (B-3h2, 2026-10-29)
 
@@ -114,7 +114,10 @@ Tclunk is sent.
   `p9_closer.close_job_retries_a_refused_write`). A job whose run still fails
   while the session holds the fid prints `9p: close: flush of fid N failed rc R`
   (`p9_close_flush_failed`, also called by dev9p when a hand-off cannot be
-  made); `jobs` and `job_errors` count them.
+  made); `jobs` and `job_errors` count them. dev9p's hand-off job stands in
+  the open's place in dev9p's holder registry until `release` (LARDER-DESIGN
+  12.6), so the closer's ordering -- run, Tclunk, release -- is what another
+  open of the file waits for (witness `p9_closer.peer_waits_out_a_handed_off_run`).
 - `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
   → the dev9p root Spoor over a SrvConn, or NULL. `who` is the attaching
   Proc (its principal names the Tattach; with the cape, its principal and

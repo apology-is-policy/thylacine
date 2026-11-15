@@ -97,6 +97,18 @@ enum dev9p_lock_ident_state {
     DEV9P_IDENT_NONE    = 2,   // the server reports none: identity by qid.path
 };
 
+// LARDER-DESIGN 12.6 (vote M23): an entry in the holder registry -- the file's
+// one holder on its client, or the closer job that open's last reference handed
+// its run to (holder NULL). Keyed by client and path, which a job keeps only as
+// a key; next and linked are stored under the bucket lock.
+struct dev9p_wb_reg {
+    struct dev9p_wb_reg *next;
+    struct p9_client    *cl;
+    struct dev9p_priv   *holder;
+    u64                  path;
+    bool                 linked;
+};
+
 struct dev9p_priv {
     u32                magic;
     struct p9_client  *client;     // pointer to the client; lifecycle managed externally
@@ -229,14 +241,10 @@ struct dev9p_priv {
     u32                       wb_len;       // staged byte count
     u64                       wb_off;       // run start offset
     u64                       wb_base;      // append anchor (valid iff wb_known)
-    // LARDER-DESIGN 12.6 (vote M23): the file's one holder on this client. A
-    // registered priv is chained in its bucket (wb_reg_next, under the bucket
-    // lock) by client and wb_reg_path, with its own Spoor for a leg's
-    // reference; wb_registered is stored under the bucket lock.
-    struct dev9p_priv        *wb_reg_next;
+    // LARDER-DESIGN 12.6 (vote M23): the open's entry while it is the file's
+    // one holder on this client, and its own Spoor for a leg's reference.
+    struct dev9p_wb_reg       wb_reg;
     struct Spoor             *wb_spoor;
-    u64                       wb_reg_path;
-    bool                      wb_registered;
 };
 
 // Cached-open bounds (FID-LIFECYCLE section 3.3; the CF-3 bounce-budget class --
@@ -278,9 +286,11 @@ u64 dev9p_wb_budget_used(void);
 u64 dev9p_wb_flush_sleeps(void);
 
 // Diagnostics: runs another open's operation landed for a file's holder
-// (LARDER-DESIGN 12.6), and holders registered now.
+// (LARDER-DESIGN 12.6); registry entries now (holders, and closer jobs that
+// took a holder's place); waits a leg took for a run on its way to a closer.
 u64 dev9p_wb_holder_flushes(void);
 u32 dev9p_wb_holders(void);
+u64 dev9p_wb_leg_waits(void);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth

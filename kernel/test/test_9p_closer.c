@@ -1187,6 +1187,115 @@ void test_p9_closer_close_job_retries_a_refused_write(void) {
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
 }
 
+// LARDER-DESIGN 12.6: the run a killed writer's last reference hands to a closer
+// stays findable. Its job takes the open's place in the holder registry until
+// its release, so another open's fsync of the file waits for the closer's write
+// and clunk instead of reaching the server first. Every send meets a full ring
+// until the server is let answer, so the closer holds the run while the peer's
+// leg runs. Rlcreate and Rlopen name the same qid.path here.
+static struct Spoor      *g_pw_peer;
+static struct test_dying  g_pw_thread;
+static int                g_pw_rc;
+
+static void pw_fsync(void *arg) {
+    (void)arg;
+    g_pw_rc = dev9p.fsync(g_pw_peer, 0);
+}
+
+static struct Spoor *pw_open_peer(struct wbc *w) {
+    struct Spoor *nc = spoor_clone(w->root);
+    if (!nc) return NULL;
+    const char *names[1] = { "wbfile" };
+    struct Walkqid *wq = dev9p.walk(w->root, nc, names, 1);
+    if (!wq || wq->nqid != 1) {
+        if (wq) walkqid_free(wq);
+        spoor_clunk(nc);
+        return NULL;
+    }
+    walkqid_free(wq);
+    struct Spoor *o = dev9p.open(nc, 0 /*OREAD*/);
+    if (!o) spoor_clunk(nc);
+    return o;
+}
+
+void test_p9_closer_peer_waits_out_a_handed_off_run(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    u32 holders0 = dev9p_wb_holders();
+    u64 waits0   = dev9p_wb_leg_waits();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    bool peered = false, started = false, handed = false;
+    bool peer_started = false, waited = false, peer_done = false;
+    u32  holders_held = 0, fsync_held = 0, write_held = 0;
+    g_pw_peer = NULL;
+    if (opened) {
+        g_pw_peer = pw_open_peer(&w);
+        peered = g_pw_peer != NULL;
+    }
+    if (peered) {
+        hold_reader(w.a->client, true);
+        p9_mq_loopback_set_eagain_budget(&g_mq_a, 0xffffffffu);
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, wbc_drop, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_wbc_thread));
+            handed = test_dying_done(&g_wbc_thread);
+            if (handed) test_dying_reap(&g_wbc_thread);
+        }
+        holders_held = dev9p_wb_holders();
+        g_pw_rc = 1;
+        peer_started = test_dying_start(&g_pw_thread, pw_fsync, NULL, /*dead_now=*/false);
+        if (peer_started) {
+            TEST_YIELD_UNTIL_SOFT(dev9p_wb_leg_waits() > waits0 ||
+                                  test_dying_done(&g_pw_thread));
+            waited = dev9p_wb_leg_waits() > waits0;
+        }
+        fsync_held = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+        write_held = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+        wbc_unstall(&w);
+        if (peer_started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_pw_thread));
+            peer_done = test_dying_done(&g_pw_thread);
+            if (peer_done) test_dying_reap(&g_pw_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    u32 holders_end = dev9p_wb_holders();
+    int pcc = peered && peer_done ? wbc_fd_close(g_pw_peer) : 0;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(peered, "a peer open of the same file");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_ASSERT(handed, "its last close returned without the server");
+    TEST_EXPECT_EQ((u64)holders_held, (u64)holders0 + 1ull,
+                   "the run's job took the open's place in the registry");
+    TEST_ASSERT(peer_started, "a peer thread");
+    TEST_ASSERT(waited, "the peer's fsync waited for the run");
+    TEST_EXPECT_EQ((u64)fsync_held, 0ull, "and sent nothing meanwhile");
+    TEST_EXPECT_EQ((u64)write_held, 0ull, "while the closer could not write (control)");
+    TEST_ASSERT(peer_done, "the peer's fsync returned once the server answered");
+    TEST_EXPECT_EQ((u64)(s64)g_pw_rc, 0ull, "and succeeded");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "the killed close reports nothing lost");
+    TEST_EXPECT_EQ((u64)rec.nwrite, 1ull, "the closer wrote the run");
+    TEST_EXPECT_EQ((u64)rec.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_ASSERT(rec.write_at < rec.clunk_at, "then the Tclunk");
+    TEST_EXPECT_EQ((u64)rec.nfsync, 1ull, "one Tfsync");
+    TEST_ASSERT(rec.clunk_at < rec.fsync_at, "after the closer's job was done");
+    TEST_EXPECT_EQ((u64)holders_end, (u64)holders0, "the job left the registry at its release");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one close job ran");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+    TEST_EXPECT_EQ((u64)(s64)pcc, 0ull, "the peer closes");
+}
+
 // An exits() close sets no group_exit_msg, so its first kill wins the CAS; the
 // final-close mark the at-exit close sets is what makes that kill find the close
 // under way and force it (part B). The Proc's own thread runs the real at-exit

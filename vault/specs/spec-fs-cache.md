@@ -41,6 +41,9 @@ and the dir-fid cache (fids are identity, not content).
 | `OwnWrite` | the per-mutation invalidate sets (write/create/wstat/rename/unlink/OTRUNC) |
 | `Refetch` | the gen-guarded installs after each RPC |
 | `StageWrite` / `FlushClose` | `wb_write_prepare` / `wb_flush_locked` (+ the G1 own-install on FlushClose) |
+| `Read(f, o)`'s `PeersClear` (vote M23) | `wb_holder_flush`'s observing legs: dev9p open / open_cached / read / stat_native / fsync, and walk_attrs_pass (the serve skips a held leaf; a wire answer re-asks once) |
+| `OwnWrite(f, o)`'s `PeersClear` | `wb_holder_flush`'s changing legs: dev9p write / OTRUNC open / wstat_native / loom_register (land, then drop the holder's anchor) |
+| `StageWrite(f, o)`'s `PeersClear`, `OneHolder` | `wb_register` at the eligibility gates (one entry per client and qid.path); the hand-off job keeps the entry until its release (`wb_close_swap`) |
 
 The dev9p rows are the POLICY sites; the mechanism they drive —
 `larder_attr_serve`/`_install`/`_invalidate`, `larder_page_serve`/

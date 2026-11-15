@@ -105,6 +105,11 @@ static u32  g_twalk_enoent_n;
 static u32  g_wire_seq;
 static u32  g_twrite_seen;
 static u32  g_twrite_last_seq, g_clunk_last_seq, g_tfsync_last_seq;
+// LARDER-DESIGN 12.6 (M23): when a peer's own op reached the wire, and path
+// overrides that make a walk and a Tlopen name the created file (Rlcreate's
+// 0x77) instead of their canonical 0x10+i and 0x42.
+static u32  g_tlopen_last_seq, g_tread_last_seq, g_wga_last_seq, g_tsetattr_last_seq;
+static u64  g_twalk_path_ov, g_tlopen_path_ov;   // 0: the canonical paths
 static u32  g_twrite_fail_ecode;     // != 0: the NEXT Twrite answers Rlerror(ecode), then clears
 static u32  g_tlopen_fail_ecode; // one-shot Tlopen errno control
 static u32  g_tlcreate_fail_ecode;   // #99: != 0: the NEXT Tlcreate answers Rlerror(ecode), then clears
@@ -145,6 +150,7 @@ static void wb_wire_reset(void) {
     g_wire_seq = 0;
     g_twrite_seen = 0;
     g_twrite_last_seq = g_clunk_last_seq = g_tfsync_last_seq = 0;
+    g_tlopen_last_seq = g_tread_last_seq = g_wga_last_seq = g_tsetattr_last_seq = 0;
     g_twrite_fail_ecode = 0;
     g_twrite_cap_len = 0;
     g_twrite_cap_off = 0;
@@ -316,8 +322,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
             size_t off = P9_HDR_LEN + 2 + (size_t)i * P9_QID_LEN;
             resp[off] = P9_QTFILE;
             for (int j = 0; j < 4; j++) resp[off + 1 + j] = 0;
-            resp[off + 5] = (u8)(0x10 + i);     // distinguishable path
-            for (int j = 1; j < 8; j++) resp[off + 5 + j] = 0;
+            u64 qp = g_twalk_path_ov ? g_twalk_path_ov : (u64)(0x10 + i);  // distinguishable
+            for (int j = 0; j < 8; j++) resp[off + 5 + j] = (u8)(qp >> (8 * j));
         }
         return (int)total;
     }
@@ -335,6 +341,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TLOPEN) {
         g_lopen_seen++;
+        g_tlopen_last_seq = g_wire_seq;
         if (req_len >= P9_HDR_LEN + 4) g_tlopen_fid = le32_at(req + 7);
         if (g_race_rfid_priv) {
             __atomic_store_n(&g_race_rfid_priv->co_rfid, g_race_fid, __ATOMIC_RELEASE);
@@ -357,7 +364,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
         resp[7] = P9_QTFILE;
         for (int i = 0; i < 4; i++) resp[8 + i] = 0;
-        resp[12] = 0x42; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        { u64 qp = g_tlopen_path_ov ? g_tlopen_path_ov : 0x42u;
+          for (int i = 0; i < 8; i++) resp[12 + i] = (u8)(qp >> (8 * i)); }
         resp[20] = 0; resp[21] = 0x10; resp[22] = 0; resp[23] = 0;     // iounit=4096
         return (int)total;
     }
@@ -366,6 +374,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         if (req_len >= P9_HDR_LEN + 4 + 8 + 4)
             g_tread_req_offset = le64_at(req + 11);
         g_tread_seen++;
+        g_tread_last_seq = g_wire_seq;
         if (req_len >= P9_HDR_LEN + 4) g_tread_fid = le32_at(req + 7);
         // Big-file mode (task-#44 aligned-read tests): a pattern file of
         // g_tread_file_size bytes, honoring offset + count (the client already
@@ -636,6 +645,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TWALKGETATTR) {
         g_wga_seen++;
+        g_wga_last_seq = g_wire_seq;
         if (req_len >= P9_HDR_LEN + 4 + 4 + 8) {
             g_wga_newfid = le32_at(req + 11);
             g_wga_mask   = le64_at(req + 15);
@@ -712,6 +722,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TSETATTR) {
+        g_tsetattr_last_seq = g_wire_seq;
         // Capture the request's valid/mode/uid/gid (Tsetattr body: fid@7,
         // valid@11, mode@15, uid@19, gid@23) so the test asserts the
         // T_WSTAT_* mask + values reached the wire.
@@ -805,6 +816,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
 // responder, returning a Spoor at the bound root.
 static struct Spoor *make_open_client_and_root(void) {
     g_tlopen_fail_ecode = 0;
+    g_twalk_path_ov = 0;
+    g_tlopen_path_ov = 0;
     g_setattr_fail_ecode = 0;
     // The attribute replies' fixtures: an assert returns from its test, so a
     // test that failed between setting one and restoring it left it set.
@@ -4626,6 +4639,558 @@ static void wb_server_eintr_leg(u32 claim) {
 void test_dev9p_wb_server_eintr_latches(void) {
     wb_server_eintr_leg(0u);
     wb_server_eintr_leg(1u);
+}
+
+// =============================================================================
+// LARDER-DESIGN 12.6 (vote M23): on one client a file's held bytes are the
+// client's. The holder is wbfile's create-born open (Rlcreate's qid.path 0x77);
+// a peer is another open of the same file, which the path overrides make the
+// walk and the Tlopen report as 0x77 too. Each test captures, tears down, then
+// asserts.
+// =============================================================================
+
+#define M23_PATH 0x77u
+
+// The wb scratch holding wb_pat over [0, 2048): a write of chunk + o at offset o
+// puts the pattern's own bytes there, which g_twrite_pat_on checks.
+static u8 *m23_chunk(void) {
+    u8 *c = wb_scratch();
+    if (c) for (u32 i = 0; i < 2048; i++) c[i] = wb_pat(i);
+    return c;
+}
+
+static struct Spoor *m23_peer(struct Spoor *root, int omode) {
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    const char *names[1] = { "wbfile" };
+    g_twalk_path_ov  = M23_PATH;
+    g_tlopen_path_ov = M23_PATH;
+    struct Walkqid *w = dev9p.walk(root, nc, names, 1);
+    if (!w || w->nqid != 1) {
+        if (w) walkqid_free(w);
+        spoor_clunk(nc);
+        return NULL;
+    }
+    walkqid_free(w);
+    struct Spoor *o = dev9p.open(nc, omode);
+    if (!o) spoor_clunk(nc);
+    return o;
+}
+
+// Another create of wbfile: Rlcreate answers the same qid.path.
+static struct Spoor *m23_create(struct Spoor *root) {
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    if (!w) { spoor_clunk(nc); return NULL; }
+    walkqid_free(w);
+    struct Spoor *f = dev9p.create(nc, "wbfile", 1 /*OWRITE*/, 0644u, 1000u);
+    if (!f) spoor_clunk(nc);
+    return f;
+}
+
+static bool m23_known(struct Spoor *f) {
+    struct dev9p_priv *p = f ? dev9p_priv_of(f) : NULL;
+    return p && p->wb_known;
+}
+
+static void m23_end(struct Spoor *root) {
+    g_twalk_path_ov  = 0;
+    g_tlopen_path_ov = 0;
+    g_wga_path_base  = 0x20;
+    wb_test_end(root);
+}
+
+// A peer's open lands the holder's run before its Tlopen, and the holder goes
+// on staging: an open only observes.
+void test_dev9p_m23_peer_open_lands_the_run(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    u32 hb = dev9p_wb_holders();
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u32 holders1 = dev9p_wb_holders();
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    u64 hf0   = dev9p_wb_holder_flushes();
+    long w0   = dev9p.write(f, chunk, 300, 0);
+    u32 seen0 = g_twrite_seen;
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    u32 seen1 = g_twrite_seen;
+    u32 len1  = g_twrite_cap_len;
+    u64 off1  = g_twrite_cap_off;
+    u32 wseq1 = g_twrite_last_seq;
+    u32 lseq1 = g_tlopen_last_seq;
+    u64 hf1   = dev9p_wb_holder_flushes();
+    long w1   = dev9p.write(f, chunk + 300, 100, 300);
+    u32 seen2 = g_twrite_seen;
+    bool known = m23_known(f);
+    int occ   = o ? d9_close(o) : -1;
+    int fcc   = d9_close(f);
+    u32 seen3 = g_twrite_seen;
+    u32 len3  = g_twrite_cap_len;
+    u64 off3  = g_twrite_cap_off;
+    bool pat  = g_twrite_pat_ok;
+    u32 holders3 = dev9p_wb_holders();
+    m23_end(root);
+
+    TEST_EXPECT_EQ((u64)holders1, (u64)hb + 1ull, "the create-born open is the file's holder");
+    TEST_EXPECT_EQ((u64)w0, 300ull, "the holder's write is taken");
+    TEST_EXPECT_EQ((u64)seen0, 0ull, "and held");
+    TEST_ASSERT(o != NULL, "a peer opens the file");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "the peer's open landed the held run");
+    TEST_EXPECT_EQ((u64)len1, 300ull, "all of it");
+    TEST_EXPECT_EQ(off1, 0ull, "at its offset");
+    TEST_ASSERT(wseq1 != 0 && wseq1 < lseq1, "before the peer's Tlopen");
+    TEST_EXPECT_EQ(hf1, hf0 + 1, "one holder flush");
+    TEST_EXPECT_EQ((u64)w1, 100ull, "the holder writes on");
+    TEST_EXPECT_EQ((u64)seen2, 1ull, "and stages: an open only observes");
+    TEST_ASSERT(known, "the holder's anchor stands");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+    TEST_EXPECT_EQ((u64)seen3, 2ull, "its close flushes the second run");
+    TEST_EXPECT_EQ((u64)len3, 100ull, "the 100 bytes");
+    TEST_EXPECT_EQ(off3, 300ull, "after the first run");
+    TEST_ASSERT(pat, "every byte on the wire is the byte written");
+    TEST_EXPECT_EQ((u64)holders3, (u64)hb, "the holder left the registry at its close");
+}
+
+// A read, an fstat and an fsync through a peer each land the holder's run
+// first; the holder stages again between them.
+void test_dev9p_m23_peer_read_fstat_fsync_land_the_run(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    u8 rb[64];
+    long w0   = dev9p.write(f, chunk, 256, 0);
+    u32 seen0 = g_twrite_seen;
+    long r    = o ? dev9p.read(o, rb, sizeof(rb), 0) : -1;
+    u32 seen1 = g_twrite_seen;
+    u32 len1  = g_twrite_cap_len;
+    u32 wseq1 = g_twrite_last_seq;
+    u32 rseq1 = g_tread_last_seq;
+    long w1   = dev9p.write(f, chunk + 256, 256, 256);
+    u32 seen2 = g_twrite_seen;
+    struct t_stat st;
+    int sr    = o ? dev9p.stat_native(o, &st) : -1;
+    u32 seen3 = g_twrite_seen;
+    u64 off3  = g_twrite_cap_off;
+    long w2   = dev9p.write(f, chunk + 512, 256, 512);
+    u32 seen4 = g_twrite_seen;
+    int fr    = o ? dev9p.fsync(o, 0) : -1;
+    u32 seen5 = g_twrite_seen;
+    u64 off5  = g_twrite_cap_off;
+    u32 wseq5 = g_twrite_last_seq;
+    u32 fseq5 = g_tfsync_last_seq;
+    bool known = m23_known(f);
+    int occ   = o ? d9_close(o) : -1;
+    int fcc   = d9_close(f);
+    bool pat  = g_twrite_pat_ok;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "a peer opened before the holder wrote");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is taken");
+    TEST_EXPECT_EQ((u64)seen0, 0ull, "and held");
+    TEST_ASSERT(r > 0, "the peer's read returns bytes");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "the peer's read landed the run");
+    TEST_EXPECT_EQ((u64)len1, 256ull, "all of it");
+    TEST_ASSERT(rseq1 == 0 || wseq1 < rseq1, "before any Tread of its own");
+    TEST_EXPECT_EQ((u64)w1, 256ull, "the holder writes on");
+    TEST_EXPECT_EQ((u64)seen2, 1ull, "and stages: a read only observes");
+    TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "the peer's fstat succeeds");
+    TEST_EXPECT_EQ((u64)seen3, 2ull, "after landing the second run");
+    TEST_EXPECT_EQ(off3, 256ull, "the run at 256");
+    TEST_EXPECT_EQ((u64)w2, 256ull, "the holder writes on");
+    TEST_EXPECT_EQ((u64)seen4, 2ull, "and stages: an fstat only observes");
+    TEST_EXPECT_EQ((u64)(s64)fr, 0ull, "the peer's fsync succeeds");
+    TEST_EXPECT_EQ((u64)seen5, 3ull, "after landing the third run");
+    TEST_EXPECT_EQ(off5, 512ull, "the run at 512");
+    TEST_ASSERT(wseq5 < fseq5, "before the peer's Tfsync");
+    TEST_ASSERT(known, "the holder's anchor stands");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes, nothing lost");
+    TEST_ASSERT(pat, "every byte on the wire is the byte written");
+}
+
+// A stat by name of a held file lands the run, then asks the server again:
+// from the wire (the leaf came back held), from the Larder (a cached leaf is
+// older than the run), and in the bind form (the bound fid is given back).
+void test_dev9p_m23_stat_by_name_lands_and_asks_again(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    g_wga_path_base = M23_PATH;
+    const char  *names[1] = { "wbfile" };
+    const size_t lens[1]  = { 6 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    wb_wire_reset();
+    g_wga_seen = 0;
+
+    // The wire arm: create dropped wbfile's dentry, so the walk asks.
+    long w0   = dev9p.write(f, chunk, 256, 0);
+    struct Walkqid *q1 = dev9p.walk_attrs(root, NULL, names, lens, 1, sts);
+    bool q1ok = q1 && q1->nqid == 1 && sts[0].qid_path == M23_PATH;
+    if (q1) walkqid_free(q1);
+    u32 wga1  = g_wga_seen;
+    u32 seen1 = g_twrite_seen;
+    u32 wseq1 = g_twrite_last_seq;
+    u32 gseq1 = g_wga_last_seq;
+
+    // The Larder arm: the second ask installed the leaf; a new run is older.
+    long w1   = dev9p.write(f, chunk + 256, 256, 256);
+    u32 seen2 = g_twrite_seen;
+    for (u32 i = 0; i < DEV_WALK_ATTRS_MAX; i++) sts[i] = (struct t_stat){0};
+    struct Walkqid *q2 = dev9p.walk_attrs(root, NULL, names, lens, 1, sts);
+    bool q2ok = q2 && q2->nqid == 1 && sts[0].qid_path == M23_PATH;
+    if (q2) walkqid_free(q2);
+    u32 wga2  = g_wga_seen;
+    u32 seen3 = g_twrite_seen;
+    u32 wseq3 = g_twrite_last_seq;
+    u32 gseq3 = g_wga_last_seq;
+
+    // The bind form.
+    long w2   = dev9p.write(f, chunk + 512, 256, 512);
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *q3 = nc ? dev9p.walk_attrs(root, nc, names, lens, 1, sts) : NULL;
+    bool q3ok = q3 && q3->nqid == 1 && q3->spoor == nc && nc->qid.path == M23_PATH;
+    if (q3) walkqid_free(q3);
+    if (nc) spoor_clunk(nc);
+    u32 wga3  = g_wga_seen;
+    u32 seen4 = g_twrite_seen;
+    u32 wseq4 = g_twrite_last_seq;
+    u32 gseq4 = g_wga_last_seq;
+    bool known = m23_known(f);
+    int fcc   = d9_close(f);
+    m23_end(root);
+
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_ASSERT(q1ok, "the stat by name reaches the file");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "and landed the run");
+    TEST_EXPECT_EQ((u64)wga1, 2ull, "then asked again");
+    TEST_ASSERT(wseq1 < gseq1, "after the run landed");
+    TEST_EXPECT_EQ((u64)w1, 256ull, "the holder writes on");
+    TEST_EXPECT_EQ((u64)seen2, 1ull, "and stages: a stat only observes");
+    TEST_ASSERT(q2ok, "a stat with the leaf cached reaches the file");
+    TEST_EXPECT_EQ((u64)seen3, 2ull, "and landed the second run");
+    TEST_EXPECT_EQ((u64)wga2, 3ull, "then asked the server, not the Larder");
+    TEST_ASSERT(wseq3 < gseq3, "after the run landed");
+    TEST_EXPECT_EQ((u64)w2, 256ull, "the holder writes on");
+    TEST_ASSERT(q3ok, "the bind form binds the file");
+    TEST_EXPECT_EQ((u64)seen4, 3ull, "and landed the third run");
+    TEST_EXPECT_EQ((u64)wga3, 5ull, "then gave back the fid it bound and walked again");
+    TEST_ASSERT(wseq4 < gseq4, "after the run landed");
+    TEST_ASSERT(known, "the holder's anchor stands");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes, nothing lost");
+}
+
+// A write through a peer lands the holder's older run first, then goes through;
+// the holder stops staging, so its next write goes through too.
+void test_dev9p_m23_peer_write_lands_the_run_first(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 1 /*OWRITE*/);
+    struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+    bool peer_elig = op && op->wb_eligible;
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    long w0   = dev9p.write(f, chunk, 256, 0);
+    u32 seen0 = g_twrite_seen;
+    long pw   = o ? dev9p.write(o, chunk + 1000, 16, 1000) : -1;
+    u32 seen1 = g_twrite_seen;
+    u64 log0  = g_twrite_off_log[0];
+    u64 log1  = g_twrite_off_log[1];
+    bool known = m23_known(f);
+    long w1   = dev9p.write(f, chunk + 256, 64, 256);
+    u32 seen2 = g_twrite_seen;
+    u64 log2  = g_twrite_off_log[2];
+    int occ   = o ? d9_close(o) : -1;
+    int fcc   = d9_close(f);
+    u32 seen3 = g_twrite_seen;
+    bool pat  = g_twrite_pat_ok;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "a peer opened for writing");
+    TEST_ASSERT(!peer_elig, "it does not stage: not create- or OTRUNC-born");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)seen0, 0ull, "nothing on the wire");
+    TEST_EXPECT_EQ((u64)pw, 16ull, "the peer's write is taken");
+    TEST_EXPECT_EQ((u64)seen1, 2ull, "two Twrites");
+    TEST_EXPECT_EQ(log0, 0ull, "the holder's older run first");
+    TEST_EXPECT_EQ(log1, 1000ull, "then the peer's");
+    TEST_ASSERT(!known, "the holder's anchor dropped");
+    TEST_EXPECT_EQ((u64)w1, 64ull, "the holder's next write is taken");
+    TEST_EXPECT_EQ((u64)seen2, 3ull, "and goes through");
+    TEST_EXPECT_EQ(log2, 256ull, "at its offset");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+    TEST_EXPECT_EQ((u64)seen3, 3ull, "with nothing left to flush");
+    TEST_ASSERT(pat, "every byte on the wire is the byte written");
+}
+
+// A truncating open, a wstat and a Loom registration through a peer each land
+// the holder's run and stop it staging. The truncating open does not become a
+// second holder.
+static void m23_changing_leg(int leg) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    u32 hb = dev9p_wb_holders();
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = leg == 0 ? NULL : m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    long w0   = dev9p.write(f, chunk, 256, 0);
+    u32 seen0 = g_twrite_seen;
+    int lr    = -1;
+    u32 opseq = 0;
+    if (leg == 0) {
+        o  = m23_peer(root, 1 | 0x10 /*OWRITE|OTRUNC*/);
+        lr = o ? 0 : -1;
+        opseq = g_tlopen_last_seq;
+    } else if (leg == 1 && o) {
+        lr = dev9p.wstat_native(o, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL);
+        opseq = g_tsetattr_last_seq;
+    } else if (leg == 2 && o) {
+        lr = dev9p_loom_register(o);
+        opseq = 0xffffffffu;
+    }
+    u32 seen1 = g_twrite_seen;
+    u32 len1  = g_twrite_cap_len;
+    u32 wseq1 = g_twrite_last_seq;
+    bool known = m23_known(f);
+    struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+    bool peer_elig = op && op->wb_eligible;
+    u32 holders1 = dev9p_wb_holders();
+    long w1   = dev9p.write(f, chunk + 256, 64, 256);
+    u32 seen2 = g_twrite_seen;
+    int occ   = o ? d9_close(o) : -1;
+    int fcc   = d9_close(f);
+    u32 holders2 = dev9p_wb_holders();
+    bool pat  = g_twrite_pat_ok;
+    m23_end(root);
+
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)seen0, 0ull, "nothing on the wire");
+    TEST_EXPECT_EQ((u64)(s64)lr, 0ull, "the peer's change succeeds");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "after landing the held run");
+    TEST_EXPECT_EQ((u64)len1, 256ull, "all of it");
+    TEST_ASSERT(opseq == 0xffffffffu || wseq1 < opseq, "before the peer's own op");
+    TEST_ASSERT(!known, "the holder's anchor dropped");
+    TEST_ASSERT(!peer_elig, "the peer does not stage");
+    TEST_EXPECT_EQ((u64)holders1, (u64)hb + 1ull, "one holder still");
+    TEST_EXPECT_EQ((u64)w1, 64ull, "the holder's next write is taken");
+    TEST_EXPECT_EQ((u64)seen2, 2ull, "and goes through");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+    TEST_EXPECT_EQ((u64)holders2, (u64)hb, "and leaves the registry");
+    TEST_ASSERT(pat, "every byte on the wire is the byte written");
+}
+
+void test_dev9p_m23_truncating_open_wstat_loom_change_the_file(void) {
+    m23_changing_leg(0);
+    m23_changing_leg(1);
+    m23_changing_leg(2);
+}
+
+// One holder per client and file: a second create-born open of the same qid
+// writes through, and once the holder has closed, a new one holds.
+void test_dev9p_m23_one_holder_per_file(void) {
+    u32 hb = dev9p_wb_holders();
+    struct Spoor *root = NULL;
+    struct Spoor *f1 = wb_make_created(&root);
+    TEST_ASSERT(f1 != NULL, "create");
+    struct dev9p_priv *p1 = dev9p_priv_of(f1);
+    bool e1 = p1 && p1->wb_eligible;
+    struct Spoor *f2 = m23_create(root);
+    struct dev9p_priv *p2 = f2 ? dev9p_priv_of(f2) : NULL;
+    bool e2 = p2 && p2->wb_eligible;
+    u32 holders12 = dev9p_wb_holders();
+    int c2 = f2 ? d9_close(f2) : -1;
+    int c1 = d9_close(f1);
+    u32 holders0 = dev9p_wb_holders();
+    struct Spoor *f3 = m23_create(root);
+    struct dev9p_priv *p3 = f3 ? dev9p_priv_of(f3) : NULL;
+    bool e3 = p3 && p3->wb_eligible;
+    u32 holders3 = dev9p_wb_holders();
+    int c3 = f3 ? d9_close(f3) : -1;
+    u32 holders_end = dev9p_wb_holders();
+    m23_end(root);
+
+    TEST_ASSERT(e1, "the first create-born open holds");
+    TEST_ASSERT(f2 != NULL, "a second create of the file");
+    TEST_ASSERT(!e2, "does not stage: the file has a holder");
+    TEST_EXPECT_EQ((u64)holders12, (u64)hb + 1ull, "one holder");
+    TEST_EXPECT_EQ((u64)(s64)c2, 0ull, "the second closes");
+    TEST_EXPECT_EQ((u64)(s64)c1, 0ull, "the holder closes");
+    TEST_EXPECT_EQ((u64)holders0, (u64)hb, "and leaves the registry");
+    TEST_ASSERT(f3 != NULL, "a third create");
+    TEST_ASSERT(e3, "holds: the file had none");
+    TEST_EXPECT_EQ((u64)holders3, (u64)hb + 1ull, "one holder");
+    TEST_EXPECT_EQ((u64)(s64)c3, 0ull, "it closes");
+    TEST_EXPECT_EQ((u64)holders_end, (u64)hb, "and leaves");
+}
+
+// A flush a peer's leg runs that the server refuses latches on the holder, as
+// every refused flush does: the peer's fstat goes on, and the holder's next
+// write, fsync and last close report the loss.
+void test_dev9p_m23_leg_flush_failure_latches_on_the_holder(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    long w0  = dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    struct t_stat st;
+    int sr   = o ? dev9p.stat_native(o, &st) : -1;
+    u32 seen = g_twrite_seen;
+    long we  = dev9p.write(f, chunk + 256, 256, 256);
+    int fe   = dev9p.fsync(f, 0);
+    int occ  = o ? d9_close(o) : -1;
+    int fcc  = d9_close(f);
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "a peer");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "the peer's fstat goes on");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "after the refused flush");
+    TEST_EXPECT_EQ((u64)(-we), 28ull, "the holder's next write reports the loss");
+    TEST_EXPECT_EQ((u64)(s64)(-fe), 28ull, "and its fsync");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer's close has nothing to report");
+    TEST_EXPECT_EQ((u64)(s64)fcc, (u64)(s64)-28, "the holder's last close reports it");
+}
+
+// A leg whose flush a caught note cancels returns EINTR and keeps the run, and
+// so does one a death ends (EIO): the operation did not happen. The next peer
+// read lands the run whole.
+static struct test_dying g_m23_thread;
+static struct Spoor     *g_m23_spoor;
+static long              g_m23_rc;
+
+static void m23_dying_read(void *arg) {
+    (void)arg;
+    u8 rb[16];
+    g_m23_rc = dev9p.read(g_m23_spoor, rb, sizeof(rb), 0);
+}
+
+void test_dev9p_m23_interrupted_leg_keeps_the_run(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    u8 rb[16];
+    long w0  = dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = P9_E_INTR;
+    t->note_call_unwound = true;        // what an unwind leaves
+    long r0  = o ? dev9p.read(o, rb, sizeof(rb), 0) : 0;
+    t->note_call_unwound = false;       // what the EL0-return tail clears
+    u32 seen0 = g_twrite_seen;
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    u32 kept0 = fp ? fp->wb_len : 0;
+    g_m23_spoor = o;
+    g_m23_rc    = 0;
+    bool started = o && test_dying_start(&g_m23_thread, m23_dying_read, NULL,
+                                         /*dead_now=*/true);
+    if (started) {
+        TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_m23_thread));
+        if (test_dying_done(&g_m23_thread)) test_dying_reap(&g_m23_thread);
+    }
+    u32 seen1 = g_twrite_seen;
+    u32 kept1 = fp ? fp->wb_len : 0;
+    long r2   = o ? dev9p.read(o, rb, sizeof(rb), 0) : -1;
+    u32 seen2 = g_twrite_seen;
+    u32 len2  = g_twrite_cap_len;
+    int occ   = o ? d9_close(o) : -1;
+    int fcc   = d9_close(f);
+    bool pat  = g_twrite_pat_ok;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "a peer");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(-r0), (u64)T_E_INTR, "the interrupted read returns EINTR");
+    TEST_EXPECT_EQ((u64)seen0, 1ull, "its flush's Twrite went out and was cancelled");
+    TEST_EXPECT_EQ((u64)kept0, 256ull, "the run stays held");
+    TEST_ASSERT(started, "a dying peer thread");
+    TEST_EXPECT_EQ((u64)(-g_m23_rc), (u64)T_E_IO, "its read returns EIO");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "a death sends nothing");
+    TEST_EXPECT_EQ((u64)kept1, 256ull, "and the run stays held");
+    TEST_ASSERT(r2 > 0, "the next read returns bytes");
+    TEST_EXPECT_EQ((u64)seen2, 2ull, "after landing the run");
+    TEST_EXPECT_EQ((u64)len2, 256ull, "whole");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes, nothing lost");
+    TEST_ASSERT(pat, "every byte on the wire is the byte written");
+}
+
+// A held leaf is not opened from the cached hint: the open lands the run and
+// takes the normal path.
+void test_dev9p_m23_cached_open_of_a_held_file_falls_back(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct larder *l = &g_client.larder;
+    g_wga_path_base = M23_PATH;
+    const char *names[1] = { "wbfile" };
+    size_t lens[1] = { 6 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    // Prime the hint (the leaf's dentry and attr) and its pages, as
+    // test_dev9p_cached_open_loose does, with nothing held yet.
+    struct Spoor *pn = spoor_clone(root);
+    struct Walkqid *pw = pn ? dev9p.walk_attrs(root, pn, names, lens, 1, sts) : NULL;
+    bool primed = pw && pw->spoor == pn;
+    if (pw) walkqid_free(pw);
+    if (pn) spoor_clunk(pn);
+    (void)p9_client_reader_pump_ready(&g_client);
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 3 + 1);
+    larder_page_install(l, larder_gen_snapshot(l), M23_PATH, 0, 0, data,
+                        (u32)sizeof(data));
+    // Control: with nothing held the hint serves.
+    struct Spoor *co0 = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    bool served0 = co0 != NULL;
+    if (co0) spoor_clunk(co0);
+    wb_wire_reset();
+    long w0   = dev9p.write(f, chunk, 256, 0);
+    u32 seen0 = g_twrite_seen;
+    struct Spoor *co1 = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    bool served1 = co1 != NULL;
+    if (co1) spoor_clunk(co1);
+    u32 seen1 = g_twrite_seen;
+    u32 len1  = g_twrite_cap_len;
+    int fcc   = d9_close(f);
+    larder_destroy(l);
+    m23_end(root);
+
+    TEST_ASSERT(primed, "the hint is primed");
+    TEST_ASSERT(served0, "with nothing held the cached open serves (control)");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)seen0, 0ull, "nothing on the wire");
+    TEST_ASSERT(!served1, "a held file takes the normal path");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "after landing the run");
+    TEST_EXPECT_EQ((u64)len1, 256ull, "all of it");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes, nothing lost");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
