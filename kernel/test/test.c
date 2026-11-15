@@ -3041,6 +3041,8 @@ struct test_case g_tests[] = {
                                        test_dev9p_m23_stat_by_name_lands_and_asks_again, false, NULL },
     { "dev9p.m23_peer_write_lands_the_run_first",
                                        test_dev9p_m23_peer_write_lands_the_run_first, false, NULL },
+    { "dev9p.m23_peer_write_stops_an_idle_holder",
+                                       test_dev9p_m23_peer_write_stops_an_idle_holder, false, NULL },
     { "dev9p.m23_truncating_open_wstat_loom_change_the_file",
                                        test_dev9p_m23_truncating_open_wstat_loom_change_the_file, false, NULL },
     { "dev9p.m23_one_holder_per_file",

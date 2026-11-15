@@ -2088,6 +2088,7 @@ void test_dev9p_m23_peer_open_lands_the_run(void);
 void test_dev9p_m23_peer_read_fstat_fsync_land_the_run(void);
 void test_dev9p_m23_stat_by_name_lands_and_asks_again(void);
 void test_dev9p_m23_peer_write_lands_the_run_first(void);
+void test_dev9p_m23_peer_write_stops_an_idle_holder(void);
 void test_dev9p_m23_truncating_open_wstat_loom_change_the_file(void);
 void test_dev9p_m23_one_holder_per_file(void);
 void test_dev9p_m23_leg_flush_failure_latches_on_the_holder(void);

@@ -4938,6 +4938,49 @@ void test_dev9p_m23_peer_write_lands_the_run_first(void) {
     TEST_ASSERT(pat, "every byte on the wire is the byte written");
 }
 
+// A peer's write to a file whose holder holds nothing sends nothing for the
+// holder, and still stops it staging: the holder's anchor is no longer the
+// file's end.
+void test_dev9p_m23_peer_write_stops_an_idle_holder(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 1 /*OWRITE*/);
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    long w0   = dev9p.write(f, chunk, 256, 0);
+    int  fr   = dev9p.fsync(f, 0);
+    bool known0 = m23_known(f);
+    u32 seen0 = g_twrite_seen;
+    long pw   = o ? dev9p.write(o, chunk + 256, 16, 256) : -1;
+    u32 seen1 = g_twrite_seen;
+    bool known1 = m23_known(f);
+    long w1   = dev9p.write(f, chunk + 256, 64, 256);   // an append at its stale anchor
+    u32 seen2 = g_twrite_seen;
+    u64 log2  = g_twrite_off_log[2];
+    int occ   = o ? d9_close(o) : -1;
+    int fcc   = d9_close(f);
+    bool pat  = g_twrite_pat_ok;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "a peer opened for writing");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is taken");
+    TEST_EXPECT_EQ((u64)(s64)fr, 0ull, "and its fsync lands it");
+    TEST_ASSERT(known0, "the holder's anchor stands, nothing held");
+    TEST_EXPECT_EQ((u64)seen0, 1ull, "one Twrite so far");
+    TEST_EXPECT_EQ((u64)pw, 16ull, "the peer's write is taken");
+    TEST_EXPECT_EQ((u64)seen1, 2ull, "and goes through alone");
+    TEST_ASSERT(!known1, "the idle holder's anchor dropped");
+    TEST_EXPECT_EQ((u64)w1, 64ull, "the holder's next write is taken");
+    TEST_EXPECT_EQ((u64)seen2, 3ull, "and goes through, not staged at the old end");
+    TEST_EXPECT_EQ(log2, 256ull, "at its offset");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+    TEST_ASSERT(pat, "every byte on the wire is the byte written");
+}
+
 // A truncating open, a wstat and a Loom registration through a peer each land
 // the holder's run and stop it staging. The truncating open does not become a
 // second holder.

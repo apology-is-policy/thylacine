@@ -704,7 +704,7 @@ the flush.
 Witnesses: `dev9p.m23_peer_open_lands_the_run`,
 `.m23_peer_read_fstat_fsync_land_the_run`,
 `.m23_stat_by_name_lands_and_asks_again` (wire, Larder and bind arms),
-`.m23_peer_write_lands_the_run_first`,
+`.m23_peer_write_lands_the_run_first`, `.m23_peer_write_stops_an_idle_holder`,
 `.m23_truncating_open_wstat_loom_change_the_file`,
 `.m23_one_holder_per_file`, `.m23_leg_flush_failure_latches_on_the_holder`,
 `.m23_interrupted_leg_keeps_the_run` (EINTR and EIO),
