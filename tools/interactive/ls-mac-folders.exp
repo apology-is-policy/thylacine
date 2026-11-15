@@ -437,12 +437,13 @@ on_mac [expr {$ino ne "none" && $ino != $::old_ino}] "inbox/across.txt is a copy
 set m -1
 if {[file exists $::I/across.txt]} { scan [file attributes $::I/across.txt -permissions] %o m }
 on_mac [expr {$m == 0400}] "inbox/across.txt keeps the source's mode ([format %04o $m], wanted 0400)"
-# Vote M20, from the app's record: the copy is synced under its temporary name, then inbox, after
-# the rename, and only then is the source walked to for its removal (its last walk).
+# Vote M20, from the app's record: the copy is synced under its temporary name, renamed into place,
+# then inbox is synced, and only then is the source walked to for its removal (its last walk).
 set fl [log_line {fsync 'folders/inbox/\.mv-[0-9]+-[0-9]+' -> ok} first]
+set nl [log_line {rename 'folders/inbox/\.mv-[0-9]+-[0-9]+' -> 'folders/inbox/across\.txt' -> ok} last]
 set dl [log_line {fsync 'folders/inbox' -> ok} last]
 set rl [log_line {walk 'folders/work' \['old\.txt'\]} last]
-on_mac [expr {$fl >= 0 && $dl > $fl && $rl > $dl}] "the app synced the copy (record line $fl), then inbox (line $dl), before the source's last walk (line $rl)"
+on_mac [expr {$fl >= 0 && $nl > $fl && $dl > $nl && $rl > $dl}] "the app synced the copy (record line $fl), renamed it into place (line $nl), then synced inbox (line $dl), before the source's last walk (line $rl)"
 lassign [tool_status mv "mv /mnt/mac/folders/work/tree /tmp/mac-tree" leg8c "a tree moved out of a share into the guest"] st why
 if {$st != 0 || $why ne ""} {
     lc_fail "a tree moved out of a share gave status $st, '$why' -- not a quiet copy and remove"
