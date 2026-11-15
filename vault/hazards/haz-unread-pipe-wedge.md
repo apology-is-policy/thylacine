@@ -5,7 +5,7 @@ title: "A reader that stops reading wedges a writer that must not block"
 applies-to: [sub-stratum-boot, sub-substrate-interactive]
 instances: []
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-11-15
 ---
 ## The failure shape
 
@@ -51,6 +51,15 @@ instrumented stratumd deadlocked a boot. Fix: hand the read end to a
 dedicated drainer thread for the daemon's lifetime. If the drainer cannot
 be spawned, **close** the read end so later writes fail fast with EPIPE:
 silenced diagnostics are an acceptable degraded mode; an FS wedge is not.
+
+The same owner failed a second way (2026-11-15). The drainer forwarded each
+chunk to the console before reading the next, and joey's console writes park
+while an IM-1 episode is open, so a SAK parked the reader: measured, a 20 s
+episode left stratumd's writing thread blocked for 15 s. An owner that does
+something else which can park is an owner for a while too. Fix: split it --
+a reader that only fills a bounded ring, a printer that empties it to the
+console and is the one an episode parks; what the ring cannot hold is
+dropped and counted on a line where it was lost ([[sub-stratum-boot]]).
 
 **The LS-CI serial relay, #78.** The relay wrote QEMU's serial stream to
 stdout *blocking*, on the stated theory that a full pipe back-pressures the
