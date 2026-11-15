@@ -782,10 +782,10 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   Rlerror(`EINTR`) itself, with no claim, has failed the write, and that
   latches like any other failure. A last close on a die-pending thread does
   not flush, and neither does `Dev.close` at a last reference, which can fall on
-  any thread: the run goes to a closer (ARCH 7.9.1 part C), as a job of its own
-  that holds the file, so the run stays visible to the client's other opens
-  until it lands (12.6); only a job that cannot be had for memory sends it with
-  the fid's clunk. The closer writes it and then DROPS the file's attr and pages instead of
+  any thread: the run goes to a closer, with the fid's clunk when no reference
+  remains and as a job of its own when a map or a Loom op still holds the file
+  (ARCH 7.9.1 part C). Either way the client's other opens still find the run
+  until the closer has written it (12.6). The closer writes it and then DROPS the file's attr and pages instead of
   installing them as OWN, because that late write is unordered with the
   file's later writers (the G1 write-populate premise holds only for a flush
   inside the open). The flush itself tells which it is: with the append anchor
@@ -929,7 +929,7 @@ another open already holds the file, the new one is not eligible and writes
 through; its OTRUNC open is a changing leg, so the old holder stops staging
 too, and neither stages until the holder's last close. The registry is a fixed
 hash keyed by client and qid.path, each bucket under its own spinlock, and the
-entry is the priv itself. Lock order: a bucket lock, then the holder's
+entry is the priv's own, or, past its last reference, its closer job's (below). Lock order: a bucket lock, then the holder's
 `wb_lock`. Nothing takes a bucket lock under `wb_lock`, and no wire I/O happens
 under either. A leg looks the holder up. When the holder holds bytes or has a
 flush in the air, the leg takes a reference on the holder's Spoor -- only while
@@ -938,7 +938,8 @@ registry before its memory goes (`spoor_tryref`) -- then flushes outside every
 lock through `wb_flush_locked`, which waits out a flush already in flight
 (12.2's single-flight). A changing leg on a holder with nothing held drops the
 anchor in place. The holder leaves the registry at its last close once its run
-is gone, or at its last reference.
+is gone, or at its last reference, where a run it still holds keeps its place
+as the closer's job.
 
 **What a leg's flush can end in.** Landed: the operation goes on and sees the
 bytes. Refused by the server: as with any failed flush, the run is dropped and
@@ -956,14 +957,25 @@ gives back the fid it bound and walks again. So the size, version and times it
 returns are those after the flush. It asks once more, not until nothing is
 held: bytes staged after the flush are concurrent with the stat.
 
-**A writer killed in its last close.** Its run used to go to a closer with the
-clunk, out of the registry, so every open missed it until the closer landed
-it. Now a last close that cannot wait queues the job that keeps the open alive
-and flushes it (`dev9p_lock_flush_queue`, the path a close that leaves another
-holder already took). The run stays registered until it lands, and a leg
-either flushes it or waits out the closer's flush. Only when that job cannot be
-had for memory does the run go with the clunk as before, and then a leg can
-miss it until the closer lands it.
+**A writer killed in its last close.** Its run goes to a closer as 12.2 says.
+When a map or a Loom op still holds the file, the closer's job holds it too and
+the open stays registered: a leg flushes the run itself or waits out the
+closer's flush (12.2's single-flight). With the fid's clunk, the run used to
+leave the registry with the open, so every open missed it until the closer had
+written it. Now the hand-off job takes the open's place in the registry, under
+the bucket lock and before it is queued, and leaves at its release, once the
+closer has written the run and clunked the fid. (The closer sends the run again
+while the fid is bound when memory or a server's EIO stopped it, which is why
+the run stays with this job and not the lock-flush job, whose flush drops a
+refused run.) A leg that finds the job, or a holder whose
+last reference has gone and whose close is handing its run on, waits until the
+entry has gone and looks again. The operation then asks the server, because the
+closer drops the attr and pages it wrote. A caught note on the leg's thread ends
+the wait with `EINTR` and a death ends it with `EIO`: the operation did not
+happen. When the job cannot be queued for memory, the run is lost loudly as
+before and leaves the registry with the job. No leg runs on a closer: its jobs
+write a run, flush an open and release its locks, and clunk. So a closer never
+waits for a job.
 
 **What stays.** A cached open serves its open-time snapshot (close-to-open;
 FID-LIFECYCLE 3.3). Its open flushed every held byte before the snapshot was
