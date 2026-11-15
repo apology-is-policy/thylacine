@@ -720,12 +720,12 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 
 ### Reference
 
-- `stratum/v2/docs/reference/20-9p.md` — Stratum's 9P2000.L server wire
+- `stratum/docs/reference/20-9p.md` — Stratum's 9P2000.L server wire
   semantics (the canonical contract Thylacine binds to).
-- `stratum/v2/docs/reference/23-9p_client.md` — Stratum's reference
+- `stratum/docs/reference/23-9p_client.md` — Stratum's reference
   C-side client (sync, one-op-at-a-time; Thylacine's kernel client
   pipelines per `ARCH §21`).
-- `stratum/v2/docs/OS-INTEGRATION.md` — OS-side integration manual.
+- `stratum/docs/OS-INTEGRATION.md` — OS-side integration manual.
 - `ARCHITECTURE.md §10.2` + `§14` + `§28` — Thylacine-side dialect +
   integration + invariants.
 

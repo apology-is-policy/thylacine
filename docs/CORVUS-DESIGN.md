@@ -29,7 +29,7 @@ This matches Plan 9's `factotum` and Stratum's `janus` shape. corvus is *not* a 
 corvus is a fresh implementation, not a port. It draws on:
 
 - **Plan 9's `factotum`** — the architectural shape: dedicated process, file-based control interface (Plan 9's `/mnt/factotum/ctl`), peer-authenticated, holds secrets across application sessions. corvus's `/srv/corvus/ctl` is the direct descendant; the control verbs (`auth`, `change-passphrase`, `session-close`) mirror factotum's conventions where the semantics match.
-- **Stratum's `janus`** (`stratum/v2/src/janus/`) — sister-project prior art for the wrap chain: Argon2id-derived KEK, AEAD-wrapped hybrid keypair (ML-KEM-768 + X25519 hybrid for post-quantum readiness), per-dataset DEKs wrapped under the keypair. Corvus reuses Stratum's *cryptographic primitives* (the libsodium-and-friends layer) but **not** Stratum's wire format, state file format, peer authentication mechanism, or process discipline. Each of those gets a Thylacine-native answer.
+- **Stratum's `janus`** (`stratum/src/janus/`) — sister-project prior art for the wrap chain: Argon2id-derived KEK, AEAD-wrapped hybrid keypair (ML-KEM-768 + X25519 hybrid for post-quantum readiness), per-dataset DEKs wrapped under the keypair. Corvus reuses Stratum's *cryptographic primitives* (the libsodium-and-friends layer) but **not** Stratum's wire format, state file format, peer authentication mechanism, or process discipline. Each of those gets a Thylacine-native answer.
 - **Contemporary per-user encryption** — macOS FileVault (per-user secure tokens unlocking a per-volume key), ZFS native encryption (per-dataset keys, KEK wrapping), Linux fscrypt (per-directory keys loaded into kernel keyring). corvus + Stratum together deliver the ZFS shape: per-dataset DEKs, KEK from passphrase.
 
 What's *not* reused from Stratum's janus:
@@ -1196,8 +1196,8 @@ For v1.x cryptographic forward secrecy (audit F14): Stratum's planned rekeying p
 - ARCHITECTURE.md §18 — kernel object kinds (this doc's §6.1 adds `KObj_Srv`, non-transferable).
 - ARCHITECTURE.md §28 — global invariants list (this doc adds C-1..C-23; cross-reference from §28).
 - ROADMAP.md §7 — Phase 5 chunk list (this doc adds the corvus-arc chunks; v1.x extensions in §11 here become future-phase entries in ROADMAP).
-- `stratum/v2/docs/OS-INTEGRATION.md` — Stratum's expectations.
-- `stratum/v2/src/janus/backend_passphrase.c` — design influence (not a port).
+- `stratum/docs/OS-INTEGRATION.md` — Stratum's expectations.
+- `stratum/src/janus/backend_passphrase.c` — design influence (not a port).
 - Plan 9 manual: factotum(4), secstore(1), authsrv(8) — historical reference.
 
 ---

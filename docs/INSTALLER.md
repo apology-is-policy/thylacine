@@ -150,7 +150,7 @@ the pool from the passphrase-derived, corvus-sealed key rather than a baked side
 a change to how the `.key` is **provisioned + presented to stratumd at mount**. Per
 the Stratum coordination rules, whether this is an on-disk-format / `.key`-ABI break
 (escalation-worthy) vs an ordinary provisioning change is adjudicated at impl, against
-`stratum/v2/docs/OS-INTEGRATION.md §4`. The on-disk *envelope* already exists (A-5c
+`stratum/docs/OS-INTEGRATION.md §4`. The on-disk *envelope* already exists (A-5c
 seals the system identity); the change is the *unlock path*, not necessarily the
 format.
 

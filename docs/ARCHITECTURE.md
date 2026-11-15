@@ -3343,9 +3343,9 @@ This is the Plan 9 model, adopted unchanged.
 
 ### 10.2 9P dialect: 9P2000.L + Stratum extensions
 
-**Dialect**: 9P2000.L (the Linux-extended dialect; the `.L` distinguishes it from Plan 9's 9P2000). Includes the L-extension messages: `Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tstatfs`, `Tfsync`, `Tflush`, `Txattrwalk`, `Txattrcreate`. Covers POSIX file modes properly (vs vanilla 9P2000's restricted set); the `.L` is what Linux's v9fs speaks to userspace 9P servers and what Stratum's `stratumd` exposes per `stratum/v2/docs/reference/20-9p.md`.
+**Dialect**: 9P2000.L (the Linux-extended dialect; the `.L` distinguishes it from Plan 9's 9P2000). Includes the L-extension messages: `Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tstatfs`, `Tfsync`, `Tflush`, `Txattrwalk`, `Txattrcreate`. Covers POSIX file modes properly (vs vanilla 9P2000's restricted set); the `.L` is what Linux's v9fs speaks to userspace 9P servers and what Stratum's `stratumd` exposes per `stratum/docs/reference/20-9p.md`.
 
-**Stratum extensions** (committed in Stratum v2; stable per `stratum/v2/docs/OS-INTEGRATION.md §13` ABI envelope):
+**Stratum extensions** (committed in Stratum v2; stable per `stratum/docs/OS-INTEGRATION.md §13` ABI envelope):
 - `Tsync` / `Rsync` — explicit sync barrier on a fid. Drains the dirty buffer through the three-phase commit; returns when durability is established. Maps to Linux's `fsync(2)` for files and `syncfs(2)` for the connection.
 - `Treflink` / `Rreflink` — `copy_file_range` with reflink semantics. **Single-dataset only at v2.x**; cross-dataset is gated on Stratum's per-dataset rekeying primitive (Stratum-upstream roadmap, returns `STM_EXDEV` until then).
 - `Tbind` / `Rbind` — per-connection subvolume composition (within the Stratum connection's territory). Composes a Stratum subvolume into the connection's view; the Thylacine territory layer composes ACROSS Stratum connections (e.g., Stratum + a network FS).
@@ -3803,7 +3803,7 @@ In-kernel VirtIO transport core; userspace VirtIO device drivers from day one. P
 
 Stratum is the native filesystem. It runs as a userspace daemon (`stratumd`, one process per pool) bound to a Unix socket (within the Thylacine guest VM the socket is a Spoor that the kernel 9P client routes through). The kernel mounts it at `/` (or specified mount point) via the standard `mount` syscall, which translates to a 9P `Tattach` over the FS socket.
 
-**Stratum v2 is feature-complete and shipping** (2026 Q2). The integration consumes Stratum's stable ABIs documented in `stratum/v2/docs/OS-INTEGRATION.md`:
+**Stratum v2 is feature-complete and shipping** (2026 Q2). The integration consumes Stratum's stable ABIs documented in `stratum/docs/OS-INTEGRATION.md`:
 
 | Stratum ABI | Thylacine consumer |
 |---|---|
@@ -3823,13 +3823,13 @@ Implementation (`kernel/9p_*` — split across `9p_wire.c`, `9p_session.c`, `9p_
 
 **The original one-connection-per-Proc intent is superseded by the as-built shared client** (corrected 2026-06-11, HOLOTYPE RW-12 W1-F1). At v1.0 the kernel runs a *single shared, multiplexed* 9P client over the mounted Stratum connection (the #841 elected-reader design, §21.10): Procs that inherit the Stratum mount share the client via `territory_clone`, and it demultiplexes their concurrent RPCs by tag. The original design intent — one fresh connection per Proc (VISION §11) — is superseded; a per-Proc-connection model remains a possible v2.x direction where per-process Stratum-side territory isolation would justify the per-connection cost. Per-*user* sessions do get their own Stratum connection, via login's `--role client` stratumd (A-5b).
 
-Each Stratum connection carries its own per-connection fid namespace / territory (`stratum/v2/docs/reference/20-9p.md`). Thylacine's per-process territory and Stratum's per-connection territory remain complementary layers (VISION §11): the Thylacine territory governs cross-server composition, the Stratum per-connection territory governs composition within one Stratum connection.
+Each Stratum connection carries its own per-connection fid namespace / territory (`stratum/docs/reference/20-9p.md`). Thylacine's per-process territory and Stratum's per-connection territory remain complementary layers (VISION §11): the Thylacine territory governs cross-server composition, the Stratum per-connection territory governs composition within one Stratum connection.
 
 ### 14.3a Boot lifecycle (Stratum-mounted root)
 
 **v1.0 commitment (per CORVUS-DESIGN.md §3 D2)**: the **system pool** is integrity-only (Stratum Merkle, no AEAD); the `.key` sidecar uses the file backend, **cryptographically bound to the pool device's unique serial** (C-14). User datasets are AEAD-encrypted with corvus-managed per-user wrap chains, mounted post-pivot by **per-user stratumd processes** (one process per logged-in user; CORVUS-DESIGN §3 D4). The text below describes the OS-INTEGRATION.md-style sequence; CORVUS-DESIGN §3 D4 is the authoritative version for v1.0 Thylacine.
 
-Canonical boot sequence per `stratum/v2/docs/OS-INTEGRATION.md §4`:
+Canonical boot sequence per `stratum/docs/OS-INTEGRATION.md §4`:
 
 ```
 1. Boot firmware → kernel + initramfs.
@@ -3868,7 +3868,7 @@ Canonical boot sequence per `stratum/v2/docs/OS-INTEGRATION.md §4`:
 
 ### 14.3b Stratum `/ctl/` admin synthetic FS
 
-Stratum exposes a second 9P surface (admin / observability) per `stratum/v2/docs/reference/22-ctl.md`. Thylacine consumes it as just another 9P tree, typically mounted at `/srv/stratum-ctl/`:
+Stratum exposes a second 9P surface (admin / observability) per `stratum/docs/reference/22-ctl.md`. Thylacine consumes it as just another 9P tree, typically mounted at `/srv/stratum-ctl/`:
 
 ```
 /srv/stratum-ctl/
@@ -3904,7 +3904,7 @@ Coordination with Thylacine's `/ctl` (kernel admin Dev introduced at Phase 4 P4-
 
 **Status**: design committed at Phase 0; implementation is post-v1.0.
 
-**Motivation**: 9P-client mount adds one round-trip per FS operation. For root FS operations (where Stratum is the bottleneck), the round-trip is measurable. An in-kernel Stratum driver bypasses the 9P client by linking part of `libstratum.a` into the kernel — corresponding to Stratum's UNSTABLE `libstm_fs` C ABI per `stratum/v2/docs/OS-INTEGRATION.md §2`. The same caveat applies: this ABI is `STM_UB_VERSION`-bound; bypassing 9P trades portability + ABI stability for performance.
+**Motivation**: 9P-client mount adds one round-trip per FS operation. For root FS operations (where Stratum is the bottleneck), the round-trip is measurable. An in-kernel Stratum driver bypasses the 9P client by linking part of `libstratum.a` into the kernel — corresponding to Stratum's UNSTABLE `libstm_fs` C ABI per `stratum/docs/OS-INTEGRATION.md §2`. The same caveat applies: this ABI is `STM_UB_VERSION`-bound; bypassing 9P trades portability + ABI stability for performance.
 
 **Design**: Stratum's `libstratum.a` exposes a `stm_fs_*` C API. An in-kernel Stratum driver wraps this API as a kernel `Dev` registration:
 
@@ -3942,7 +3942,7 @@ Operations bypass the 9P round-trip; they're function calls into the linked-in `
 
 ### 14.4a Slate integration (Halcyon-side consideration; v1.0 evaluation)
 
-Stratum ships **slate** — a Plan-9-shaped TUI daemon that is itself a synthetic 9P filesystem (`stratum/v2/src/slate/`; design at `stratum/v2/docs/SLATE-DESIGN.md`). Clients interact with slate by reading/writing files in a virtual tree; the bundled `stratum tui` renderer is one consumer, but the substrate is intentionally programmable for AI agents and alternative renderers.
+Stratum ships **slate** — a Plan-9-shaped TUI daemon that is itself a synthetic 9P filesystem (`stratum/src/slate/`; design at `stratum/docs/SLATE-DESIGN.md`). Clients interact with slate by reading/writing files in a virtual tree; the bundled `stratum tui` renderer is one consumer, but the substrate is intentionally programmable for AI agents and alternative renderers.
 
 What slate provides:
 - A FAR-Commander dual-pane file manager.
@@ -3950,7 +3950,7 @@ What slate provides:
 - Snapshot graph view, integrity dashboard, volume map.
 - A programmable surface: any client that can read/write files can drive slate. This is the substrate for AI-driven system administration.
 
-**Open question for Halcyon (Thylacine Phase 9)**: adopt slate directly, OR build a Thylacine-native equivalent? Adoption gets a Plan-9-aesthetic system file manager with zero additional code; the slate schema contract is `stratum/v2/docs/SLATE-DESIGN.md`. Building a native equivalent gives more control over the visual contract but duplicates effort. The Halcyon design pass at Phase 9 entry should weigh the two — both options are scaffolded by the 9P-as-universal-composition thesis. **Deferral note**: this decision is Phase 9 work; the v1.0-rc.1 fallback (per `ROADMAP.md §10` / §11) does not depend on either path.
+**Open question for Halcyon (Thylacine Phase 9)**: adopt slate directly, OR build a Thylacine-native equivalent? Adoption gets a Plan-9-aesthetic system file manager with zero additional code; the slate schema contract is `stratum/docs/SLATE-DESIGN.md`. Building a native equivalent gives more control over the visual contract but duplicates effort. The Halcyon design pass at Phase 9 entry should weigh the two — both options are scaffolded by the 9P-as-universal-composition thesis. **Deferral note**: this decision is Phase 9 work; the v1.0-rc.1 fallback (per `ROADMAP.md §10` / §11) does not depend on either path.
 
 ### 14.5 ramfs (early boot)
 

@@ -607,7 +607,7 @@ trigger surfaces; self + Fable audit before the arc closes):
 
 ## Cross-project coordination
 
-Stratum's `STM_E*` enum (`stratum/v2/src/include/stratum/error.h`)
+Stratum's `STM_E*` enum (`stratum/include/stratum/types.h`)
 predates this design and is NOT subsumed. Thylacine consumes Stratum
 errors via two surfaces:
 - 9P wire (Stratum's server translates `stm_status_t` -> 9P `Tlerror`

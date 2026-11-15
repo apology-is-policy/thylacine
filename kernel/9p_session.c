@@ -1300,7 +1300,7 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         if (tag_check != tag) return -1;
         // Per 9P2000.L: bind new_fid into the fid table at Rwalk time
         // (server-side WalkBindsWithCurrentGen — see
-        // `stratum/v2/docs/reference/20-9p.md` §"fid.tla composition"), and only
+        // `stratum/docs/reference/20-9p.md` §"fid.tla composition"), and only
         // for a full walk: a shorter one bound nothing on the server, and its
         // caller, which asked for every name, reports the walk failed.
         if (nwqid != op->walk_nwname) {
