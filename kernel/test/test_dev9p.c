@@ -3802,9 +3802,8 @@ void test_dev9p_cached_open(void) {
     // A read-only fsync reaches the server (vote M22): what the open read may
     // sit uncommitted there.
     g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
-    TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync on a read-only cached open");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 1ull, "sends one Tfsync");
-    TEST_EXPECT_EQ((u64)g_tfsync_fid, (u64)cp->fid, "on the kept fid");
+    s64 fsr = (s64)dev9p.fsync(co, 0);
+    u32 fs_seen = g_tfsync_seen, fs_fid = g_tfsync_fid, fs_kept = cp->fid;
     TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
     TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");
     TEST_ASSERT(dev9p.walk(co, NULL, names, 1) == NULL,
@@ -3830,6 +3829,11 @@ void test_dev9p_cached_open(void) {
     larder_destroy(l);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
+
+    // The fsync leg is asserted with the fixtures back: a red one leaves none behind.
+    TEST_EXPECT_EQ((u64)fsr, 0ull, "fsync on a read-only cached open");
+    TEST_EXPECT_EQ((u64)fs_seen, 1ull, "sends one Tfsync");
+    TEST_EXPECT_EQ((u64)fs_fid, (u64)fs_kept, "on the kept fid");
 }
 
 // B1 per-attach loose mode (I-38 opt-in; docs/chase/B1-VOTE.md): a LOOSE
