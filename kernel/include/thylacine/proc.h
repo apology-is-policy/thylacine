@@ -193,7 +193,7 @@ u32 proc_thread_budget_hard_max(void); // = capacity_pool_pages() / THREAD_POOL_
 // bounded (each VMA charges >=1 page, so the page budget caps eager VMAs), but a FREE
 // lazy reservation (SYS_BURROW_ATTACH_LAZY -- uncharged at attach) reopens a
 // VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove_in,
-// both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
+// both under p->as->lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
 // Vma slab is the per-Proc ceiling.
 #define PROC_VMA_MAX    65536u
 // PROC_SHARED_MAP_MAX_PAGES -- cross-Proc shared-in mappings (G-2; the I-32
@@ -206,7 +206,7 @@ u32 proc_thread_budget_hard_max(void); // = capacity_pool_pages() / THREAD_POOL_
 // = room for two live weave generations of a large surface (≤ 2 x 64 MiB across
 // a reweave) + a full complement of flow rings; a DoS floor, not an accountant.
 // Charged in burrow_share_into / uncharged at the SHARED_IN-flagged VMA's
-// teardown (burrow_unmap / vma_drain), all under p->vma_lock; TCB-exempt.
+// teardown (burrow_unmap / vma_drain), all under p->as->lock; TCB-exempt.
 #define PROC_SHARED_MAP_MAX_PAGES  32768u   // 128 MiB at 4-KiB pages
 
 // prowl-1 (docs/PROWL-DESIGN.md section 3.2): the bounded process name -- the
@@ -1725,7 +1725,7 @@ void proc_free(struct Proc *p);
 bool proc_resource_exempt(const struct Proc *p);
 
 // proc_page_charge / proc_page_uncharge -- the SYS_BURROW_ATTACH anon-page
-//   counter. The CALLER MUST HOLD p->vma_lock (the lock that serializes the
+//   counter. The CALLER MUST HOLD p->as->lock (the lock that serializes the
 //   attach/detach path), so the check + charge is atomic against sibling
 //   attaches and the page cap is EXACT. charge returns true (and adds npages)
 //   if the Proc is exempt OR the new total fits the address space's budget and
@@ -1737,7 +1737,7 @@ void proc_page_uncharge(struct Proc *p, u32 npages);
 
 #ifdef KERNEL_TESTS
 // proc_vma_charge / proc_vma_uncharge -- the live-VMA counter (I-32 FOURTH axis;
-//   the overcommit VMA-slab DoS bound). The CALLER MUST HOLD p->vma_lock (the
+//   the overcommit VMA-slab DoS bound). The CALLER MUST HOLD p->as->lock (the
 //   vma_insert/vma_remove_in domain), so the check + charge is atomic against a
 //   sibling attach and the cap is EXACT. charge returns true (and ++vma_count) if
 //   the Proc is exempt OR vma_count < PROC_VMA_MAX; false (charging nothing) if it
@@ -1748,7 +1748,7 @@ void proc_vma_uncharge(struct Proc *p);
 #endif // KERNEL_TESTS
 
 // proc_shared_map_charge / proc_shared_map_uncharge -- the cross-Proc shared-in
-//   mapping counter (G-2; the I-32 FIFTH axis). The CALLER MUST HOLD p->vma_lock
+//   mapping counter (G-2; the I-32 FIFTH axis). The CALLER MUST HOLD p->as->lock
 //   (burrow_share_into's precondition -- the same domain as the flagged-VMA
 //   teardown sites), so the check + charge is atomic against sibling shares and
 //   the cap is EXACT. charge returns true (and adds npages) if the Proc is
@@ -2510,8 +2510,8 @@ void el0_birth_park(struct exception_context *ctx);
 // Lock-order discipline (per CLAUDE.md §28 + the existing exits/wait_pid
 // commentary): proc_table_lock is at the "lineage" level — acquired
 // BEFORE r->lock-via-wakeup but AFTER any leaf locks the caller already
-// holds. Sound iff no path that holds a per-thread Rendez or per-Proc
-// vma_lock tries to acquire it.
+// holds. Sound iff no path that holds a per-thread Rendez or a space's
+// as->lock tries to acquire it.
 //
 // The helpers wrap spin_lock_irqsave / spin_unlock_irqrestore so the
 // IRQ-state thread-through stays explicit at the call site (irq_state_t

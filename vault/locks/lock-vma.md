@@ -6,7 +6,7 @@ kind: spin
 orders-before: [lock-burrow, lock-cow, lock-buddy-zone]
 guards: "one address space's vmas list, and -- for the cap DECISION only -- the three I-32 counters charged against it"
 created: 2026-08-02
-updated: 2026-08-06
+updated: 2026-11-15
 ---
 ## Discipline
 
@@ -33,18 +33,21 @@ takes *another* Proc's `vma_lock`", and now two sharers of one address space tak
 **the same** lock rather than each its own — so the ordering, not the
 disjointness, is what carries it.
 
-Inbound, it is a **leaf below [[lock-proc-table]]**, and three callers rely on
-that: the cross-Proc memory copy for a debugged target, the address-space render,
-and the hardware-driver map paths all take the table lock first. Nothing held
-under it reaches back for the table lock.
+Inbound, it sits **below [[lock-proc-table]]**: nothing held under it reaches
+back for the table lock. No table-lock hold *waits* for it, though, because that
+hold is global and masks interrupts while a space's holder can run long. The
+cross-Proc memory copy for a debugged target only *tries* it under the hold; on a
+busy lock it pins the space, drops the hold, waits with interrupts on, and runs
+again from the start (operator vote 132). The `/proc/<pid>/maps` render and the
+weft reaper pin the space under the hold and take its lock after the walk.
 
-**Bounded hold is a correctness property, not a courtesy.** It is taken with
-interrupts off, and the address space may legitimately hold tens of thousands of
-regions, so every consumer bounds its own walk: the debug memory copy clamps to a
+**Bounded hold is a correctness property, not a courtesy.** Every hold is
+non-preemptible (`spin_lock` leaves interrupts as they were), and the address space
+may legitimately hold tens of thousands of regions, so every consumer bounds its own walk: the debug memory copy clamps to a
 page per call, and the `/proc/<pid>/maps` render commits whole rows and stops when
 its output buffer fills — which bounds the walk by the *buffer*, not by the region
 count. Removing that truncation without re-deriving the bound turns a diagnostic
-read into a multi-millisecond interrupts-off hold. `addrspace_clone` is the one
+read into a multi-millisecond non-preemptible hold. `addrspace_clone` is the one
 consumer that does **not** bound its walk (three passes, linear in region count)
 and is recorded as a seam on [[sub-kernel-addrspace]].
 

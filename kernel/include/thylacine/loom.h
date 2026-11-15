@@ -716,7 +716,7 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 
 // Loom-6: replace the registered-BUFFER table with the `n` (<= LOOM_MAX_REG_BUFFERS)
 // VA ranges in `bufs`. Each `bufs[i]` is resolved against `p`'s address space
-// (vma_lookup under p->vma_lock): the range MUST lie within a single anonymous
+// (vma_lookup under p->as->lock): the range MUST lie within a single anonymous
 // (BURROW_TYPE_ANON), writable (VMA_PROT_WRITE) VMA, whose backing Burrow is
 // pinned (burrow_ref) and whose contiguous direct-map slice becomes the
 // registered buffer. On SUCCESS any previously-registered buffers are unref'd

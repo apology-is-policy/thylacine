@@ -51,7 +51,7 @@ pins the parent alive through the wake.
 otherwise-locked sequence drop it explicitly and re-take: the #68/#926 close
 window (`unlock → proc_close_handles_at_exit → relock → recount-assert`) and
 the clear-child-tid handoff, which runs *after* the release because
-`uaccess_store_u32` may demand-page (`vma_lock` + buddy) and `torpor_wake`
+`uaccess_store_u32` may demand-page (`as->lock` + buddy) and `torpor_wake`
 takes a torpor bucket's lock — neither of which composes with this lock.
 
 **The threads moved out (thread-model C3, 2026-10-22).** A Proc's thread

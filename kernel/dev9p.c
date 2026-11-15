@@ -13,7 +13,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/cons.h>
 #include <thylacine/notes.h>   // thread_death_reaches: may the clunk wait
-#include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
+#include <thylacine/proc.h>    // G-2: the mapping Proc's as->lock + pid
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match

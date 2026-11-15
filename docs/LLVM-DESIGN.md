@@ -281,7 +281,7 @@ Options (F4 — resolved: **(b)**):
 built.** The instrument is `Proc.page_peak` (the anon high-water, the Linux
 `VmHWM` analog), surfaced as `peak:` in `/proc/<pid>/status` and read by the
 clade gate. It is exact rather than sampled: it is stamped under the same
-`vma_lock` that makes `page_count` exact, and a read of a ZOMBIE (which can no
+`as->lock` that makes `page_count` exact, and a read of a ZOMBIE (which can no
 longer charge) reports the final value — which is the only way to measure a
 process that lives 200 ms.
 
@@ -2265,7 +2265,7 @@ Three shape decisions, each with a live alternative:
 
 - **One syscall installs both aliases.** Splitting create from map would admit
   an RX-alias-with-no-writer state and push the half-installed rollback onto the
-  caller. Both go in under one `vma_lock` hold. Also literally §8's own
+  caller. Both go in under one `as->lock` hold. Also literally §8's own
   userspace shape: *create → (writer_ptr, exec_ptr)*.
 - **`SYS_ICACHE_SYNC` syncs the kernel direct map, never the user VA.** `dc
   cvau`/`ic ivau` can take translation faults, and a user VA is exactly what a

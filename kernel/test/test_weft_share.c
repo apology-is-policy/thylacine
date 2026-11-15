@@ -1222,7 +1222,7 @@ void test_weft_reap_live_sweep_leaves_test_bindings(void) {
 // the guest, and detaches its own mapping at flow close (slot_unref) while the
 // guest's mapping and the binding pin live on. The LAST drop is then the
 // guest's teardown -- generic vma code, in another Proc, holding that Proc's
-// vma_lock, with no way to name netd. Under the pre-#131 `freed`-only rule
+// as->lock, with no way to name netd. Under the pre-#131 `freed`-only rule
 // nothing settled the charge at all, and netd leaked a ring per closed
 // zero-copy flow.
 //

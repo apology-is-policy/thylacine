@@ -248,7 +248,7 @@ struct HandleTable {
     // Fgrp lock. Peer threads of a multi-threaded Proc share one HandleTable,
     // so a sibling's handle_close must not free a slot's obj or zero the slot
     // under a concurrent handle_get. Plain spin_lock (process-context only --
-    // handle ops never run from IRQ; matches p->vma_lock). KP_ZERO at
+    // handle ops never run from IRQ; matches p->as->lock). KP_ZERO at
     // handle_table_alloc inits it unlocked. The obj refcount (bumped under
     // this lock in handle_get/dup, dropped OUTSIDE it in handle_put/close)
     // carries the obj's lifetime past the lock release.

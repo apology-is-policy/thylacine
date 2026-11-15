@@ -39,7 +39,7 @@ struct Thread;
 // VMA_FLAG_SHARED_IN (G-2; TAPESTRY.md §18.12 R2-F3): this VMA was installed by
 // burrow_share_into — the backing Burrow is ANOTHER Proc's memory (a netd flow
 // ring or a tapestryd weave) mapped cross-Proc into this one. Set by
-// burrow_share_into after vma_insert (under the same vma_lock hold); read at
+// burrow_share_into after vma_insert (under the same as->lock hold); read at
 // the two flagged-VMA teardown sites (burrow_unmap + vma_drain) to uncharge the
 // per-client shared-mapping budget (Proc.shared_map_pages) exactly once per
 // charge. The budget invariant: shared_map_pages == Σ pages of SHARED_IN VMAs.
@@ -236,7 +236,7 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
 // overlaps no existing VMA — vma_insert's overlap rejection is the
 // backstop, but a correct find never trips it.
 //
-// Caller must hold the serializing lock (Proc.vma_lock) across the
+// Caller must hold the serializing lock (AddrSpace.lock) across the
 // find AND the subsequent vma_insert — the same single-mutator
 // discipline vma_insert / vma_remove_in already assume.
 int vma_find_gap(struct Proc *p, u64 length,

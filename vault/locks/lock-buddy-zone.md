@@ -20,9 +20,9 @@ chains may end on it:
   acquisitions per crossing, [[seam-buddy-bulk-op]]; the tests' full
   `magazines_drain_all` pass up to 32 per set)
 - [[lock-kmem-cache]] → zone (slab_new / slab_drain)
-- `vma_lock` → zone (demand paging; the documented tree-wide edge)
+- `as->lock` → zone (demand paging; the documented tree-wide edge)
 - the Larder leaf → zone (page-buffer frees)
-- a torpor bucket's lock → `vma_lock` → zone (the rare decommit-window
+- a torpor bucket's lock → `as->lock` → zone (the rare decommit-window
   re-fault only — [[sub-kernel-torpor]])
 
 ## Held across

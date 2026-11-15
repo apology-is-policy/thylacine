@@ -22,7 +22,7 @@ COULD demand-page. Sleeping while EXITING trips `sched()`'s "current is not
 RUNNING" assertion, i.e. extincts.
 
 It does not happen today because every writable VMA is eager or lazy-anon
-(the lazy arm resolves fully under `vma_lock`, without blocking) and FILE
+(the lazy arm resolves fully under `as->lock`, without blocking) and FILE
 Burrows are never writable — the REVENANT dispatch gate keeps `PF_W`
 segments eager.
 

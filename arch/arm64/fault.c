@@ -401,12 +401,12 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
 // =============================================================================
 
 // REVENANT R-2: the FILE-fault "needs a page-in" request. demand_page_locked
-// fills this (under vma_lock) on a BURROW_TYPE_FILE miss -- the page is not yet
+// fills this (under as->lock) on a BURROW_TYPE_FILE miss -- the page is not yet
 // resident -- so userland_demand_page can do the BLOCKING dev->read OUTSIDE
-// vma_lock (a spinlock cannot be held across a 9P round-trip), then re-acquire
+// as->lock (a spinlock cannot be held across a 9P round-trip), then re-acquire
 // + re-validate + install-once. `burrow` is PINNED via burrow_ref here so it
 // (and its SLUB address) cannot be freed/reused while we sleep on the read --
-// the slow path drops that ref OUTSIDE vma_lock (the last unref's spoor_clunk
+// the slow path drops that ref OUTSIDE as->lock (the last unref's spoor_clunk
 // may sleep). This makes the post-read re-validation UAF- and ABA-safe.
 struct file_fault_req {
     bool           needed;       // a FILE miss occurred -> run the slow path
@@ -430,7 +430,7 @@ static void payer_adopt_if_due(struct Proc *p, struct Vma *vma, struct Burrow *v
         vma_payer_adopt_in(p->as, v);
 }
 
-// Locked core. Caller validated p and holds p->vma_lock across the whole
+// Locked core. Caller validated p and holds p->as->lock across the whole
 // lookup -> burrow-resolve -> PTE-install sequence (see userland_demand_page).
 // On a BURROW_TYPE_FILE miss the page is not resident: this fills *freq (a
 // caller-zeroed request), pins the Burrow, and returns -- userland_demand_page
@@ -590,7 +590,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
         // segment (burrow_byte_off < size was checked above, so slot is in range).
         struct Burrow *v = vma->burrow;
         size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
-        spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
+        spin_lock(&v->lock);            // as->lock -> v->lock (the established order)
         struct page *resident = pagemap_get(&v->pm, slot);
         spin_unlock(&v->lock);
         if (resident) {
@@ -618,7 +618,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
         // Miss: pin the Burrow across the lockless read (so freq->burrow cannot
         // be freed/ABA'd while we sleep -- the VMA holds a mapping ref so the
         // Burrow is alive NOW, making burrow_ref safe). file_demand_page_slow
-        // drops this ref OUTSIDE vma_lock. Lock order vma_lock -> v->lock
+        // drops this ref OUTSIDE as->lock. Lock order as->lock -> v->lock
         // (burrow_ref takes v->lock internally).
         burrow_ref(v);
         freq->needed      = true;
@@ -649,14 +649,14 @@ static enum fault_result demand_page_locked(struct Proc *p,
         // Overcommit / I-32 (ARCH §6.5; SYS_BURROW_ATTACH_LAZY): demand-ZERO. The
         // page is allocated, zero-filled, and installed RW/XN on first touch. The
         // structural twin of the FILE arm but SIMPLER -- no backing read, so the
-        // whole fill runs under the already-held vma_lock (alloc_pages under vma_lock
-        // is the established order: SYS_BURROW_ATTACH holds vma_lock across
+        // whole fill runs under the already-held as->lock (alloc_pages under as->lock
+        // is the established order: SYS_BURROW_ATTACH holds as->lock across
         // burrow_create_anon -> alloc_pages). No slow path, no pin, no
         // death-interruptible read.
         struct Burrow *v = vma->burrow;
         size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
 
-        spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
+        spin_lock(&v->lock);            // as->lock -> v->lock (the established order)
         struct page *resident = pagemap_get(&v->pm, slot);
         spin_unlock(&v->lock);
         if (resident) {
@@ -837,7 +837,7 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
         size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
         bool exempt = proc_resource_exempt(p);
 
-        spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
+        spin_lock(&v->lock);            // as->lock -> v->lock (the established order)
         struct page *resident = pagemap_get(&v->pm, slot);
         spin_unlock(&v->lock);
         if (resident) {
@@ -936,11 +936,11 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
 // P3-Dc: userland_demand_page — VMA → BURROW → PTE install pipeline.
 //
 // P6 #713 root-cause fix (multi-thread-Proc SMP safety): serialize the whole
-// lookup -> burrow-resolve -> PTE-install under p->vma_lock. This completes
-// the vma_lock coverage the proc.h comment explicitly defers to "the
+// lookup -> burrow-resolve -> PTE-install under p->as->lock. This completes
+// the as->lock coverage the proc.h comment explicitly defers to "the
 // pouch-threads sub-chunk ... the page-fault vma_lookup reader" -- which the
 // threads lift never wired up. Pre-fix, the unlocked reader raced a sibling
-// thread's SYS_BURROW_DETACH (vma_remove_in + free_pages, under vma_lock): the
+// thread's SYS_BURROW_DETACH (vma_remove_in + free_pages, under as->lock): the
 // walker could follow a half-unlinked list to a freed VMA and install a leaf
 // PTE aliasing a buddy page already recycled into kernel (or another Proc's)
 // memory -> a wild/kernel pointer in the faulting Proc's address space (the
@@ -948,8 +948,8 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
 // faults that would otherwise race the intermediate page-table construction
 // in mmu_install_user_pte (a table linked twice, or reclaimed under a peer's
 // walk). Uncontended for
-// single-thread Procs (the v1.0 common case). Lock order vma_lock ->
-// buddy_lock matches SYS_BURROW_ATTACH (vma_lock held across
+// single-thread Procs (the v1.0 common case). Lock order as->lock ->
+// buddy_lock matches SYS_BURROW_ATTACH (as->lock held across
 // burrow_create_anon -> alloc_pages), so no inversion.
 // B-1a audit F1 (P1): the FILE slow path is the ONE fault arm whose admission
 // (step 2 of demand_page_locked, against vma->prot) and whose install are
@@ -977,14 +977,14 @@ static bool file_fault_still_admitted(const struct Vma *vma,
 }
 
 // REVENANT R-2 / I-36: file_install_locked -- the FILE slow-path tail, run
-// under the RE-ACQUIRED p->vma_lock. The Burrow is pinned (freq->burrow's
+// under the RE-ACQUIRED p->as->lock. The Burrow is pinned (freq->burrow's
 // burrow_ref, taken in demand_page_locked), so it cannot have been freed (nor
 // its SLUB address reused) while we slept on the read; but the VMA itself may
 // have been torn down (a sibling thread's SYS_BURROW_DETACH) or replaced, so
 // re-lookup + re-validate it still maps the SAME pinned FILE Burrow. Then
 // install-once under v->lock (a sibling faulter may have filled the slot during
 // our read -- benign double-read; the loser frees its page) and install the R+X
-// PTE. Does NOT drop the Burrow ref (the caller does, OUTSIDE vma_lock). `newpg`
+// PTE. Does NOT drop the Burrow ref (the caller does, OUTSIDE as->lock). `newpg`
 // is consumed on every path (stored into the slot, or freed).
 static enum fault_result file_install_locked(struct Proc *p,
                                              const struct fault_info *fi,
@@ -1105,18 +1105,18 @@ static enum fault_result file_install_locked(struct Proc *p,
 }
 
 // REVENANT R-2 / I-36: file_demand_page_single -- the proven single-page
-// BURROW_TYPE_FILE fill, run with NO lock held (vma_lock was released by
+// BURROW_TYPE_FILE fill, run with NO lock held (as->lock was released by
 // userland_demand_page after demand_page_locked signalled the miss). Allocates a
 // fresh zeroed page, reads ONE page from the pinned backing Spoor (BLOCKS on the
 // 9P round-trip; #811-death-interruptible BY INHERITANCE from the dev9p read -- the
 // read returns < 0, userland_demand_page answers FAULT_USER_DYING, and the dying
 // thread ends at el0_return_die_check; no new wait/wake code), then re-acquires
-// vma_lock to install. Fail-closed: a read
+// as->lock to install. Fail-closed: a read
 // error -> FAULT_USER_BUS (snare:bus, I-36 condition 6), NEVER a silent zero-fill
 // of executable text. This is ALSO the read-ahead FALLBACK -- file_demand_page_
 // cluster degrades here on any staging/page alloc shortfall or a degenerate
 // 1-page cluster. Does NOT drop the Burrow pin: the file_demand_page_slow entry
-// drops it exactly once, OUTSIDE vma_lock, after the fill returns.
+// drops it exactly once, OUTSIDE as->lock, after the fill returns.
 static enum fault_result file_demand_page_single(struct Proc *p,
                                                const struct fault_info *fi,
                                                struct file_fault_req *freq) {
@@ -1211,7 +1211,7 @@ out:
 _Static_assert(PAGEMAP_NODE_ENTRIES % REVENANT_READAHEAD_PAGES == 0,
                "a read-ahead cluster lies inside one pagemap leaf");
 
-// Install a filled cluster under the RE-ACQUIRED vma_lock: re-validate the VMA
+// Install a filled cluster under the RE-ACQUIRED as->lock: re-validate the VMA
 // still maps the SAME pinned FILE Burrow, install-once each cluster slot into
 // the pagemap (a sibling faulter may have won a slot -- benign; the loser page is
 // freed), then install ONLY the faulting slot's PTE (cluster-mates install on
@@ -1455,7 +1455,7 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
         return file_demand_page_single(p, fi, freq);
     }
 
-    // Install under the re-acquired vma_lock; free any un-adopted (loser/bail)
+    // Install under the re-acquired as->lock; free any un-adopted (loser/bail)
     // pages OUTSIDE v->lock (file_install_cluster_locked NULL'd the adopted ones).
     spin_lock(&p->as->lock);
     enum fault_result r =
@@ -1468,7 +1468,7 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
 
 // REVENANT R-2 / I-36: the BURROW_TYPE_FILE slow-path ENTRY. Runs the read-ahead
 // cluster fill (which degrades to the single-page path as needed), then drops the
-// Burrow pin exactly once, OUTSIDE vma_lock (the last unref's burrow_free_internal
+// Burrow pin exactly once, OUTSIDE as->lock (the last unref's burrow_free_internal
 // -> spoor_clunk may sleep -- leaf-lock discipline).
 static enum fault_result file_demand_page_slow(struct Proc *p,
                                                const struct fault_info *fi,
@@ -1549,7 +1549,7 @@ static enum fault_result demand_page_one(struct Proc *p,
     if (!fi->is_translation && !fi->is_access_flag && !fi->is_permission)
         return FAULT_USER_BUS;
 
-    // Fast path under vma_lock: resolve + install (ANON/MMIO/DMA + a FILE
+    // Fast path under as->lock: resolve + install (ANON/MMIO/DMA + a FILE
     // resident-hit). On a BURROW_TYPE_FILE miss, demand_page_locked sets
     // freq.needed + pins the Burrow; the slow path then runs OUTSIDE the lock
     // (the blocking dev->read cannot run under a spinlock -- the I-36 condition-5

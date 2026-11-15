@@ -281,7 +281,7 @@ static int vma_link_in(struct AddrSpace *as, bool exempt, struct Vma *v,
     // address space at PROC_VMA_MAX is rejected here as -T_E_NOMEM (an overlap is
     // -1: the cap is a resource refusal, reportable as one -- B-1a' audit F18; the
     // caller vma_frees the rejected Vma either way). The charge requires as->lock — every
-    // vma_insert caller holds it (attach / share under vma_lock; the exec load path
+    // vma_insert caller holds it (attach / share under as->lock; the exec load path
     // and the fork build a detached address space no other thread can reach). Paired by
     // addrspace_uncharge_vma in vma_remove_in. Charges nothing on failure, so no
     // rollback is needed on the rejected path.
@@ -1068,9 +1068,9 @@ void vma_drain(struct Proc *p) {
 void vma_drain_in(struct AddrSpace *as) {
     if (!as) return;
 
-    // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->vma_lock --
+    // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->as->lock --
     // retiring its lockless exemption. The weft reaper's cross-Proc
-    // force-reclaim holds the target's vma_lock ACROSS its per-page
+    // force-reclaim holds the target's as->lock ACROSS its per-page
     // TLBI unmap after dropping g_proc_table_lock (so the multi-ms loop
     // runs IRQs-on, off the global lock); this acquire is what makes a
     // reap racing that window serialize instead of draining under it.

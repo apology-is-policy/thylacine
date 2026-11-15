@@ -3506,7 +3506,7 @@ static int devproc_environ_walk_cb(struct Proc *target, void *arg) {
     }
     // Renders under target->env's lock, nested inside the g_proc_table_lock
     // proc_for_each already holds. That edge is NEW but acyclic on the same
-    // ground as ns_lock and vma_lock: env->lock is a LEAF -- nothing held under
+    // ground as ns_lock and as->lock: env->lock is a LEAF -- nothing held under
     // it takes g_proc_table_lock (env.c touches no other kernel lock but the
     // slab's). g_proc_table_lock is what keeps `target` -- and so its Env --
     // alive for the render, since env_free runs from proc_free.

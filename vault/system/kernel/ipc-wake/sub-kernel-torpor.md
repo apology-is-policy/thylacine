@@ -146,7 +146,7 @@ its space, so a waiter's space outlives its record.
 The under-lock reload can still fault, in the window between the pre-fault and
 itself, and EL0 can hold that window open by keeping the bucket busy. A concurrent
 decommit re-faults into the **non-blocking** lazy-anon arm, so the edge bucket lock →
-`vma_lock` → buddy exists, only there, and never sleeps. A VMA teardown fails the load.
+`as->lock` → buddy exists, only there, and never sleeps. A VMA teardown fails the load.
 A `MAP_FIXED` that puts an unfaulted file page there reaches the one arm that sleeps,
 which refuses a faulter holding a counted lock ([[sub-kernel-fault]]), so that load
 fails too. Either failure is a spurious return, not `-EFAULT`: the address was good a

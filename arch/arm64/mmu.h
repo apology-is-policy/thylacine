@@ -499,7 +499,7 @@ u64 mmu_uninstall_pte_calls(void);
 // is a hole; a short count = a hole / an RO leaf mid-range). The write refuses
 // a read-only leaf (I-12 W^X + I-36 REVENANT Image cache: a debugger writes
 // DATA; breakpoints are HW). LOCK CONTRACT: the caller holds the target's
-// vma_lock and has confirmed the target is fully stopped (no thread runs, so no
+// as->lock and has confirmed the target is fully stopped (no thread runs, so no
 // fault mutates the tree).
 long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len);
 long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len);
