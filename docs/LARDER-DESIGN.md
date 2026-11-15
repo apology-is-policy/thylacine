@@ -749,12 +749,13 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
      stays visible).
 - **fstat on the staging fd** patches `size = max(server_size,
   stage_off + stage_len)` (the Go truncate-gate/buildid pattern needs the
-  post-write size mid-open). Path-stats via OTHER fids see the last-flushed
-  state — legal under close-to-open (the file is open-dirty).
+  post-write size mid-open). Any other stat of the file -- an fstat through
+  another open, a stat by name -- first flushes the run (12.6, vote M23), so
+  it reports the size, version and times after the flush.
 - **Shared-cache coherence**: the attr + page invalidates move from per-WRITE
   to per-FLUSH (the bytes reach the server exactly at flush; 19.6k invalidate
   pairs become ~1.4k). Same-priv readers never see stale (the overlay wins);
-  other-priv readers are close-to-open-legal until the close flush.
+  a reader through any other open on the client flushes the run first (12.6).
 - **Error semantics (the voted NFS model, honestly bounded by the ABI)**: a
   flush failure (ENOSPC/EIO) LATCHES on the priv; every subsequent
   write/fsync on that fd returns the latched errno (so a streaming writer
@@ -781,9 +782,10 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   Rlerror(`EINTR`) itself, with no claim, has failed the write, and that
   latches like any other failure. A last close on a die-pending thread does
   not flush, and neither does `Dev.close` at a last reference, which can fall on
-  any thread: the run goes to a closer, with the fid's clunk when no reference
-  remains and as a job of its own when a map or a Loom op still holds the file
-  (ARCH 7.9.1 part C). The closer writes it and then DROPS the file's attr and pages instead of
+  any thread: the run goes to a closer (ARCH 7.9.1 part C), as a job of its own
+  that holds the file, so the run stays visible to the client's other opens
+  until it lands (12.6); only a job that cannot be had for memory sends it with
+  the fid's clunk. The closer writes it and then DROPS the file's attr and pages instead of
   installing them as OWN, because that late write is unordered with the
   file's later writers (the G1 write-populate premise holds only for a flush
   inside the open). The flush itself tells which it is: with the append anchor
@@ -863,6 +865,22 @@ without flushing — the lost-write class; the next open reads the pre-write
 server content). The byte-granular overlay split (below/within/past the run)
 is beneath the token abstraction — pinned by the kernel tests instead.
 
+(Vote M23, 2026-11-15.) The model's `staged` slot was per-file and every
+`Read` served it -- the client-wide behaviour of 12.6 -- while the code staged
+per open. The model now names the opens (`Opens`): an open's stage holds the
+token it staged (`stage[f][o]`, 0 for none); a `Read` by an open with no stage
+of its own serves the cache only when NO open holds a stage of the file (the
+observing legs); a write-through needs every open's stage landed first (the
+changing legs); a stage needs no other open's stage outstanding (the one
+holder); and `FlushClose` lands the token its own open holds, not the newest.
+Two buggy cfgs pin the new classes: `fs_cache_buggy_peer_skips_staged` (a read
+through another open serves the cache while a stage is held -- audit round 4's
+F1: `NoWrongRead` red) and `fs_cache_buggy_peer_unordered` (a write through
+another open lands while an older stage is held, whose flush then puts the
+older content back: `NoLostStage` red). An open's or a stat's populate is
+judged by the `Read` that serves it, so the open and stat legs are the read
+leg in the model.
+
 ### 12.5 Projected effect
 
 19.6k → ~1.4k wire writes (85 MB / 128-KiB flushes + the sub-cap tails at
@@ -870,6 +888,104 @@ close). W-A+W-B ≈ −0.7..0.9 s of the post-F2 936 ms write band, plus the
 queueing ripple on the other bands (the pre-F2→F2 step showed wga/read
 shrinking ~40% from depth relief alone). F2+F1 projects S3 ≈ 2.5–2.8 s vs the
 2648 bar; the wga cold band is the reserve lever.
+
+### 12.6 One file, one client: the held bytes are the client's (vote M23, 2026-11-15)
+
+Until 2026-11-15 a run belonged to the open that staged it, so another program
+on the same client saw the file only as of its last flush. Audit round 4 of
+vote M15 found what that costs: `mv` of a system-mount file that another
+program held open for writing copied the flushed part and then removed the
+source, so bytes `write()` had reported done were lost. The precedents 12.1
+cites keep one page cache per file per client (v9fs `cache=loose` writeback,
+the Linux NFS client), so every program on the client sees a write the moment
+it returns. The operator voted that Thylacine do the same (vote M23,
+"Client-wide, inside M15").
+
+**The rule.** On one client, a file's held bytes are the client's. They are
+flushed before another open's operation on the file:
+- **Observing** -- an open of the file, in any mode (the fidless cached open
+  checks before it trusts its hint); a read, an fstat or an fsync through
+  another open; a stat by name. The holder keeps staging.
+- **Changing** -- a write through another open; a truncating open; a wstat
+  through another open or by name; a Loom registration of another open. The
+  held bytes are older than the change, so they land first. Then the holder
+  STOPS staging (its anchor drops, as its own wstat drops it), since a truncate
+  or a write from elsewhere leaves its anchor no longer the file's known end,
+  and its later writes go straight through.
+
+The holder's own operations are unchanged: its reads overlay, its fstat
+patches the size, its writes keep 12.2's rules. So writes from two opens land
+in the order their callers made them, as in one page cache. The vote named the
+open, stat and read legs. The changing legs and fsync follow from the same
+rule: a second writer's change is ordered after the first writer's held bytes,
+and fsync on any descriptor writes back the file's dirty pages, as Linux's
+does. Both only ever flush sooner or stage less.
+
+**The holder registry.** At most one open per client and file stages: the
+holder. A create- or OTRUNC-born open registers when it becomes eligible. If
+another open already holds the file, the new one is not eligible and writes
+through; its OTRUNC open is a changing leg, so the old holder stops staging
+too, and neither stages until the holder's last close. The registry is a fixed
+hash keyed by client and qid.path, each bucket under its own spinlock, and the
+entry is the priv itself. Lock order: a bucket lock, then the holder's
+`wb_lock`. Nothing takes a bucket lock under `wb_lock`, and no wire I/O happens
+under either. A leg looks the holder up. When the holder holds bytes or has a
+flush in the air, the leg takes a reference on the holder's Spoor -- only while
+it has one: a Spoor whose last reference has gone is closing, and leaves the
+registry before its memory goes (`spoor_tryref`) -- then flushes outside every
+lock through `wb_flush_locked`, which waits out a flush already in flight
+(12.2's single-flight). A changing leg on a holder with nothing held drops the
+anchor in place. The holder leaves the registry at its last close once its run
+is gone, or at its last reference.
+
+**What a leg's flush can end in.** Landed: the operation goes on and sees the
+bytes. Refused by the server: as with any failed flush, the run is dropped and
+the error latches on the holder, whose next write, fsync or last close reports
+it; the operation goes on and sees the file without those bytes. Cancelled by
+a caught note on the leg's own thread: flush(5) never applied the Twrite, the
+run stays held, and the operation returns `EINTR`. It did not happen, so no
+stat or read answers as if the bytes were not there. A death on the leg's
+thread: the run stays held for the next flusher.
+
+**A stat by name asks again.** The walk-fused getattr (POUNCE) learns which
+file it reached only from the walk. When the leaf is a held file, the leg
+flushes and the stat asks again: the query form walks again, and the bind form
+gives back the fid it bound and walks again. So the size, version and times it
+returns are those after the flush. It asks once more, not until nothing is
+held: bytes staged after the flush are concurrent with the stat.
+
+**A writer killed in its last close.** Its run used to go to a closer with the
+clunk, out of the registry, so every open missed it until the closer landed
+it. Now a last close that cannot wait queues the job that keeps the open alive
+and flushes it (`dev9p_lock_flush_queue`, the path a close that leaves another
+holder already took). The run stays registered until it lands, and a leg
+either flushes it or waits out the closer's flush. Only when that job cannot be
+had for memory does the run go with the clunk as before, and then a leg can
+miss it until the closer lands it.
+
+**What stays.** A cached open serves its open-time snapshot (close-to-open;
+FID-LIFECYCLE 3.3). Its open flushed every held byte before the snapshot was
+taken, and its reads and fstat see no later write of any kind. Loom: a
+registration is a changing leg, but a ring's later operations pass no leg, so
+a file that another open starts to stage after the registration is the open
+Loom seam (`seam-larder-loom-bypass`, section 9). Another client of the same
+server (a second session) sees a file as of its last flush: close-to-open
+between clients, as between two NFS clients. Strict mounts stage nothing
+(12.3).
+
+**G1's premise across opens.** Section 13's own-page install takes no gen guard
+because no mutation of the file lands while a flush is in flight. Before this
+section that held only for the flushing open. A changing leg waits out the
+holder's flush, so it now holds for every open on the client.
+
+**Cost.** Each read, write, open, fstat, stat by name and fsync of a plain file
+on a loose cacheable client looks the file up: one bucket lock and an empty
+bucket in the common case, and nothing at all while no open stages anywhere.
+The measured mix -- one writer per file, read after its close -- never meets a
+holder. A program that stats a file while another program writes it pays a
+flush per stat, as an NFS client's `getattr` writes dirty pages back first.
+
+**Spec.** `fs_cache.tla` names the opens (12.4).
 
 ---
 
@@ -900,7 +1016,9 @@ guard closes is a READ-populate racing an invalidate (pre-mutation bytes
 re-installed); an own install's bytes are the writer's just-landed content,
 and no same-file mutation can land concurrently: the caller holds the wb
 flush freeze (`wb_flushers > 0` excludes same-file stagers and orders
-overlapping through-writes behind the flush -- the SA-F1 single-flight).
+overlapping through-writes behind the flush -- the SA-F1 single-flight). A
+write, a truncate or a wstat through another open waits that freeze out too
+(12.6's changing legs), so the premise holds across the client's opens.
 
 **G1b (range-scoped write-through invalidate).** The measured killer: the
 buildid rewrite (a ~100-byte in-place pwrite cmd/go performs on every built
