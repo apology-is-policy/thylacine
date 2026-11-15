@@ -487,8 +487,10 @@ void addrspace_uncharge_file(struct AddrSpace *as, u32 npages);
 u64 addrspace_overrefunds(void);
 
 #ifdef KERNEL_TESTS
-// Tests that refund past zero on purpose put the count back before the runner reads it.
-void addrspace_overrefunds_rewind_for_test(u64 count);
+// The runner's read-and-clear, after each test.
+u64 addrspace_overrefunds_take_for_test(void);
+// A test that refunds past zero on purpose takes back the counts it made, before the runner reads.
+void addrspace_overrefunds_forgive_for_test(u64 n);
 // The in-kernel tests' reach into addrspace.c (.claude/rules/kernel-code.md,
 // "Cross-file declarations"): hooks compiled only with the tests, and
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).

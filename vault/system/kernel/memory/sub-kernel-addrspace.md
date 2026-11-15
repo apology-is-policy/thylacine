@@ -113,7 +113,9 @@ payer's leaves twice stayed green. So each of the five (`page_count`,
 and I-32 still fails clean, but the refund is also added to one global count,
 `addrspace_overrefunds`: `/ctl/memory`'s `overrefund:` line
 ([[sub-kernel-devctl]]), and a per-test check in the suite's runner
-([[sub-substrate-kernel-suite]]) -- the memory accounts' `unpaired` shape
+([[sub-substrate-kernel-suite]]), which reads and clears it in one exchange, while a
+test that refunds past zero on purpose takes back exactly the counts it made, floored
+(`addrspace_overrefunds_forgive_for_test`) -- the memory accounts' `unpaired` shape
 ([[sub-kernel-accounts]]) for the space's own counts. `file_pages` and
 `pgtable_pages` refund `page_count` first, so one short refund can count
 twice; `addrspace.overrefund_is_counted` isolates each of the five, with an

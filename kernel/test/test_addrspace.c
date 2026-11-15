@@ -403,7 +403,8 @@ void test_addrspace_overrefund_is_counted(void) {
     u32 pc = as->page_count, vc = as->vma_count, sm = as->shared_map_pages;
     u32 fp = as->file_pages, pt = as->pgtable_pages;
     spin_unlock(&as->lock);
-    addrspace_overrefunds_rewind_for_test(o0);
+    u64 all = addrspace_overrefunds() - o0;
+    addrspace_overrefunds_forgive_for_test(all < 5u ? all : 5u);   // the five it made
     addrspace_unref(as);
 
     TEST_ASSERT(charged && vcharged && two, "the charges land under the budget");

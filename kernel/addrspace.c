@@ -599,8 +599,22 @@ u64 addrspace_overrefunds(void) {
 }
 
 #ifdef KERNEL_TESTS
-void addrspace_overrefunds_rewind_for_test(u64 count) {
-    __atomic_store_n(&g_addrspace_overrefunds, count, __ATOMIC_RELAXED);
+// One exchange, so a count landing on another CPU between a read and a clear
+// is not lost.
+u64 addrspace_overrefunds_take_for_test(void) {
+    return __atomic_exchange_n(&g_addrspace_overrefunds, 0u, __ATOMIC_RELAXED);
+}
+
+// Takes back n counts and no more -- floored, never wrapped -- so a count the
+// caller did not make stays for the runner to report.
+void addrspace_overrefunds_forgive_for_test(u64 n) {
+    u64 cur = __atomic_load_n(&g_addrspace_overrefunds, __ATOMIC_RELAXED);
+    for (;;) {
+        u64 nv = (cur >= n) ? cur - n : 0;
+        if (__atomic_compare_exchange_n(&g_addrspace_overrefunds, &cur, nv, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
 }
 #endif
 

@@ -124,8 +124,11 @@ through a larger buffer now, because the two lines can pass 256 bytes.
 
 **One more since 2026-11-14:** `overrefund:` is `addrspace_overrefunds`, the refunds an
 address space's own counts could not cover, each floored at zero
-([[sub-kernel-addrspace]]). An atomic; it is the last line, and every reader in the tree
-looks its keys up by name (`devctl.read_memory_format` asserts it reads 0).
+([[sub-kernel-addrspace]]). An atomic, and the last line. The readers in the tree find
+their keys by name -- halcyon's `ctl_field`, prowl's sampler, diorama, pouch patch 0034's
+line-start match, `ls-halcyon-instrument.exp`'s `free:` pattern -- except
+`pouch-hello-malloc`, whose `fscanf` reads the first three lines in order; a line
+appended after them moves neither (`devctl.read_memory_format` asserts it reads 0).
 
 ### The gate is a special case, and it is default-allow
 

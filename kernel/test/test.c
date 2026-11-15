@@ -3878,11 +3878,10 @@ void test_run_all(void) {
 
         // The same for an address space's own counts, which floor at zero: an
         // over-refund reads as a smaller count wherever the count sat low.
-        if (addrspace_overrefunds() != 0u) {
+        if (addrspace_overrefunds_take_for_test() != 0u) {
             uart_puts("ADDRSPACE-OVERREFUND ");
             if (!current_test->failed)
                 test_fail("an address space count was refunded past zero (see ADDRSPACE-OVERREFUND)");
-            addrspace_overrefunds_rewind_for_test(0u);
         }
 
         // The user pool's test park is the seventh piece of that state. A

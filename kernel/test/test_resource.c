@@ -102,8 +102,12 @@ void test_resource_page_charge_caps(void) {
     // Uncharge everything, then an over-uncharge clamps at 0 (no underflow).
     proc_page_uncharge(p, CAP);
     TEST_EXPECT_EQ(p->as->page_count, 0u, "full uncharge -> 0");
+    u64 o0 = addrspace_overrefunds();
     proc_page_uncharge(p, 50u);
+    u64 over = addrspace_overrefunds() - o0;
+    addrspace_overrefunds_forgive_for_test(over < 1u ? over : 1u);
     TEST_EXPECT_EQ(p->as->page_count, 0u, "over-uncharge clamps at 0 (no underflow)");
+    TEST_EXPECT_EQ(over, 1u, "and the over-uncharge is counted");
 
     // Overflow guard: a charge whose sum would wrap u32 is refused even though
     // it is "under the cap" arithmetic-wise after wrap.
@@ -534,7 +538,7 @@ void test_resource_vma_cap(void) {
     u64 o0 = addrspace_overrefunds();
     proc_vma_uncharge(p);
     u64 over = addrspace_overrefunds() - o0;
-    addrspace_overrefunds_rewind_for_test(o0);
+    addrspace_overrefunds_forgive_for_test(over < 1u ? over : 1u);
     TEST_EXPECT_EQ(p->as->vma_count, 0u, "over-uncharge clamps at 0 (no underflow)");
     TEST_EXPECT_EQ(over, 1u, "and the over-uncharge is counted");
 
