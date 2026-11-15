@@ -5899,14 +5899,16 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     __atomic_store_n(&p->phenotype, new_pheno, __ATOMIC_RELEASE);
 
     // Every cross-Proc reader of `->as` resolves its target under
-    // g_proc_table_lock. /proc/<pid>/mem and /ctl/procs finish with it inside
-    // that walk, so after the section above neither is holding `old`.
-    // /proc/<pid>/maps and the weft reaper PIN the space they found there and
-    // use only that pointer afterwards, never re-reading ours: the pin keeps
-    // the descriptor and its page table past the drop below, and each reads or
-    // unmaps under `old`'s lock, which the drain takes too, so it sees the list
-    // whole or drained (and the reaper, finding the drain's quiesce flag, does
-    // not unmap at all). That is what makes the drop safe rather than a race.
+    // g_proc_table_lock. /ctl/procs finishes with it inside that walk, so after
+    // the section above it is not holding `old`. /proc/<pid>/maps, the weft
+    // reaper and /proc/<pid>/mem (when it found the space's lock busy) PIN the
+    // space they found there and use only that pointer afterwards, never
+    // re-reading ours: the pin keeps the descriptor and its page table past the
+    // drop below. maps reads and the reaper unmaps under `old`'s lock, which the
+    // drain takes too, so each sees the list whole or drained (and the reaper,
+    // finding the drain's quiesce flag, does not unmap at all); mem only takes
+    // and releases that lock, then resolves the Proc afresh. That is what makes
+    // the drop safe rather than a race.
 
     // Put the NEW translation in the hardware before touching the old one. After
     // the isb inside this call, no fetch or access on this CPU walks `old`, and

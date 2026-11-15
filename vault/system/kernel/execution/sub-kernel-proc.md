@@ -452,11 +452,13 @@ child starts NONE too.
 
 `proc_exec_replace` swaps a live process's address space in place, under the
 process table lock alone. A cross-Proc reader of `->as` either finishes inside
-its table walk (`/proc/<pid>/{maps,mem}`, `/ctl/procs`) or, like the weft
-reaper, leaves it holding the LOCK of the space it found, by the pointer it
-captured there, never the Proc's ([[sub-kernel-weft]]); so if the swap's unref
-of the old space is the last, its drain takes that lock first and waits for
-the reaper. Before that drain, exec stops the old image's devices as death does
+its table walk (`/ctl/procs`) or PINS the space it found there and uses only
+that pointer afterwards, never the Proc's: `/proc/<pid>/maps` renders under the
+space's lock, the weft reaper unmaps under it ([[sub-kernel-weft]]), and
+`/proc/<pid>/mem`, when it found that lock busy, only takes and releases it
+before resolving the Proc again ([[sub-kernel-devproc]]). The pin keeps the
+descriptor and its page table; so if the swap's unref of the old space is the
+last owner's, its drain takes that lock first and waits for whichever holds it. Before that drain, exec stops the old image's devices as death does
 ([[sub-kernel-death]]): when its drop of the old space is the last, every device
 a descriptor claims is reset, and the drain resets every device the space maps --
 a device holding the physical address of a buffer in the old image is the same
