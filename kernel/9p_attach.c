@@ -67,12 +67,15 @@ static struct p9_attached *g_p9_ctl_head;
 
 static void attached_ctl_link(struct p9_attached *a,
                               const u8 *aname, size_t aname_len) {
-    // Default label: the attach aname (printable-ASCII-sanitized,
-    // truncated). srvconn_attach_dev9p_root relabels /srv sessions.
+    // Default label: the attach aname, truncated, in the Proc name's
+    // alphabet -- ASCII graphics, `?` for anything else. The label is one
+    // column of its /ctl/9p-sessions row and the aname is the attacher's own
+    // bytes: a space kept would let it write that row's other columns.
+    // srvconn_attach_dev9p_root relabels /srv sessions.
     size_t n = 0;
     for (; n < sizeof(a->ctl_label) - 1 && n < aname_len; n++) {
         u8 ch = aname[n];
-        a->ctl_label[n] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?';
+        a->ctl_label[n] = (ch > 0x20 && ch < 0x7f) ? (char)ch : '?';
     }
     a->ctl_label[n] = 0;
     if (n == 0) { a->ctl_label[0] = '-'; a->ctl_label[1] = 0; }

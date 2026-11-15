@@ -630,14 +630,20 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      one is for a line. A scripted serial that splits the line shows both
      states for no boot.
   7. **A host tool's missing dependency is a SKIP before boot.**
-     `ls-halcyon-pointer` reads the cursor plane with
-     `tools/interactive/vnc_capture.py`, which needs Pillow; on a host without
+     `ls-halcyon-pointer` once read the cursor plane with a
+     `tools/interactive/vnc_capture.py` that needed Pillow; on a host without
      it the scenario booted, drove the guest, and reported the Python
-     traceback as a guest failure, three attempts running. `lc_require_host_pil`
-     (lib.exp) now exits 77 with the reason before a VM starts; the six SAK
-     scenarios call it when they take the EGL capture path. The preflight
-     makes the consumer's own import (`from PIL import Image`), not a
-     weaker one: a Pillow whose C half does not load still has a `PIL`.
+     traceback as a guest failure, three attempts running, and a preflight
+     (`lc_require_host_pil`) then made it a SKIP. Since 2026-11-13 (vote 96)
+     no capture needs anything past Python's standard library:
+     vnc_capture.py writes its PNGs itself (`def write_png(path, width,
+     height, pixels, channels)`), with Pillow's rounding where it composes
+     the cursor, so a capture is the same bytes as before, and
+     ls-halcyon-pointer reads its flat scene with
+     `tools/interactive/png_extrema.py` (gfx_fp's `read_png`). The
+     preflight went with the dependency. The rule stands for the next host
+     tool a scenario adds: exit 77 with the reason before a VM starts, and
+     make the consumer's own import, not a weaker one.
   8. **A line the guest prints during bring-up is awaited under the boot
      budget.** `lc_boot` returns at the spawn on the socket transport, so a
      wait that follows it is still the boot's. `ls-gfx` claimed aurora's

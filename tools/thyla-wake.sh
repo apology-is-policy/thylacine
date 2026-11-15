@@ -42,6 +42,18 @@
 # A lease nobody knows about blocks every peer, so a lease taken by `hold` is
 # RELEASED when the agent is gone, and when its box stays unusable for
 # THYLA_WAKE_HELD_BOUND seconds; the agent is then told it was released.
+#
+# AN EXPIRED LEASE IS NOT A FREE ONE AT ONCE. yip passes it to the head of the
+# queue only when it has been expired ten minutes and every runner its holder
+# registered is verified dead (or none was registered); while a registered runner
+# may be alive it stays the holder's until they release or renew it, or someone
+# steals it with a reason, and everything queued behind it stands still -- and a
+# holder whose turn ended with the lease does not know (2026-11-10: a Mac idle for
+# 13 h with two agents queued behind one). yip's EXPIRED line says which case. A
+# waiter therefore says so, once per expiry: `hold` rings the holder with what
+# yip shows (they can release in one call), and both modes tell this pane. It
+# never steals: that takes a check of the holder's runners and a reason, and is
+# the agent's decision.
 set -uo pipefail
 
 YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
@@ -50,6 +62,9 @@ POLL="${THYLA_WAKE_POLL:-20}"                    # watch: seconds between resour
 BOUND="${THYLA_WAKE_BOUND:-86400}"               # watch: give up after this
 DELIVER_BOUND="${THYLA_WAKE_DELIVER_BOUND:-3600}" # stop trying to type a notice after this
 HELD_BOUND="${THYLA_WAKE_HELD_BOUND:-600}"        # a held lease: release it if the wake is not typed by then
+HOLD_TICK="${THYLA_WAKE_HOLD_TICK:-2}"            # hold: how soon a returned `yip hold` is noticed
+EXPIRED_POLL="${THYLA_WAKE_EXPIRED_POLL:-300}"    # hold: seconds between looks for an EXPIRED lease in the way
+EXPIRED_BOUND="${THYLA_WAKE_EXPIRED_BOUND:-60}"   # one try at typing the EXPIRED notice; a busy box is retried at the next look
 TAILN="${THYLA_WAKE_TAIL:-15}"
 GLYPH="${THYLA_WAKE_GLYPH:-$'\xe2\x9d\xaf'}"     # ❯, the input box's prompt
 RULE="${THYLA_WAKE_RULE:-$'\xe2\x94\x80'}"       # ─, the box's top edge
@@ -73,6 +88,13 @@ res_line() { "$YIP" resources 2>/dev/null | grep -E "^$1 " | head -1; }
 
 # yip names the asking agent's own lease "HELD by you", a peer's by name.
 held_by_me() { printf '%s' "$1" | grep -qE "HELD by (you|$ME)( |,|$)"; }
+
+# The resource's whole entry in `yip resources`: its line and the indented lines under it.
+res_block() { "$YIP" resources 2>/dev/null | awk -v r="$1" '$1 == r { on = 1; print; next } on && /^[ \t]/ { print; next } { on = 0 }'; }
+
+# Who holds an EXPIRED lease, from its line ("mac   EXPIRED -- main held it 14.2h, TTL ran
+# out 13.4h ago. ..." -> main); nothing for any other line.
+expired_holder() { printf '%s' "$1" | sed -n "s/^$RES  *EXPIRED -- \([A-Za-z0-9_.-]*\) held it .*/\1/p"; }
 
 # A pane id that no longer exists is NOT an error to tmux: display-message
 # answers it with exit 0 and empty fields. So the pane is alive only when it
@@ -180,16 +202,59 @@ deliver() {
     done
 }
 
+# Say that the lease in the way is EXPIRED: once per expiry to its holder ($1 =
+# ring; a watch claims nothing and rings nobody), and once to this pane. $2 is
+# the resource's line as just read.
+EXPIRED_SEEN=""; EXPIRED_NOTE=""
+expired_look() {
+    local line="$2" holder how
+    holder=$(expired_holder "$line")
+    if [ -z "$holder" ] || [ "$holder" = "$ME" ]; then
+        # No longer expired (an unreadable line says nothing either way): a
+        # later expiry is a new one, and a notice not yet typed is stale.
+        [ -n "$line" ] && { EXPIRED_SEEN=""; EXPIRED_NOTE=""; }
+        return 0
+    fi
+    if [ "$EXPIRED_SEEN" != "$holder" ]; then
+        EXPIRED_SEEN=$holder
+        how="$holder was not rung: a watch claims nothing"
+        if [ "$1" = ring ]; then
+            if {
+                printf 'thyla-wake, for %s, %s: yip shows your %s lease EXPIRED, and %s is queued behind it. yip keeps an expired lease for you while a runner you registered may be alive, and passes it to the head of the queue once it has been expired ten minutes with none alive; its line below says which.\n\n' "$ME" "$(stamp)" "$RES" "$ME"
+                res_block "$RES"
+                printf '\nIf your work on %s has ended: yip release %s. If it is still running: renew it with yip hold %s "<reason>" --now. One automatic ring per expiry; nothing was stolen.\n' "$RES" "$RES" "$RES"
+            } | "$YIP" call "$holder" "$RES: your lease EXPIRED and $ME is queued behind it" >/dev/null 2>&1; then
+                how="$holder was rung once"; log expired-rang "$holder; $line"
+            else
+                how="ringing $holder FAILED"; log expired-ring-failed "$holder; $line"
+            fi
+        else
+            log expired-seen "$holder; $line"
+        fi
+        EXPIRED_NOTE="$RES is EXPIRED under $holder ($how). yip: $line A steal is yours to decide, after checking $holder's runners."
+    fi
+    [ -n "$EXPIRED_NOTE" ] || return 0
+    deliver "$EXPIRED_NOTE" "$EXPIRED_BOUND"
+    [ $? -eq 2 ] || EXPIRED_NOTE=""   # typed, or nobody left to tell
+}
+
 release_lease() {  # $1 why
     if "$YIP" release "$RES" >/dev/null 2>&1; then log released "$1"; else log release-failed "$1"; fi
 }
 
 run_hold() {
-    local hp hrc line since out="$DIR/$$.hold"
+    local hp hrc line since t_look out="$DIR/$$.hold"
     trap '[ -n "${hp:-}" ] && kill "$hp" 2>/dev/null; log cancelled "TERM while waiting"; rm -f "$DIR/$$.meta"; exit 143' TERM INT
     log armed "hold pane=$PANE prog=$PROG me=$ME for=$FOR wait=$WAIT"
     "$YIP" hold "$RES" "$REASON" --for "$FOR" --wait "$WAIT" > "$out" 2>&1 &
     hp=$!
+    t_look=$(date +%s)
+    while kill -0 "$hp" 2>/dev/null; do
+        sleep "$HOLD_TICK" & wait $!        # `wait`, so a TERM is taken at once
+        [ $(( $(date +%s) - t_look )) -ge "$EXPIRED_POLL" ] || continue
+        t_look=$(date +%s)
+        expired_look ring "$(res_line "$RES")"
+    done
     wait "$hp"; hrc=$?; hp=""
     line=$(res_line "$RES")
     log hold-returned "rc=$hrc; $(head -1 "$out" 2>/dev/null); $line"
@@ -218,6 +283,7 @@ run_watch() {
             deliver "$RES changed at $(stamp): $line" "$DELIVER_BOUND"
             break
         fi
+        expired_look tell "$line"
         [ $(( $(date +%s) - t0 )) -ge "$BOUND" ] && { log watch-timeout "no change in ${BOUND}s"; break; }
         sleep "$POLL"
     done

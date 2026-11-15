@@ -312,17 +312,6 @@ proc lc_qmp_sock {} {
     return "$::lc_repo/build/qmp.sock"
 }
 
-# tools/interactive/vnc_capture.py reads the cursor plane and the EGL scanout with Pillow. A
-# host without it can say nothing about the guest, so the scenario SKIPs (77, which the
-# fleet counts) before a VM boots, instead of reporting the import error as a guest result.
-# The check makes the tool's own import: a Pillow whose C half does not load has a `PIL`.
-proc lc_require_host_pil {} {
-    if {[catch {exec python3 -c "from PIL import Image"} err]} {
-        puts "LS-CI SKIP: host python3 cannot import PIL.Image (Pillow); tools/interactive/vnc_capture.py needs it"
-        exit 77
-    }
-}
-
 proc lc_vnc_probe_noop {args} {}
 
 proc lc_port_bindable {port} {

@@ -52,7 +52,7 @@ reads the exit status off the Instrument bar's log line, and a posted
 resident route stats where the posted `/srv/halcyon` does not. On any other
 image it SKIPs and names its bake; docs/agent/GATES.md lists the images a
 whole-fleet run needs. This is a login-policy
-update awaiting the operator's ratification
+update the operator ratified on November 13
 (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
 
 ## Resident cancellation route (October 2)

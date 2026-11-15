@@ -17,6 +17,9 @@ DRAIN='    vma_drain_in(as);\n'
 LAPSE='    burrow_payers_lapse(as);\n'
 LAPSE_PUT=LAPSE+'    addrspace_lifetime_put(as);\n}'
 QUIESCE='int reset = addrspace_quiesce_mapped_devices(as);'
+# The descriptor lifetime's last-drop guard: the share family's put has the same
+# line, so the anchor carries the owners check that follows only this one.
+EARLY='    if (pre > 1) return;\n    if (__atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) != 0)\n'
 MUTANTS=[
  ('private-sharing','if (as->private_rings) { spin_unlock(&as->lock); return false; }','if (false) { spin_unlock(&as->lock); return false; }','private guard refuses sharing'),
  ('already-shared','if (__atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) != 1 ||','if (false ||','shared image refuses private guard'),
@@ -28,7 +31,7 @@ MUTANTS=[
  ('drain-every-owner','    if (pre == 1) return true;\n','    if (pre == 1) return true;\n    vma_drain_in(as);\n','nonfinal owner preserves mappings'),
  ('pin-leak','void addrspace_unpin(struct AddrSpace *as) {\n    addrspace_lifetime_put(as);','void addrspace_unpin(struct AddrSpace *as) {\n    (void)as;','final pin frees once without another drain'),
  ('drop-before-drain',[(DRAIN,'    addrspace_lifetime_put(as);\n'+DRAIN),(LAPSE_PUT,LAPSE+'}')],None,'extinction: AddrSpace final lifetime drop before mapping drain'),
- ('early-destroy','if (pre > 1) return;','if (false) return;','extinction: AddrSpace final lifetime drop with live owners'),
+ ('early-destroy',EARLY,EARLY.replace('if (pre > 1)','if (false)'),'extinction: AddrSpace final lifetime drop with live owners'),
  ('release-drops-lifetime','    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_lifetime_put(as); return true; }\n','last owner drains before last pin'),
  ('release-early-last','if (pre == 1) return true;','if (pre <= 2) return true;','extinction: addrspace_destroy of an AddrSpace still owned'),
  ('no-quiesce',QUIESCE,'int reset = 0;','last owner stops each mapped device once, before the drain'),
@@ -41,7 +44,7 @@ MUTANTS=[
  # alone, past earlier cases that stop the same mutant first.
  ('release-drops-lifetime@split','    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_lifetime_put(as); return true; }\n',"between release and destroy the last owner's lifetime is held",'split'),
  ('teardown-in-release',[('    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_quiesce_mapped_devices(as); return true; }\n'),(QUIESCE,'int reset = 0;')],None,'release tears nothing down before destroy'),
- ('early-destroy@split','if (pre > 1) return;','if (false) return;','extinction: AddrSpace final lifetime drop before mapping drain','split'),
+ ('early-destroy@split',EARLY,EARLY.replace('if (pre > 1)','if (false)'),'extinction: AddrSpace final lifetime drop before mapping drain','split'),
 ]
 def main():
  p=argparse.ArgumentParser();p.add_argument('--mutants',action='store_true');p.add_argument('--sanitize',action='store_true');p.add_argument('--logs',type=Path,required=True);a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)

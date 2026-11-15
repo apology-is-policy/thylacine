@@ -702,6 +702,17 @@ pub fn retirement_hold(
         Hold::Clear
     }
 }
+/// The word on the kernel's command line that declares a boot one whose test
+/// levers may be armed. The platform writes that line; no client can.
+pub const TEST_LEVERS_WORD: &[u8] = b"thylacine.test-latch-dead";
+/// The same for the chained seat shots, which are armed by a request of their own.
+pub const TEST_CHAINED_WORD: &[u8] = b"thylacine.test-latch-chained";
+/// Whether a kernel command line holds `word`, whole: ended by white space,
+/// a NUL (the FDT property carries one) or the line's end. The empty word is
+/// on no line: a split leaves empty pieces, and they declare nothing.
+pub fn bootarg_declared(bootargs: &[u8], word: &[u8]) -> bool {
+    !word.is_empty() && bootargs.split(|b| b.is_ascii_whitespace() || *b == 0).any(|w| w == word)
+}
 /// Whether the broker runs `request` now or leaves it parked. A park must end:
 /// a seat episode ends, and in-flight chains retire. A retirement nothing can
 /// clear is admitted at once, and one parked `PARK_BOUND_MS` is admitted
@@ -824,6 +835,17 @@ pub fn unref_frees(resp_type: u32) -> bool {
 /// retires.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stall { Holding, Revived, Dead }
+/// What a failed command of the broker's own met at the device (GPU-DESIGN 4.5.15).
+/// Only `Refused` is the device's answer. A stall is other work ahead of the
+/// command, and nothing may be concluded from one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Met { Refused, Stalled, Dead }
+/// Asked of a command that failed after an engine that took commands staged it.
+/// `stalls` counts the stalls begun since boot, read before the command and
+/// after: one begun across it leaves the command, or one behind it, unanswered.
+pub fn met(dead: bool, stalls_before: u32, stalls_after: u32) -> Met {
+    if dead { Met::Dead } else if stalls_before != stalls_after { Met::Stalled } else { Met::Refused }
+}
 /// How often a takeover held up by the device renews the kernel's deadline (vote 71).
 pub const RENEW_EVERY_MS: u64 = 1000;
 /// Whether a takeover held up by the device renews now. `last` is the generation of
@@ -1107,6 +1129,40 @@ mod admission_tests {
         for r in retirements() { assert!(r.retires() && !r.seat(), "{r:?}"); }
         for r in ordinary() { assert!(!r.retires() && !r.seat(), "{r:?}"); }
         for r in seat() { assert!(r.seat() && !r.retires(), "{r:?}"); }
+    }
+    #[test]
+    fn a_lever_is_declared_by_a_whole_word_of_the_command_line() {
+        let w = TEST_LEVERS_WORD;
+        for line in [&b"thylacine.test-latch-dead"[..], b"console=ttyAMA0 thylacine.test-latch-dead thylacine.scale=200\0",
+            b"a\tthylacine.test-latch-dead\n", b"thylacine.test-latch-dead\0"] {
+            assert!(bootarg_declared(line, w), "{line:?}");
+        }
+        for line in [&b""[..], b"thylacine.test-latch-deadx", b"xthylacine.test-latch-dead", b"thylacine.test-latch-dead=1",
+            b"thylacine.test-latch", b"thylacine.test-latch -dead", b"thylacine.scale=200"] {
+            assert!(!bootarg_declared(line, w), "{line:?}");
+        }
+    }
+    #[test]
+    fn each_lever_has_its_own_word() {
+        // Neither word is a prefix of the other as a whole word, so a boot that
+        // declares one arms nothing of the other.
+        let both = b"thylacine.test-latch-dead thylacine.test-latch-chained\0";
+        assert!(bootarg_declared(both, TEST_LEVERS_WORD) && bootarg_declared(both, TEST_CHAINED_WORD));
+        assert!(!bootarg_declared(b"thylacine.test-latch-dead\0", TEST_CHAINED_WORD));
+        assert!(!bootarg_declared(b"thylacine.test-latch-chained\0", TEST_LEVERS_WORD));
+        for line in [&b""[..], b"\0", b"a  b\0", b"thylacine.test-latch-dead\0"] {
+            assert!(!bootarg_declared(line, b""), "the empty word, on {line:?}");
+        }
+    }
+    #[test]
+    fn only_the_devices_answer_is_a_refusal() {
+        assert_eq!(met(false, 3, 3), Met::Refused);
+        // A stall begun across the command leaves it unanswered, at any count.
+        assert_eq!(met(false, 3, 4), Met::Stalled);
+        assert_eq!(met(false, u32::MAX, 0), Met::Stalled);
+        // A dead engine answers nothing, stall or no stall.
+        assert_eq!(met(true, 3, 3), Met::Dead);
+        assert_eq!(met(true, 3, 4), Met::Dead);
     }
     #[test]
     fn a_retirement_nothing_can_clear_runs_to_its_refusal() {
