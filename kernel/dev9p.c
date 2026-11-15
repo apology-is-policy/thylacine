@@ -20,6 +20,7 @@
 #include <thylacine/page.h>
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
+#include <thylacine/extinction.h>
 #include <thylacine/syscall.h>
 #include <thylacine/visibility.h>
 #include <thylacine/weft.h>
@@ -686,9 +687,9 @@ static void wb_note_through(struct dev9p_priv *p, u64 offset, u32 accepted) {
 
 // fstat on the staging fd reports the patched size = max(server view, the
 // staged run's end) -- the Go buildid/truncate-gate fstats its own O_WRONLY
-// fd mid-open (#46). Path-stats via OTHER fids see the last-flushed state
-// (close-to-open-legal; the file is open-dirty). mtime stays the server's
-// (stale until the flush -- the documented writeback posture).
+// fd mid-open (#46). Every other stat of the file lands the run first
+// (wb_holder_flush, LARDER-DESIGN 12.6). mtime stays the server's (stale
+// until the flush -- the documented writeback posture).
 static void wb_patch_stat_size(struct dev9p_priv *p, struct t_stat *out) {
     if (!p->wb_eligible) return;
     spin_lock(&p->wb_lock);
@@ -697,6 +698,134 @@ static void wb_patch_stat_size(struct dev9p_priv *p, struct t_stat *out) {
         if (re > out->size) out->size = re;
     }
     spin_unlock(&p->wb_lock);
+}
+
+// =============================================================================
+// The file's holder (LARDER-DESIGN 12.6, vote M23): on one client a file's held
+// bytes are the client's, so another open's operation on the file lands them
+// first. One registered holder per client and file; the entry is the priv.
+// =============================================================================
+
+// A bucket lock guards its chain and every wb_registered in it. It is taken
+// before a holder's wb_lock and never under one. The array starts zeroed, and a
+// zeroed lock is unlocked (SPIN_LOCK_INIT).
+#define WB_REG_BUCKETS 64u
+struct wb_reg_bucket {
+    spin_lock_t         lock;
+    struct dev9p_priv  *head;
+};
+static struct wb_reg_bucket g_wb_reg[WB_REG_BUCKETS];
+static u32 g_wb_reg_count;          // registered holders: the legs' fast path
+static u64 g_wb_holder_flushes;
+
+#ifdef KERNEL_TESTS
+u64 dev9p_wb_holder_flushes(void) {
+    return __atomic_load_n(&g_wb_holder_flushes, __ATOMIC_RELAXED);
+}
+
+u32 dev9p_wb_holders(void) {
+    return __atomic_load_n(&g_wb_reg_count, __ATOMIC_RELAXED);
+}
+#endif // KERNEL_TESTS
+
+static struct wb_reg_bucket *wb_reg_bucket_of(const struct p9_client *cl, u64 path) {
+    u64 h = ((u64)(uintptr_t)cl >> 6) ^ (path * 0x9E3779B97F4A7C15ull);
+    h ^= h >> 32;
+    return &g_wb_reg[h & (u64)(WB_REG_BUCKETS - 1u)];
+}
+
+// A create- or OTRUNC-born open becomes the file's holder, or stays ineligible
+// when another open already holds the file. Before c is published, so p's own
+// fields take plain stores; the chain is the bucket's.
+static bool wb_register(struct dev9p_priv *p, struct Spoor *c) {
+    u64 path = c->qid.path;
+    struct wb_reg_bucket *b = wb_reg_bucket_of(p->client, path);
+    spin_lock(&b->lock);
+    for (struct dev9p_priv *h = b->head; h; h = h->wb_reg_next) {
+        if (h->client == p->client && h->wb_reg_path == path) {
+            spin_unlock(&b->lock);
+            return false;
+        }
+    }
+    p->wb_reg_path = path;
+    p->wb_spoor    = c;
+    p->wb_reg_next = b->head;
+    b->head        = p;
+    __atomic_store_n(&p->wb_registered, true, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
+    spin_unlock(&b->lock);
+    return true;
+}
+
+// Leave the registry: at the last close once the run is gone, or at the last
+// reference, before anything of the priv is torn down.
+static void wb_unregister(struct dev9p_priv *p) {
+    if (!__atomic_load_n(&p->wb_registered, __ATOMIC_ACQUIRE)) return;
+    struct wb_reg_bucket *b = wb_reg_bucket_of(p->client, p->wb_reg_path);
+    spin_lock(&b->lock);
+    if (p->wb_registered) {
+        struct dev9p_priv **pp = &b->head;
+        while (*pp && *pp != p) pp = &(*pp)->wb_reg_next;
+        if (*pp != p) extinction("dev9p: a registered holder missing from its bucket");
+        *pp = p->wb_reg_next;
+        p->wb_reg_next = NULL;
+        __atomic_store_n(&p->wb_registered, false, __ATOMIC_RELEASE);
+        __atomic_fetch_sub(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
+    }
+    spin_unlock(&b->lock);
+}
+
+// Before another open's operation on a plain file: land what the file's holder
+// holds. `self` is the operating open (NULL for a stat by name); the holder's own
+// operations pass through. A changing leg (a write, a truncating open, a wstat, a
+// Loom registration) also drops the holder's anchor, so its later writes go
+// through. 0: nothing was held. 1: a run was flushed -- landed, or dropped on a
+// server failure, which latched on the holder for its next write, fsync or last
+// close. Negative: the operation must not go on, and the run stays held for the
+// next flusher -- -T_E_INTR when this thread's caught note cancelled the flush
+// (flush(5): never applied), -T_E_IO when a death reached this thread.
+static int wb_holder_flush(struct p9_client *cl, u64 path,
+                           const struct dev9p_priv *self, bool changing) {
+    if (__atomic_load_n(&g_wb_reg_count, __ATOMIC_ACQUIRE) == 0) return 0;
+    struct wb_reg_bucket *b = wb_reg_bucket_of(cl, path);
+    spin_lock(&b->lock);
+    struct dev9p_priv *h = b->head;
+    while (h && !(h->client == cl && h->wb_reg_path == path)) h = h->wb_reg_next;
+    if (!h || h == self) {
+        spin_unlock(&b->lock);
+        return 0;
+    }
+    spin_lock(&h->wb_lock);
+    bool held = h->wb_len || h->wb_flushers;
+    if (!held && changing && h->wb_known) {
+        h->wb_known = false;
+        wb_release_dead_locked(h);
+    }
+    spin_unlock(&h->wb_lock);
+    // A Spoor whose last reference has gone is closing: its dev9p_close leaves the
+    // registry first, under this lock, so it is refused here, and a run it still
+    // holds goes with that close.
+    struct Spoor *s = h->wb_spoor;
+    if (!held || !spoor_tryref(s)) {
+        spin_unlock(&b->lock);
+        return 0;
+    }
+    spin_unlock(&b->lock);
+
+    spin_lock(&h->wb_lock);
+    int rc = 0;
+    if (h->wb_len || h->wb_flushers) rc = wb_flush_locked(h, path);
+    int out = 1;
+    if (rc != 0 && wb_note_cancelled(rc))                  out = -T_E_INTR;
+    else if (rc != 0 && thread_die_pending(current_thread())) out = -T_E_IO;
+    if (changing && out > 0) {
+        h->wb_known = false;
+        wb_release_dead_locked(h);
+    }
+    spin_unlock(&h->wb_lock);
+    __atomic_fetch_add(&g_wb_holder_flushes, 1u, __ATOMIC_RELAXED);
+    spoor_clunk(s);      // may be the last reference: dev9p_close, which never waits
+    return out;
 }
 
 // Map a 9P qid type to a Plan 9 QT* bit. The wire constants
@@ -815,6 +944,13 @@ int dev9p_loom_register(struct Spoor *c) {
     // it.
     // wb_eligible stays set -- it gates the latch's report on write and fsync.
     struct dev9p_priv *p = priv_of(c);
+    // A ring's ops pass no holder leg (LARDER-DESIGN 12.6), so registering an
+    // open that is not the file's holder lands the holder's bytes and stops it
+    // staging.
+    if (p && c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, true);
+        if (lr < 0) return lr;
+    }
     // A ring's ops go to the server: a cached open reads through a read fid
     // from now on.
     if (p && p->cached_open) return co_read_live(p);
@@ -1069,6 +1205,12 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
         *out = p->co_stat;
         return 0;
     }
+    // LARDER-DESIGN 12.6: an fstat through an open that is not the file's
+    // holder lands what the holder holds first.
+    if (c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, false);
+        if (lr < 0) return lr;
+    }
     struct larder *l = &p->client->larder;
     u64 key = c->qid.path;
     // L1e gate: the attr cache engages ONLY for a cacheable client (a proven
@@ -1135,10 +1277,13 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
 _Static_assert(DEV_WALK_ATTRS_MAX == P9_MAX_WALK,
                "the vtable walk_attrs cap must equal the Twalkgetattr wire "
                "bound -- a resolver run must fit one wire op");
-static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
-                                        const char **name,
-                                        const size_t *name_lens,
-                                        int nname, struct t_stat *sts) {
+// `asked`: this pass follows a holder leg's flush (LARDER-DESIGN 12.6), so it
+// asks the server and passes no leg of its own.
+static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
+                                       const char **name,
+                                       const size_t *name_lens,
+                                       int nname, struct t_stat *sts,
+                                       bool asked) {
     struct dev9p_priv *src_priv = priv_of(c);
     if (!src_priv) { dev_walk_failed(-T_E_IO); return NULL; }
     if (src_priv->fid == P9_NOFID || src_priv->cached_open) {   // a cached open
@@ -1174,6 +1319,15 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                               (const char *const *)name, name_lens, nname, sts,
                               &nres, &is_miss, &leaf_po)) {
             bool full = (!is_miss && nres == nname);
+            // A held leaf (12.6) lands first; the serve would answer from the
+            // attr the flush just dropped, so the walk asks the server.
+            if (full && nc == NULL && !leaf_po && !asked &&
+                sts[nname - 1].qid_type == 0) {
+                int lr = wb_holder_flush(src_priv->client, sts[nname - 1].qid_path,
+                                         NULL, false);
+                if (lr < 0) { dev_walk_failed(lr); return NULL; }
+                if (lr > 0) { asked = true; full = false; }
+            }
             // A perm_only leaf record serves ONLY the bind-form dir-fid
             // consume below (its consumer reads mode/uid/gid + qid, all
             // fresh); the query form must refetch (STALK_STAT and the
@@ -1393,6 +1547,20 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         larder_dentry_install(&src_priv->client->larder, wga_seq0, prev_path,
                               name[nwqid], name_lens[nwqid], 0, /*negative=*/true);
 
+    // 12.6: a stat by name of a file another open holds bytes of lands them and
+    // asks once more, so it reports the file after the flush. A bind gives back
+    // the fid it bound first. Bytes staged after the flush are concurrent.
+    if (!asked && w->nqid == nname && w->qid[nname - 1].type == 0) {
+        int lr = wb_holder_flush(src_priv->client, w->qid[nname - 1].path, NULL, false);
+        if (lr != 0) {
+            if (nc)
+                dev9p_clunk_fid(src_priv->client, src_priv->attached_owner, new_fid);
+            walkqid_free(w);
+            if (lr < 0) { dev_walk_failed(lr); return NULL; }
+            return walk_attrs_pass(c, nc, name, name_lens, nname, sts, true);
+        }
+    }
+
     if (nc && w->nqid == nname) {
         // FULL walk: new_fid is bound server-side; install it into nc (the
         // dev9p_walk tail — same priv shape, same attached_owner inheritance).
@@ -1419,6 +1587,13 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         w->spoor = NULL;
     }
     return w;
+}
+
+static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
+                                        const char **name,
+                                        const size_t *name_lens,
+                                        int nname, struct t_stat *sts) {
+    return walk_attrs_pass(c, nc, name, name_lens, nname, sts, false);
 }
 
 // A cached open that is not minted after all gives back the fid its walk
@@ -1496,6 +1671,10 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
                                 hleaf->size))
             { return NULL; }
     }
+    // LARDER-DESIGN 12.6: a file another open holds bytes of takes the normal
+    // path once they land -- the hint's attr and pages are older than they.
+    if (wb_holder_flush(client, sts[nname - 1].qid_path, NULL, false) != 0)
+        return NULL;
 
     // 2. The FORCED-WIRE revalidation: the query-form Twalkgetattr issued
     //    DIRECTLY at the client -- deliberately BYPASSING dev9p_walk_attrs and
@@ -1707,6 +1886,12 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     // (git's reflog), and a mixed read+append on the SAME fd sees the tracked
     // cursor, best-effort. Value 02000 == Linux O_APPEND == Stratum STM_9P_O_APPEND.
     if (omode & SYS_WALK_OPEN_OAPPEND) flags |= 02000;   // O_APPEND
+    // LARDER-DESIGN 12.6: another open's held bytes of this file land first, and
+    // a truncating open stops that holder staging.
+    if (c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, (omode & 0x10) != 0);
+        if (lr < 0) { p->open_errno = lr; return NULL; }
+    }
     struct p9_qid qid;
     u32 iounit;
     int rc = p9_client_lopen(p->client, p->fid, flags, &qid, &iounit);
@@ -1734,11 +1919,13 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
         // writer's bytes -- a fabricated own-page serve (I-38). Pure
         // write-through is coherent for an append fd (per-write attr
         // invalidate; append only extends, so the extension range was never
-        // cached and the range-invalidate is conservative).
+        // cached and the range-invalidate is conservative). One holder per
+        // client and file (12.6): with another open holding it, write through.
         if (p->client->loose &&
             __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
             c->qid.type == 0 &&
-            !(omode & SYS_WALK_OPEN_OAPPEND)) {
+            !(omode & SYS_WALK_OPEN_OAPPEND) &&
+            wb_register(p, c)) {
             p->wb_eligible = true;
             p->wb_known    = true;
             p->wb_base     = 0;
@@ -1905,10 +2092,13 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // write-through is coherent for an append fd. (Single-writer git is correct
     // either way -- cursor==EOF on a fresh file -- but the anchor makes the
     // concurrent case, the canonical O_APPEND workload, unsound.)
+    // One holder per client and file (LARDER-DESIGN 12.6): a new file's qid has
+    // none, unless an open of a file that held the number still does.
     if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && p->client->loose &&
         __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
         c->qid.type == 0 &&
-        !(omode & SYS_WALK_OPEN_OAPPEND)) {
+        !(omode & SYS_WALK_OPEN_OAPPEND) &&
+        wb_register(p, c)) {
         p->wb_eligible = true;
         p->wb_known    = true;
         p->wb_base     = 0;
@@ -1980,6 +2170,10 @@ static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
 static int dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
+
+    // LARDER-DESIGN 12.6: leave the holder registry before anything of the priv
+    // goes. A leg that found it already refused it (its count is 0).
+    wb_unregister(p);
 
     // net-6b-2b + #294: release the readiness poll-state (if this was a netd
     // `ready` file). A registered poller holds the Spoor obj-ref, so poll_list is
@@ -2176,6 +2370,12 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         co_copy((u8 *)buf, p->co_buf + offset, take);
         return (long)take;
     }
+    // LARDER-DESIGN 12.6: a read through an open that is not the file's holder
+    // lands what the holder holds first.
+    if (c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, false);
+        if (lr < 0) return (long)lr;
+    }
     // F1 write-behind overlay (LARDER-DESIGN section 12): a read WITHIN the
     // staged run serves from the buffer -- the guest's newest bytes, a short
     // read up to the run's end (POSIX short-read composition carries a
@@ -2329,6 +2529,12 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (n <= 0) return 0;
     u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
     u64 offset = (off < 0) ? 0 : (u64)off;
+    // LARDER-DESIGN 12.6: a write through an open that is not the file's holder
+    // lands the holder's older bytes first and stops it staging.
+    if (c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, true);
+        if (lr < 0) return (long)lr;
+    }
     // F1 write-behind (LARDER-DESIGN section 12): stage a small pure-append
     // write on an eligible priv instead of paying a wire RPC per bufio
     // chunk. wb_eligible is a fast-path hint (set pre-share at create/
@@ -2445,6 +2651,12 @@ static long dev9p_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
+    // LARDER-DESIGN 12.6: fsync through any open writes back what the file's
+    // holder holds, as fsync on any descriptor writes the file's dirty pages.
+    if (c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, false);
+        if (lr < 0) return lr;
+    }
     // FID-LIFECYCLE cached-open: a read-only open reaches here (fsync takes
     // either right, vote M22). Nothing is staged and no fid is opened, but the
     // server may hold the file's content uncommitted, so the Tfsync goes on the
@@ -2813,6 +3025,9 @@ static int dev9p_fd_close(struct Spoor *c, bool heard) {
         wb_release_dead_locked(p);
         spin_unlock(&p->wb_lock);
         if (staged) rc = 0;                // no loss yet: whoever lands it reports
+        // Nothing is held and nothing stages after this: another open may hold
+        // the file now (12.6).
+        if (!staged) wb_unregister(p);
     }
     // The run has gone, write() said those bytes were written, and this answer
     // reaches no program: an exit's close, or a thread that never returns to EL0.
@@ -3239,6 +3454,13 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     if (p->cached_open) {
         int br = co_bind(p);
         if (br != 0) return br;
+    }
+    // LARDER-DESIGN 12.6: a wstat through an open that is not the file's holder
+    // (a truncate or a chmod by name among them) lands the holder's older bytes
+    // first and stops it staging.
+    if (c->qid.type == 0) {
+        int lr = wb_holder_flush(p->client, c->qid.path, p, true);
+        if (lr < 0) return lr;
     }
     // F1 write-behind: a metadata write is a non-append op -- flush the
     // staged run FIRST (the staged bytes are older; a truncate must land

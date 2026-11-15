@@ -337,6 +337,12 @@ struct Spoor *spoor_alloc(struct Dev *d);
 // Extincts on NULL / corrupted magic / ref <= 0 (UAF defense).
 void spoor_ref(struct Spoor *c);
 
+// Take a reference only while one is held: false once the count reached 0,
+// when the last holder's close is running (the storage stays valid until
+// that close returns). For a caller that finds c through a registry its
+// close leaves, under the registry's lock (dev9p's holder registry).
+bool spoor_tryref(struct Spoor *c);
+
 // Decrement ref. If ref reaches 0, free the Spoor (releases SLUB slot;
 // magic is clobbered).
 //

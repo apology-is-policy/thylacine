@@ -206,7 +206,9 @@ struct dev9p_priv {
     u32                       co_kfid;
     // F1 write-behind (LARDER-DESIGN section 12): the per-open-file append-run
     // staging state. wb_lock is a PURE LEAF (only byte copies + state reads
-    // under it -- wire I/O never; nothing else is ever acquired under it).
+    // under it -- wire I/O never; nothing else is ever acquired under it). The
+    // one lock held while it is taken is the holder registry's bucket lock
+    // (section 12.6).
     // The run is the single contiguous byte range [wb_off, wb_off + wb_len)
     // held in wb_buf; wb_base is the append ANCHOR (the file's known current
     // end -- valid iff wb_known, born 0 at create/OTRUNC, advanced by
@@ -227,6 +229,14 @@ struct dev9p_priv {
     u32                       wb_len;       // staged byte count
     u64                       wb_off;       // run start offset
     u64                       wb_base;      // append anchor (valid iff wb_known)
+    // LARDER-DESIGN 12.6 (vote M23): the file's one holder on this client. A
+    // registered priv is chained in its bucket (wb_reg_next, under the bucket
+    // lock) by client and wb_reg_path, with its own Spoor for a leg's
+    // reference; wb_registered is stored under the bucket lock.
+    struct dev9p_priv        *wb_reg_next;
+    struct Spoor             *wb_spoor;
+    u64                       wb_reg_path;
+    bool                      wb_registered;
 };
 
 // Cached-open bounds (FID-LIFECYCLE section 3.3; the CF-3 bounce-budget class --
@@ -266,6 +276,11 @@ u64 dev9p_wb_budget_used(void);
 
 // Diagnostics: sleeps a thread no death reaches took waiting out a peer's flush.
 u64 dev9p_wb_flush_sleeps(void);
+
+// Diagnostics: runs another open's operation landed for a file's holder
+// (LARDER-DESIGN 12.6), and holders registered now.
+u64 dev9p_wb_holder_flushes(void);
+u32 dev9p_wb_holders(void);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth

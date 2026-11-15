@@ -141,6 +141,18 @@ void spoor_ref(struct Spoor *c) {
         extinction("spoor_ref of zero-ref Spoor (already freed?)");
 }
 
+bool spoor_tryref(struct Spoor *c) {
+    if (!c)                       extinction("spoor_tryref(NULL)");
+    if (c->magic != SPOOR_MAGIC)  extinction("spoor_tryref of corrupted Spoor");
+    int cur = __atomic_load_n(&c->ref, __ATOMIC_ACQUIRE);
+    while (cur > 0) {
+        if (__atomic_compare_exchange_n(&c->ref, &cur, cur + 1, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return true;
+    }
+    return false;
+}
+
 // Pure refcount drop. If the ref hits 0 the Spoor's storage is freed
 // but `dev->close` is NOT invoked — use this entry point only when the
 // caller knows the per-Spoor Dev state has already been torn down, OR
