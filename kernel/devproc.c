@@ -1610,22 +1610,25 @@ static inline void devproc_maps_test_rendered(void) {
         fn();
 }
 
-static void (*g_mem_test_held)(struct AddrSpace *);
+static void (*g_mem_test_found)(struct Proc *);
 static void (*g_mem_test_dropped)(struct AddrSpace *);
+static void (*g_mem_test_waited)(struct AddrSpace *);
 static struct Thread *g_mem_test_owner;
 
-void devproc_mem_test_set_hooks(void (*held)(struct AddrSpace *),
-                                void (*dropped)(struct AddrSpace *)) {
-    __atomic_store_n(&g_mem_test_owner, (held || dropped) ? current_thread() : NULL,
+void devproc_mem_test_set_hooks(void (*found)(struct Proc *),
+                                void (*dropped)(struct AddrSpace *),
+                                void (*waited)(struct AddrSpace *)) {
+    __atomic_store_n(&g_mem_test_owner, (found || dropped || waited) ? current_thread() : NULL,
                      __ATOMIC_RELAXED);
-    __atomic_store_n(&g_mem_test_held, held, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_mem_test_found, found, __ATOMIC_RELEASE);
     __atomic_store_n(&g_mem_test_dropped, dropped, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_mem_test_waited, waited, __ATOMIC_RELEASE);
 }
 
-static inline void devproc_mem_test_held(struct AddrSpace *as) {
-    void (*fn)(struct AddrSpace *) = __atomic_load_n(&g_mem_test_held, __ATOMIC_ACQUIRE);
+static inline void devproc_mem_test_found(struct Proc *target) {
+    void (*fn)(struct Proc *) = __atomic_load_n(&g_mem_test_found, __ATOMIC_ACQUIRE);
     if (fn && __atomic_load_n(&g_mem_test_owner, __ATOMIC_RELAXED) == current_thread())
-        fn(as);
+        fn(target);
 }
 
 static inline void devproc_mem_test_dropped(struct AddrSpace *as) {
@@ -1633,12 +1636,19 @@ static inline void devproc_mem_test_dropped(struct AddrSpace *as) {
     if (fn && __atomic_load_n(&g_mem_test_owner, __ATOMIC_RELAXED) == current_thread())
         fn(as);
 }
+
+static inline void devproc_mem_test_waited(struct AddrSpace *as) {
+    void (*fn)(struct AddrSpace *) = __atomic_load_n(&g_mem_test_waited, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_mem_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn(as);
+}
 #else
 static inline void devproc_ns_test_window(void) {}
 static inline void devproc_maps_test_window(void) {}
 static inline void devproc_maps_test_rendered(void) {}
-static inline void devproc_mem_test_held(struct AddrSpace *as) { (void)as; }
+static inline void devproc_mem_test_found(struct Proc *target) { (void)target; }
 static inline void devproc_mem_test_dropped(struct AddrSpace *as) { (void)as; }
+static inline void devproc_mem_test_waited(struct AddrSpace *as) { (void)as; }
 #endif
 
 // A maps read whose space an exec keeps replacing stops after this many renders.
@@ -2269,6 +2279,7 @@ struct devproc_mem_ctx {
 static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     struct devproc_mem_ctx *m = (struct devproc_mem_ctx *)arg;
     if (target->pid != m->target_pid) return 0;   // keep walking
+    devproc_mem_test_found(target);
     if (target == kproc())                              { m->result = -T_E_ACCES; return 1; }
     if (!devproc_debug_authorized_locked(m->caller, target))   { m->result = -T_E_ACCES; return 1; }  // I-39
     // The dump seal refuses EXTRACTION, and reading a target's memory is the largest
@@ -2282,7 +2293,6 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     // A busy space is pinned -- the target, a live owner, links it under this
     // lock -- and nothing is copied: the caller waits, then judges it all again.
     struct AddrSpace *as = target->as;
-    devproc_mem_test_held(as);
     if (!spin_trylock(&as->lock)) {
         addrspace_pin(as);
         m->busy   = as;
@@ -2329,6 +2339,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
         if (tries < DEBUG_MEM_TRIES) {
             spin_lock(&busy->lock);
             spin_unlock(&busy->lock);
+            devproc_mem_test_waited(busy);
         }
         addrspace_unpin(busy);        // past the walk: the last pin frees
         if (tries == DEBUG_MEM_TRIES) return -1;

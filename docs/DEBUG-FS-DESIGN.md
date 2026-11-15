@@ -124,10 +124,11 @@ OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); every `/proc` authority refusal --
 this gate, kproc, either seal, the I-26 kill gate, the owner-or-hostowner reads and
 the none wall -- answers `EACCES`, as `/ctl/kernel-base` and `/ctl/kstack` do, ERRORS.md's binding rule for a permission denial
 (2026-10-06; it answered a bare -1 before, which pouch and Go read as `EPERM`), while
-a target that is gone, not ALIVE, not stopped, or held by another ctl stays the
-generic -1; the stopped-only guard on mem/reg access; HW
+a target that is gone, not ALIVE, not stopped, or held by another ctl -- or whose
+space's lock a `mem` copy found busy eight times (3.2) -- stays the generic -1; the stopped-only guard on mem/reg access; HW
 breakpoints (never software `BRK`) preserving I-12/I-36; the cross-Proc VA->PA
-walk confined to the target `pgtable_root` under the target `vma_lock`; the
+walk confined to the target `pgtable_root` under the target space's lock (only
+tried inside the table-lock hold, 3.2); the
 handle-lifetime-tied stop ownership. Validation: `specs/debug_stop.tla` (the
 stop/continue/step SM) + prose in this doc + ARCH §28 + the focused 8a audits +
 the SMP gate.
@@ -441,7 +442,10 @@ lock is busy, `mem` pins the space, drops the hold without copying, waits for th
 space's lock outside with interrupts on, and then runs the resolve, the gates and the
 copy again from the start -- a resume, a death or a seal in the gap is judged afresh --
 up to eight tries before it answers the not-stopped -1 (operator vote 132,
-2026-11-15). A
+2026-11-15). Any holder can cause that answer, not only a sibling: a `maps` reader,
+which anyone may run against an unsealed target, renders under the same lock, and
+the lock is not fair, so readers that keep it busy can use up the eight tries (audit
+round 40 F5). The debugger then sees a stopped target answer -1, and may retry. A
 read therefore happens entirely before a seal or entirely after it, whichever axis
 admitted the reader — including against a Proc that seals *itself* and then loads a
 secret. `SPAWN_PERM_SEAL`'s two bits land in one critical section, so no reader ever
@@ -1061,8 +1065,8 @@ Every `uaccess_*` and every `pgtable_root` reader today operates on the CURRENT
 - **Memory.** A non-growing VA->PA walk cloned from `mmu_install_user_pte`
   (descend L0..L3 via `pa_to_kva` per level, bail on any `!PTE_VALID`, read the
   leaf, `pa_to_kva(leaf_pa)` for direct-map access) against the *target's*
-  `pgtable_root`, taken under the target's `vma_lock` for a coherent VMA/PTE
-  snapshot. An empty L3 (an unfaulted `BURROW_TYPE_ANON_LAZY` or REVENANT
+  `pgtable_root`, taken under the target space's lock (`as->lock`, only tried
+  inside the table-lock hold, 3.2) for a coherent VMA/PTE snapshot. An empty L3 (an unfaulted `BURROW_TYPE_ANON_LAZY` or REVENANT
   `BURROW_TYPE_FILE` page) reads as "not resident" — the debug reader does NOT
   drive `userland_demand_page` on the target (that path assumes `current` is the
   faulting Proc and would fault-in on the debugger's behalf; v1.0 reports

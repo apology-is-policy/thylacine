@@ -2790,26 +2790,29 @@ void test_devproc_debug_mem(void) {
 }
 
 // The mem copy never waits for the target space's lock inside the table-lock
-// hold (DEBUG-FS-DESIGN 3.2, vote 132). `held` takes the space's lock from under
-// the hold just before the copy tries it -- the real lock, so the try really
-// fails, as it would against a sibling's clone -- and `dropped` gives it back
-// from the caller's wait point. Each leg reads where the wait ran (interrupts
-// masked means a table-lock hold, which is always taken irqsave; the same probe
-// under the hold is the control), how many walks the read took, and the space's
-// references at the wait (the pin) and after (balanced).
+// hold (DEBUG-FS-DESIGN 3.2, vote 132). `found` runs as each walk finds the
+// target, before its gates: it counts the walk and, while a leg wants the space
+// busy, takes the space's lock -- the real lock, so the copy's try really fails,
+// as it would against a sibling's clone (no gate takes that lock). `dropped`
+// gives it back from the caller's wait point, and `waited` runs after the wait,
+// before the unpin. Each leg reads where the wait ran (interrupts masked means a
+// table-lock hold, which is always taken irqsave; the same probe under the hold
+// is the control), how many walks and waits the read took, and the space's
+// references at the drop and after the wait (the pin) and after the read
+// (balanced).
 static struct Proc      *g_mb_target;
 static struct AddrSpace *g_mb_holding;
-static u32  g_mb_busy_left, g_mb_walks, g_mb_drops;
+static u32  g_mb_busy_left, g_mb_walks, g_mb_drops, g_mb_waits;
 static bool g_mb_held_masked, g_mb_drop_masked, g_mb_lift_stop;
-static int  g_mb_drop_refs;
+static int  g_mb_drop_refs, g_mb_wait_refs;
 
-static void mb_held(struct AddrSpace *as) {
+static void mb_found(struct Proc *target) {
     g_mb_walks++;
     g_mb_held_masked = irqs_masked();
     if (g_mb_busy_left == 0) return;
     g_mb_busy_left--;
-    spin_lock(&as->lock);
-    g_mb_holding = as;
+    spin_lock(&target->as->lock);
+    g_mb_holding = target->as;
 }
 
 static void mb_dropped(struct AddrSpace *as) {
@@ -2820,6 +2823,11 @@ static void mb_dropped(struct AddrSpace *as) {
     if (g_mb_holding == as) { g_mb_holding = NULL; spin_unlock(&as->lock); }
 }
 
+static void mb_waited(struct AddrSpace *as) {
+    g_mb_waits++;
+    g_mb_wait_refs = addrspace_ref_count(as);
+}
+
 void test_devproc_mem_waits_outside_the_hold(void) {
     // control, busy once, busy always, stop lifted in the gap, busy once on a write
     enum { LEGS = 5 };
@@ -2827,10 +2835,10 @@ void test_devproc_mem_waits_outside_the_hold(void) {
     static const bool lift[LEGS] = { false, false, false, true, false };
     static const bool wr[LEGS]   = { false, false, false, false, true };
     long got[LEGS];
-    u32  walks[LEGS], drops[LEGS];
+    u32  walks[LEGS], drops[LEGS], waits[LEGS];
     bool held_masked[LEGS], drop_masked[LEGS], bytes_ok[LEGS], stranded[LEGS];
     bool untainted_before_write = false;
-    int  refs_before[LEGS], drop_refs[LEGS], refs_after[LEGS];
+    int  refs_before[LEGS], drop_refs[LEGS], wait_refs[LEGS], refs_after[LEGS];
     u8   buf[64], wbuf[64];
 
     // The premise of the wait's probe: this thread runs unmasked outside any hold.
@@ -2860,28 +2868,32 @@ void test_devproc_mem_waits_outside_the_hold(void) {
         g_mb_lift_stop   = lift[l];
         g_mb_walks       = 0;
         g_mb_drops       = 0;
+        g_mb_waits       = 0;
         g_mb_held_masked = false;
         g_mb_drop_masked = false;
         g_mb_drop_refs   = -1;
+        g_mb_wait_refs   = -1;
         refs_before[l]   = addrspace_ref_count(tgt->as);
         for (int i = 0; i < 64; i++) { buf[i] = 0; wbuf[i] = (u8)(0x10 * l + i); }
         if (wr[l])
             untainted_before_write =
                 (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) == 0;
-        devproc_mem_test_set_hooks(mb_held, mb_dropped);
+        devproc_mem_test_set_hooks(mb_found, mb_dropped, mb_waited);
         if (!mem)       got[l] = -2;
         else if (wr[l]) got[l] = devproc.write(mem, wbuf, 64, (s64)VA);
         else            got[l] = devproc.read(mem, buf, 64, (s64)VA);
-        devproc_mem_test_set_hooks(NULL, NULL);
+        devproc_mem_test_set_hooks(NULL, NULL, NULL);
         // A walk that took the lock and then did not report it busy would leave
         // it held, and the next leg's take would never return.
         stranded[l] = g_mb_holding != NULL;
         if (g_mb_holding) { spin_unlock(&g_mb_holding->lock); g_mb_holding = NULL; }
         walks[l]       = g_mb_walks;
         drops[l]       = g_mb_drops;
+        waits[l]       = g_mb_waits;
         held_masked[l] = g_mb_held_masked;
         drop_masked[l] = g_mb_drop_masked;
         drop_refs[l]   = g_mb_drop_refs;
+        wait_refs[l]   = g_mb_wait_refs;
         refs_after[l]  = addrspace_ref_count(tgt->as);
         bool ok = true;
         for (int i = 0; i < 64; i++)
@@ -2908,11 +2920,14 @@ void test_devproc_mem_waits_outside_the_hold(void) {
     TEST_EXPECT_EQ(got[0], 64L, "control: an uncontended read copies");
     TEST_ASSERT(bytes_ok[0], "control: the bytes are the page's");
     TEST_EXPECT_EQ((long)walks[0], 1L, "control: one walk");
-    TEST_EXPECT_EQ((long)drops[0], 0L, "control: no wait");
+    TEST_EXPECT_EQ((long)drops[0], 0L, "control: no drop");
+    TEST_EXPECT_EQ((long)waits[0], 0L, "control: no wait");
 
     TEST_EXPECT_EQ((long)drops[1], 1L, "busy once: the walk dropped the hold to wait");
     TEST_ASSERT(!drop_masked[1], "busy once: the wait runs outside the table lock");
-    TEST_EXPECT_EQ(drop_refs[1], refs_before[1] + 1, "busy once: the space is pinned across the wait");
+    TEST_EXPECT_EQ(drop_refs[1], refs_before[1] + 1, "busy once: the space is pinned at the drop");
+    TEST_EXPECT_EQ((long)waits[1], 1L, "busy once: one wait");
+    TEST_EXPECT_EQ(wait_refs[1], refs_before[1] + 1, "busy once: still pinned after the wait");
     TEST_EXPECT_EQ((long)walks[1], 2L, "busy once: a second walk");
     TEST_EXPECT_EQ(got[1], 64L, "busy once: the second walk copies");
     TEST_ASSERT(bytes_ok[1], "busy once: the bytes are the page's");
@@ -2920,9 +2935,11 @@ void test_devproc_mem_waits_outside_the_hold(void) {
     TEST_EXPECT_EQ(got[2], -1L, "busy always: the read gives up as not stopped");
     TEST_EXPECT_EQ((long)walks[2], (long)8, "busy always: eight walks");
     TEST_EXPECT_EQ((long)drops[2], (long)8, "busy always: each one dropped the hold");
+    TEST_EXPECT_EQ((long)waits[2], (long)7, "busy always: the last drop does not wait");
     TEST_ASSERT(!drop_masked[2], "busy always: no wait under the table lock");
 
-    TEST_EXPECT_EQ((long)walks[3], 2L, "stop lifted: the read walks again");
+    TEST_EXPECT_EQ((long)drops[3], 1L, "stop lifted: one drop");
+    TEST_EXPECT_EQ((long)walks[3], 2L, "stop lifted: the read walks again (the gate refuses the second)");
     TEST_EXPECT_EQ(got[3], -1L, "stop lifted: the second walk's gate refuses");
 
     TEST_EXPECT_EQ((long)walks[4], 2L, "write: a second walk");
