@@ -2602,6 +2602,38 @@ mutation surface (install/evict/invalidate) is untouched.
 - `fs_cache_buggy_no_invalidate.cfg`: `NoWrongRead` VIOLATED (a read serves the
   guest's own stale write) — a 4-state counterexample.
 
+### Write-behind (LARDER-DESIGN 12, G1 13) and the client's holder (vote M23, 12.6)
+
+`StageWrite(f, o)` / `FlushClose(f, o)` are `wb_write_prepare` /
+`wb_flush_locked`; `FlushClose`'s `Refetch` arm (EnableFlushPopulate) is G1's
+own-page install on the err==0 full-land arm. Vote M23 (2026-11-15) named the
+opens: `stage[f][o]` is one `dev9p_priv`'s run, holding the token it staged. A
+`Read(f, o)` by an open with no stage of its own serves the cache only when no
+other open holds a stage (the observing legs: open, read, fstat, fsync, stat by
+name flush the holder first); `OwnWrite(f, o)` needs every open's stage landed
+(the changing legs: write, truncating open, wstat, Loom registration through
+another open land the holder's run and drop its anchor); `StageWrite(f, o)`
+needs no other open's stage (one registered holder per client and file);
+`FlushClose(f, o)` lands its own open's token. An open's or a stat's populate
+is judged by the `Read` that serves it, so the model's read leg stands for the
+open and stat legs. TLC 2026-11-15 (Files={f1,f2}, Capacity=1, MaxCvers=3,
+Opens={o1,o2}; the non-staging cfgs above run Opens={o1} and kept their counts):
+- `fs_cache_wb.cfg` (EnableStaging, EnableFlushPopulate): `InvariantsWb` =
+  `SafetyCore` + `NoWrongRead` + `NoLostStage` + `OneHolder`. GREEN -- 1860
+  distinct states.
+- `fs_cache_buggy_skip_staged.cfg`: `NoWrongRead` VIOLATED (the holder's own
+  read misses its run).
+- `fs_cache_buggy_lost_stage.cfg`: `NoLostStage` VIOLATED (a stage cleared
+  without landing).
+- `fs_cache_buggy_populate_unflushed.cfg`: `CacheNeverAhead` VIOLATED (the
+  own-page install on a lost flush).
+- `fs_cache_buggy_peer_skips_staged.cfg` (M23, audit round 4 of M15 F1):
+  `NoWrongRead` VIOLATED -- open o1 stages, open o2 reads the cache (4 states).
+- `fs_cache_buggy_peer_unordered.cfg` (M23): `NoWrongRead` VIOLATED -- o1
+  stages, o2 writes through, o1's own read serves its older token (5 states);
+  with `NoWrongRead` left out, o1's flush lands the older token and
+  `NoLostStage` is VIOLATED (4 states).
+
 ---
 
 ## debug_stop.tla — Go IDE Stage 8a (the debugger stop/continue/step SM; spec-first re-enabled, model-first)

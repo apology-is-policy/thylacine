@@ -14,14 +14,19 @@ cfgs:
   - "fs_cache_buggy_skip_staged.cfg -- buggy: a same-priv read missing the staged run (the overlay-miss class)"
   - "fs_cache_buggy_lost_stage.cfg -- buggy: a path out of the priv that neither flushes nor deliberately discards (the lost-write class)"
   - "fs_cache_buggy_populate_unflushed.cfg -- buggy: own-page install decoupled from the err==0 full-land arm (the G1 coupling counterexample)"
+  - "fs_cache_buggy_peer_skips_staged.cfg -- buggy: a read through another open serves the cache while one open holds a stage (vote M23's observing legs; audit round 4 of M15, F1)"
+  - "fs_cache_buggy_peer_unordered.cfg -- buggy: a write through another open lands ahead of the holder's older stage (vote M23's changing legs)"
 gate: "Pre-commit re-run for ANY change to the Larder serve/populate/invalidate discipline or the write-behind staging/flush protocol (spec-first re-enabled for this surface at L1b)."
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-11-15
 ---
 ## Abstraction
 
 Files are content tokens with versions; reads/writes move tokens, not
-bytes. Deliberately beneath the model: page granularity and alignment,
+bytes. Opens are named (vote M23): a stage belongs to one open and holds the
+token it staged, and the model's `Read` by another open stands for every
+observing leg (open, read, fstat, fsync, stat by name). Deliberately beneath
+the model: page granularity and alignment,
 the byte-exact overlay split, budgets, gen-guard scoping (G4), the
 downgrade refinement (G3 — removed from the model sketch as unsound when
 ground truth showed Stratum bumps no parent cvers on child mutations),

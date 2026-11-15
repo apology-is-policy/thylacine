@@ -876,8 +876,10 @@ holder); and `FlushClose` lands the token its own open holds, not the newest.
 Two buggy cfgs pin the new classes: `fs_cache_buggy_peer_skips_staged` (a read
 through another open serves the cache while a stage is held -- audit round 4's
 F1: `NoWrongRead` red) and `fs_cache_buggy_peer_unordered` (a write through
-another open lands while an older stage is held, whose flush then puts the
-older content back: `NoLostStage` red). An open's or a stat's populate is
+another open lands while an older stage is held: the holder's own read then
+serves its older bytes over the newer write, `NoWrongRead` red, and its flush
+puts the older content back, `NoLostStage` red with the read left out). An
+open's or a stat's populate is
 judged by the `Read` that serves it, so the open and stat legs are the read
 leg in the model.
 

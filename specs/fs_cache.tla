@@ -112,6 +112,26 @@
 (*                                 stage WITHOUT landing it at the server    *)
 (*                                 (the lost-write class -- a dropped close  *)
 (*                                 flush): NoLostStage counterexample.       *)
+(*   fs_cache_buggy_peer_skips_staged.cfg                                    *)
+(*                                 BUGGY_PEER_SKIPS_STAGED (vote M23) -- a   *)
+(*                                 read through an open with no stage of its *)
+(*                                 own serves the cache while ANOTHER open   *)
+(*                                 holds a stage (audit round 4 of M15, F1): *)
+(*                                 NoWrongRead counterexample.               *)
+(*   fs_cache_buggy_peer_unordered.cfg                                       *)
+(*                                 BUGGY_PEER_WRITE_UNORDERED (vote M23) --  *)
+(*                                 a write-through by one open lands while   *)
+(*                                 another open's OLDER stage is held: the   *)
+(*                                 holder's own read serves the older token  *)
+(*                                 (NoWrongRead counterexample); its flush   *)
+(*                                 puts the older content back (NoLostStage, *)
+(*                                 with NoWrongRead left out).               *)
+(*                                                                         *)
+(*   The staging cfgs run two opens (Opens = {o1, o2}), the rest one. Vote  *)
+(*   M23 (LARDER-DESIGN 12.6): a file's held bytes are the CLIENT's, so a    *)
+(*   read through another open must not miss them (the observing legs: an    *)
+(*   open's or a stat's populate is judged by the Read that serves it) and a *)
+(*   write through another open lands after them (the changing legs).        *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -225,12 +245,22 @@ CONSTANTS
                             \*   Rwrite confirms; the serve accepts own pages
                             \*   without the cvers gate (sound ONLY under the
                             \*   staging single-writer premise below).
-    BUGGY_POPULATE_UNFLUSHED \* BOOLEAN -- TRUE: the populate fires even though
+    BUGGY_POPULATE_UNFLUSHED, \* BOOLEAN -- TRUE: the populate fires even though
                             \*   the flush did NOT land (the failed/lost-flush
                             \*   pairing) -- the cache then claims content the
                             \*   server does not hold (CacheNeverAhead red).
                             \*   The impl rule it pins: install ONLY on the
                             \*   err==0 full-land arm of wb_flush_locked.
+    Opens,                  \* the opens of a file on the client (one dev9p_priv
+                            \*   each); a stage belongs to the open that made it.
+    BUGGY_PEER_SKIPS_STAGED, \* BOOLEAN -- TRUE: a Read by an open with no stage
+                            \*   of its own may serve the cache while ANOTHER
+                            \*   open holds a stage: the observing legs of vote
+                            \*   M23 missing (audit round 4 of M15, F1).
+    BUGGY_PEER_WRITE_UNORDERED \* BOOLEAN -- TRUE: a write-through by one open
+                            \*   may land while another open's stage is held:
+                            \*   the changing legs of vote M23 missing, so the
+                            \*   older stage lands after the newer write.
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
@@ -247,6 +277,11 @@ ASSUME /\ Capacity \in Nat
        \* G1 is a flush-path feature; the buggy pairing needs a lost flush.
        /\ (EnableFlushPopulate => EnableStaging)
        /\ (BUGGY_POPULATE_UNFLUSHED => (EnableFlushPopulate /\ BUGGY_LOST_STAGE))
+       /\ Opens # {}
+       /\ BUGGY_PEER_SKIPS_STAGED    \in BOOLEAN
+       /\ BUGGY_PEER_WRITE_UNORDERED \in BOOLEAN
+       \* The peer legs exist only where something stages.
+       /\ ((BUGGY_PEER_SKIPS_STAGED \/ BUGGY_PEER_WRITE_UNORDERED) => EnableStaging)
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
@@ -257,10 +292,10 @@ VARIABLES
                  \*   keeps it equal to svr_cvers; the F1 write-behind lets it run
                  \*   AHEAD while a stage is outstanding (guest > svr <=> staged,
                  \*   on the correct path). FlushClose lands svr := guest.
-    staged,      \* [Files -> BOOLEAN] -- an unflushed staged run exists for f
-                 \*   (the per-open-file dev9p_priv.wb, abstracted per-file: the
-                 \*   model has one guest actor). Set by StageWrite; cleared by
-                 \*   FlushClose.
+    stage,       \* [Files -> [Opens -> 0..MaxCvers]] -- the content token an
+                 \*   open's unflushed staged run holds (dev9p_priv.wb), 0 for
+                 \*   none (every staged token is >= 1). Set by StageWrite;
+                 \*   cleared by FlushClose, which lands THIS token.
     cache,       \* [Files -> [valid: BOOLEAN, cvers: 0..MaxCvers]] -- the Larder
                  \*   entry per file. `cvers` is the content-token the entry will
                  \*   serve; meaningful only while `valid`.
@@ -272,14 +307,20 @@ VARIABLES
                  \*   served a token that did NOT equal the file's current content
                  \*   at the moment of the read. NoWrongRead == ~bad_read.
 
-vars == <<svr_cvers, guest_cvers, staged, cache, validated, bad_read>>
+vars == <<svr_cvers, guest_cvers, stage, cache, validated, bad_read>>
 
 ValidSet == {f \in Files : cache[f].valid}
+
+\* The opens holding a stage of f, and whether any does.
+Holders(f)   == {o \in Opens : stage[f][o] # 0}
+AnyStaged(f) == Holders(f) # {}
+\* No open other than o holds a stage of f.
+PeersClear(f, o) == \A p \in Opens \ {o} : stage[f][p] = 0
 
 TypeOk ==
     /\ svr_cvers \in [Files -> 0..MaxCvers]
     /\ guest_cvers \in [Files -> 0..MaxCvers]
-    /\ staged \in [Files -> BOOLEAN]
+    /\ stage \in [Files -> [Opens -> 0..MaxCvers]]
     /\ cache \in [Files -> [valid : BOOLEAN, cvers : 0..MaxCvers]]
     /\ validated \in [Files -> BOOLEAN]
     /\ bad_read \in BOOLEAN
@@ -291,7 +332,7 @@ TypeOk ==
 Init ==
     /\ svr_cvers   = [f \in Files |-> 0]
     /\ guest_cvers = [f \in Files |-> 0]
-    /\ staged      = [f \in Files |-> FALSE]
+    /\ stage       = [f \in Files |-> [o \in Opens |-> 0]]
     /\ cache     = [f \in Files |-> [valid |-> FALSE, cvers |-> 0]]
     /\ validated = [f \in Files |-> FALSE]
     /\ bad_read  = FALSE
@@ -329,7 +370,7 @@ Open(f) ==
              /\ validated' = [validated EXCEPT ![f] = TRUE]
           \/ /\ ~is_hit                        \* miss or stale: drop + refetch
              /\ Refetch(f, fresh)
-    /\ UNCHANGED <<svr_cvers, guest_cvers, staged, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
 
 (***************************************************************************)
 (* Read(f) -- serve f from a valid cached entry, WITHOUT re-fetching cvers   *)
@@ -346,20 +387,25 @@ Open(f) ==
 (* The correctness judge is guest_cvers -- the LOGICAL content at the moment  *)
 (* of the read. Without staging guest_cvers == svr_cvers (write-through), so   *)
 (* the original judge is unchanged. With a stage present the CORRECT read      *)
-(* serves the staged overlay (always the newest guest content, correct by      *)
-(* construction); BUGGY_READ_SKIPS_STAGED lets the cache arm fire anyway,      *)
-(* serving a server-lagging token -- the overlay-miss bug.                     *)
-Read(f) ==
-    \/ \* the staged-overlay arm: a same-priv read within the run.
-       /\ staged[f]
-       /\ bad_read' = bad_read      \* serves guest_cvers[f]: correct by construction
-       /\ UNCHANGED <<svr_cvers, guest_cvers, staged, cache, validated>>
-    \/ \* the cache arm. CORRECT only when no stage is present (the impl's
-       \* overlay-wins split); the buggy flag re-enables it under a stage.
-       /\ (~staged[f] \/ BUGGY_READ_SKIPS_STAGED)
+(* serves the staged overlay (the newest guest content while the changing     *)
+(* legs keep it so); BUGGY_READ_SKIPS_STAGED lets the cache arm fire anyway,   *)
+(* serving a server-lagging token -- the overlay-miss bug. A read by open o    *)
+(* with no stage of its own serves the cache only when no OTHER open holds a   *)
+(* stage either: vote M23's observing legs flush the holder first (LARDER-     *)
+(* DESIGN 12.6). BUGGY_PEER_SKIPS_STAGED drops that condition -- audit round 4 *)
+(* of M15, F1.                                                                *)
+Read(f, o) ==
+    \/ \* the staged-overlay arm: the holder's own read within its run.
+       /\ stage[f][o] # 0
+       /\ bad_read' = (bad_read \/ stage[f][o] # guest_cvers[f])
+       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated>>
+    \/ \* the cache arm. CORRECT only when no open holds a stage of f (the
+       \* impl's overlay-wins split, and the observing legs' flush).
+       /\ (stage[f][o] = 0 \/ BUGGY_READ_SKIPS_STAGED)
+       /\ (PeersClear(f, o) \/ BUGGY_PEER_SKIPS_STAGED)
        /\ cache[f].valid
        /\ bad_read' = (bad_read \/ cache[f].cvers # guest_cvers[f])
-       /\ UNCHANGED <<svr_cvers, guest_cvers, staged, cache, validated>>
+       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated>>
 
 (***************************************************************************)
 (* OwnWrite(f) -- the guest writes f: bump the content-version and, in the   *)
@@ -370,8 +416,11 @@ Read(f) ==
 (* the OLD cvers, so a subsequent Read serves the pre-write content -- the    *)
 (* guest fails to see its own write.                                         *)
 (***************************************************************************)
-OwnWrite(f) ==
-    /\ ~staged[f]   \* the impl flushes before any write-through op (flush-first)
+OwnWrite(f, o) ==
+    /\ stage[f][o] = 0   \* the impl flushes its own run before a write-through
+    \* Vote M23's changing legs: another open's run lands first (and its holder
+    \* stops staging). BUGGY_PEER_WRITE_UNORDERED lets the write land ahead of it.
+    /\ (PeersClear(f, o) \/ BUGGY_PEER_WRITE_UNORDERED)
     /\ guest_cvers[f] < MaxCvers
     /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
@@ -379,7 +428,7 @@ OwnWrite(f) ==
     /\ IF BUGGY_NO_OWN_INVALIDATE
          THEN cache' = cache
          ELSE cache' = [cache EXCEPT ![f].valid = FALSE]
-    /\ UNCHANGED <<staged, bad_read>>
+    /\ UNCHANGED <<stage, bad_read>>
 
 (***************************************************************************)
 (* ExternalWrite(f) -- an out-of-band (non-guest) Stratum mutation bumps f's *)
@@ -395,7 +444,7 @@ ExternalWrite(f) ==
     /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ validated'  = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<staged, cache, bad_read>>
+    /\ UNCHANGED <<stage, cache, bad_read>>
 
 (***************************************************************************)
 (* Evict(f) -- LRU/capacity eviction of a valid entry (the bounded page/     *)
@@ -407,7 +456,7 @@ Evict(f) ==
     /\ cache[f].valid
     /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
     /\ validated' = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<svr_cvers, guest_cvers, staged, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
 
 (***************************************************************************)
 (* StageWrite(f) -- the F1 write-behind: a pure-append write lands in the    *)
@@ -415,12 +464,16 @@ Evict(f) ==
 (* server does NOT (no wire op). The shared-cache invalidate moves to the     *)
 (* flush (per-write -> per-flush), so the cache is untouched here; the        *)
 (* staged-overlay arm of Read keeps same-priv reads correct in the interim.   *)
+(* One holder (LARDER-DESIGN 12.6): an open stages only while no other open    *)
+(* holds a stage of the file -- in the impl a second open is never eligible,   *)
+(* and its writes are changing legs that land the holder's run first.          *)
 (***************************************************************************)
-StageWrite(f) ==
+StageWrite(f, o) ==
     /\ EnableStaging
     /\ guest_cvers[f] < MaxCvers
+    /\ PeersClear(f, o)
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
-    /\ staged'      = [staged EXCEPT ![f] = TRUE]
+    /\ stage'       = [stage EXCEPT ![f][o] = guest_cvers[f] + 1]
     /\ UNCHANGED <<svr_cvers, cache, validated, bad_read>>
 
 (***************************************************************************)
@@ -436,12 +489,14 @@ StageWrite(f) ==
 (* guest > svr); a subsequent Open+Read also serves the pre-write content     *)
 (* (bad_read fires via the cache arm).                                        *)
 (***************************************************************************)
-FlushClose(f) ==
-    /\ staged[f]
+FlushClose(f, o) ==
+    /\ stage[f][o] # 0
+    \* The run lands the token it holds -- the newest content only while the
+    \* changing legs order every other write after it.
     /\ IF BUGGY_LOST_STAGE
          THEN svr_cvers' = svr_cvers
-         ELSE svr_cvers' = [svr_cvers EXCEPT ![f] = guest_cvers[f]]
-    /\ staged'    = [staged EXCEPT ![f] = FALSE]
+         ELSE svr_cvers' = [svr_cvers EXCEPT ![f] = stage[f][o]]
+    /\ stage'     = [stage EXCEPT ![f][o] = 0]
     /\ UNCHANGED <<guest_cvers, bad_read>>
     \* G1 (term-4, the write-populate): on the landed arm, install the flushed
     \* content as the CURRENT token -- semantically "as if an Open refetched
@@ -450,19 +505,20 @@ FlushClose(f) ==
     \* when the flush landed; BUGGY_POPULATE_UNFLUSHED installs on the lost
     \* arm too, making the cache claim content the server does not hold.
     /\ IF EnableFlushPopulate /\ (~BUGGY_LOST_STAGE \/ BUGGY_POPULATE_UNFLUSHED)
-       THEN Refetch(f, guest_cvers[f])
+       THEN Refetch(f, stage[f][o])
        ELSE /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
             /\ validated' = [validated EXCEPT ![f] = FALSE]
 
 Next ==
     \E f \in Files :
         \/ Open(f)
-        \/ Read(f)
-        \/ OwnWrite(f)
         \/ ExternalWrite(f)
         \/ Evict(f)
-        \/ StageWrite(f)
-        \/ FlushClose(f)
+        \/ \E o \in Opens :
+              \/ Read(f, o)
+              \/ OwnWrite(f, o)
+              \/ StageWrite(f, o)
+              \/ FlushClose(f, o)
 
 Spec == Init /\ [][Next]_vars
 
@@ -484,7 +540,10 @@ ServerNeverAhead == \A f \in Files : svr_cvers[f] <= guest_cvers[f]
 \* the server holds the guest's full logical content. Every path OUT of the
 \* staged state must land the bytes (flush) -- a close/death path that clears
 \* the stage without flushing (BUGGY_LOST_STAGE) violates this immediately.
-NoLostStage == \A f \in Files : ~staged[f] => guest_cvers[f] = svr_cvers[f]
+NoLostStage == \A f \in Files : ~AnyStaged(f) => guest_cvers[f] = svr_cvers[f]
+
+\* OneHolder (vote M23) -- at most one open holds a stage of a file at a time.
+OneHolder == \A f \in Files : Cardinality(Holders(f)) <= 1
 
 \* Bounded (I-32 / I-38) -- the Larder never holds more than Capacity valid
 \* entries. Non-vacuous: Capacity < |Files|, so a refetch must evict.
@@ -527,6 +586,7 @@ InvariantsWb ==
     /\ SafetyCore
     /\ NoWrongRead
     /\ NoLostStage
+    /\ OneHolder
 
 (***************************************************************************)
 (* ============================== LIVENESS ================================ *)
