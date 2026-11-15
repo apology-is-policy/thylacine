@@ -166,6 +166,13 @@ impl Client {
         (u(21), u(25), u(29), size)
     }
 
+    /// The qid a getattr gives.
+    fn qid_of(&mut self, fid: u32) -> Qid {
+        let r = self.call(P9_TGETATTR, B::default().u32(fid).u64(P9_GETATTR_BASIC));
+        r.ok(P9_RGETATTR);
+        r.qid(8)
+    }
+
     /// Every name a readdir of the open directory `fid` lists, `count` bytes at a time.
     fn names(&mut self, fid: u32, count: u32) -> Vec<String> {
         let mut out = Vec::new();
@@ -454,6 +461,44 @@ fn a_rename_moves_the_file_and_the_fids_below_it_follow() {
             .errno(),
         Some(E_BUSY)
     );
+    // Each is recorded, refused or not, in order with the walks and syncs.
+    let log = c.logged();
+    for line in [
+        "rename 'folders/w/old' -> 'folders/w/new' -> ok",
+        "rename 'folders/w/new/deep/f' -> 'folders/w/top' -> ok",
+        "rename 'folders/w' -> 'folders/w/x' -> errno 16",
+    ] {
+        assert!(log.contains(line), "no [{line}] in {log}");
+    }
+}
+
+#[test]
+fn a_change_that_keeps_the_size_and_the_time_is_a_new_version() {
+    let d = Dir::new("vers");
+    fs::write(d.0.join("f"), b"one\n").unwrap();
+    let logs = Dir::new("vers-log");
+    let mut c = Client::new(vec![share("w", &d, false)], "", &logs);
+    c.walk(2, "folders/w/f").ok(P9_RWALK);
+    let before = c.qid_of(2);
+    assert_eq!(
+        c.qid_of(2).version,
+        before.version,
+        "unchanged: the same version"
+    );
+    let t = fs::metadata(d.0.join("f")).unwrap().modified().unwrap();
+    // The same size, and the modification time set back to the nanosecond: only the change time
+    // tells.
+    fs::write(d.0.join("f"), b"two\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(d.0.join("f"))
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+    assert_eq!(fs::metadata(d.0.join("f")).unwrap().modified().unwrap(), t);
+    let after = c.qid_of(2);
+    assert_eq!(after.path, before.path, "the same file");
+    assert_ne!(after.version, before.version, "rewritten: a new version");
 }
 
 #[test]

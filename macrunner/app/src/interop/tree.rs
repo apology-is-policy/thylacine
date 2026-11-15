@@ -381,8 +381,7 @@ impl Session {
         };
         Qid {
             kind,
-            // QEMU's: a change of the file's time or size is a new version.
-            version: (st.st_mtime as u64 ^ ((st.st_size as u64) << 8)) as u32,
+            version: qid_version(st),
             path: self.shared.qpath(st.st_dev as u32 as u64, st.st_ino),
         }
     }
@@ -1085,6 +1084,30 @@ impl Session {
         newdir: u32,
         newname: &[u8],
     ) -> Result<usize, u32> {
+        // In order with the walks and syncs: a move renames its synced copy over the destination
+        // before it syncs the destination's directory.
+        let old = match &from {
+            Moved::Fid(fid) => self.named(*fid, None),
+            Moved::Name(dfid, name) => self.named(*dfid, Some(*name)),
+        };
+        let new = self.named(newdir, Some(newname));
+        let moved = self.rename_node(from, newdir, newname);
+        self.log(&format!(
+            "rename {old} -> {new} -> {}",
+            match &moved {
+                Ok(()) => String::from("ok"),
+                Err(e) => format!("errno {e}"),
+            }
+        ));
+        moved?;
+        let n = match rtype {
+            P9_RRENAME => build_rrename(&mut self.reply, tag),
+            _ => build_rrenameat(&mut self.reply, tag),
+        };
+        n.map_err(|_| E_IO)
+    }
+
+    fn rename_node(&mut self, from: Moved<'_>, newdir: u32, newname: &[u8]) -> Result<(), u32> {
         // The moved file: its share, and its path as the directory and name it is in.
         let (share, from_rel) = match from {
             Moved::Fid(fid) => match &self.fid(fid)?.node {
@@ -1117,11 +1140,23 @@ impl Session {
         let mut to_rel = to_dir_rel;
         to_rel.push(newname.to_vec());
         self.moved(share, &from_rel, &to_rel);
-        let n = match rtype {
-            P9_RRENAME => build_rrename(&mut self.reply, tag),
-            _ => build_rrenameat(&mut self.reply, tag),
-        };
-        n.map_err(|_| E_IO)
+        Ok(())
+    }
+
+    /// How the record names what a request names: the fid's file, and with `name`, that entry
+    /// in it.
+    fn named(&self, fid: u32, name: Option<&[u8]>) -> String {
+        match self.fids.get(&fid) {
+            None => String::from("no fid"),
+            Some(f) => {
+                let mut s = self.node_name(&f.node);
+                if let Some(n) = name {
+                    s.push('/');
+                    s.push_str(&latin1(n));
+                }
+                repr(&s)
+            }
+        }
     }
 
     // A fid names a path: after a rename in this session, the fids below the old path name the
@@ -1241,6 +1276,29 @@ enum Moved<'a> {
     Fid(u32),
     /// Trenameat: a directory's fid and a name in it.
     Name(u32, &'a [u8]),
+}
+
+/// A file's version. Any change to its content, size, mode or owner moves its change time, which
+/// no call sets back, so the change and modification times to the nanosecond, with the size, are
+/// folded into the 32 bits a qid carries: a rewrite that keeps the size within one second is a new
+/// version, and so is a new file given a removed one's inode.
+fn qid_version(st: &libc::stat) -> u32 {
+    let mut h: u64 = 0;
+    for v in [
+        st.st_ctime as u64,
+        st.st_ctime_nsec as u64,
+        st.st_mtime as u64,
+        st.st_mtime_nsec as u64,
+        st.st_size as u64,
+    ] {
+        // splitmix64's finalizer over each word in turn: every bit of every word reaches the
+        // low 32.
+        h = (h ^ v).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        h ^= h >> 31;
+    }
+    h as u32
 }
 
 fn synth_qid(path: u64, dir: bool) -> Qid {
