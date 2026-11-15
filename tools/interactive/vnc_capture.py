@@ -10,7 +10,23 @@ import argparse
 import json
 import socket
 import struct
-from PIL import Image
+import zlib
+
+
+def write_png(path, width, height, pixels, channels):
+    """8-bit RGB (3) or RGBA (4), filter 0 on every row."""
+    stride = width * channels
+    raw = b''.join(b'\0' + bytes(pixels[y * stride:(y + 1) * stride]) for y in range(height))
+
+    def chunk(kind, data):
+        return (struct.pack('!I', len(data)) + kind + data
+                + struct.pack('!I', zlib.crc32(kind + data) & 0xffffffff))
+
+    color = {3: 2, 4: 6}[channels]
+    with open(path, 'wb') as f:
+        f.write(b'\x89PNG\r\n\x1a\n'
+                + chunk(b'IHDR', struct.pack('!IIBBBBB', width, height, 8, color, 0, 0, 0))
+                + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
 
 
 def capture(path, output, cursor_at=None):
@@ -58,7 +74,7 @@ def capture(path, output, cursor_at=None):
         sock.sendall(struct.pack('!BBH', 2, 0, len(encodings))
                      + b''.join(struct.pack('!i', e) for e in encodings))
         sock.sendall(struct.pack('!BBHHHH', 3, 0, 0, 0, width, height))
-        frame = Image.new('RGB', (width, height))
+        frame = bytearray(width * height * 3)
         covered = 0
         cursor = None
         hotspot = None
@@ -87,16 +103,21 @@ def capture(path, output, cursor_at=None):
                     # QEMU's AlphaCursor carries host-native premultiplied
                     # ARGB words (our supported QEMU hosts are little-endian).
                     bgra = read(w * h * 4)
-                    rgba = bytearray(len(bgra))
-                    rgba[0::4], rgba[1::4] = bgra[2::4], bgra[1::4]
-                    rgba[2::4], rgba[3::4] = bgra[0::4], bgra[3::4]
-                    cursor = Image.frombytes('RGBa', (w, h), bytes(rgba)).convert('RGBA')
+                    premul = bytearray(len(bgra))
+                    premul[0::4], premul[1::4] = bgra[2::4], bgra[1::4]
+                    premul[2::4], premul[3::4] = bgra[0::4], bgra[3::4]
+                    cursor = (w, h, bytes(premul))
                     hotspot = (x, y)
                     continue
                 if encoding != 0 or x + w > width or y + h > height:
                     raise RuntimeError('unexpected encoding or rectangle bounds')
                 pixels = read(w * h * 4)
-                frame.paste(Image.frombytes('RGB', (w, h), pixels, 'raw', 'BGRX'), (x, y))
+                for row in range(h):
+                    src = pixels[row * w * 4:(row + 1) * w * 4]
+                    at = ((y + row) * width + x) * 3
+                    frame[at:at + w * 3:3] = src[2::4]
+                    frame[at + 1:at + w * 3:3] = src[1::4]
+                    frame[at + 2:at + w * 3:3] = src[0::4]
                 covered += w * h
             if covered < width * height:
                 continue  # cursor-only update can precede the framebuffer
@@ -108,16 +129,37 @@ def capture(path, output, cursor_at=None):
                 cx, cy = cursor_at
                 if not (0 <= cx < width and 0 <= cy < height):
                     raise RuntimeError('cursor position outside display')
-                alpha = cursor.getchannel('A')
-                visible = sum(value != 0 for value in alpha.tobytes())
-                frame.save(str(output) + '.framebuffer.png')
-                cursor.save(str(output) + '.cursor.png')
+                cw, ch, premul = cursor
+                visible = sum(value != 0 for value in premul[3::4])
+                write_png(str(output) + '.framebuffer.png', width, height, frame, 3)
+                # Saved straight (not premultiplied), as a viewer reads a PNG.
+                straight = bytearray(premul)
+                for i in range(0, len(premul), 4):
+                    a = premul[i + 3]
+                    for c in range(3):
+                        straight[i + c] = min(255, premul[i + c] * 255 // a) if a else 0
+                write_png(str(output) + '.cursor.png', cw, ch, straight, 4)
                 with open(str(output) + '.cursor.json', 'w') as witness:
                     json.dump({'position_source': 'explicit guest witness',
                                'position': [cx, cy], 'hotspot': hotspot,
-                               'size': cursor.size, 'visible_pixels': visible}, witness)
-                frame.paste(cursor, (cx - hotspot[0], cy - hotspot[1]), cursor)
-            frame.save(output)
+                               'size': [cw, ch], 'visible_pixels': visible}, witness)
+                # Source-over from the straight colour, with Pillow's rounding (its paste
+                # with a mask), so a capture is the same bytes it was before Pillow left.
+                ox, oy = cx - hotspot[0], cy - hotspot[1]
+                for j in range(ch):
+                    for i in range(cw):
+                        px, py = ox + i, oy + j
+                        if not (0 <= px < width and 0 <= py < height):
+                            continue
+                        s = (j * cw + i) * 4
+                        a = premul[s + 3]
+                        if a == 0:
+                            continue
+                        d = (py * width + px) * 3
+                        for c in range(3):
+                            mix = frame[d + c] * (255 - a) + straight[s + c] * a + 128
+                            frame[d + c] = ((mix >> 8) + mix) >> 8
+            write_png(output, width, height, frame, 3)
             return
 
 

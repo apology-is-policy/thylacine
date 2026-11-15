@@ -41,7 +41,7 @@ it:
 | Part | What it does | Concrete implementation |
 |---|---|---|
 | **Standing orders** | the behavioural contract the agent loads every session: what autonomy covers, what must be escalated, what a checkpoint is, that ending a turn is a decision, that the handoff is always already written | `CLAUDE.md` sections + a small set of memory files |
-| **The watch instruments** | hooks that measure the context budget, ask "is stopping a decision?", and re-inject intent after a compaction | `~/.claude/ctx-hook.sh` (PostToolUse), `tools/stop-hook.sh` (Stop), `~/.claude/resume-note.py` (SessionStart) |
+| **The watch instruments** | hooks that measure the context budget and re-inject intent after a compaction (a Stop hook that asked "is stopping a decision?" ran 2026-08-16 to 2026-11-13, §4.7) | `~/.claude/ctx-hook.sh` (PostToolUse), `~/.claude/resume-note.py` (SessionStart) |
 | **The change of watch** | governed self-compaction: prove the tree is clean and progress was made, write a one-shot resume note, type `/compact` into your own pane, and have a detached watcher press Enter on the far side | `tools/thyla-selfcompact.sh` + `tools/thyla-nudge-watch.sh`, tmux |
 | **The bridge telephone** | a floor-based channel between agents: calls, notes that cannot carry a decision, disputes settled by naming a measurement, presence, a human seat no agent can forge | `yip` (Go, stdlib-only; MCP server + CLI + hooks + a switchboard TUI) |
 | **The engine-room telegraph** | leases on shared machines — testimony instead of measurement, wall-clock expiry, no licence to kill; a waiter whose turn has ended is woken when its lease comes | `yip hold / release / steal / resources` + `tools/thyla-wake.sh`, tmux |
@@ -144,7 +144,9 @@ stop the run and go to the human. (Standing orders §"Autonomy + escalation".)
 summary belongs to *stopping* — the budget line, an escalation item, out of
 moves, or the user asking. A checkpoint that is run through gets three lines
 and the next tool call. **The tell** that you are handing back: you are
-writing a `Key` table or an `Ahead` line. Made structural by the Stop hook.
+writing a `Key` table or an `Ahead` line. Made structural by the Stop hook
+from 2026-08-16 until the operator retired it on 2026-11-13 (§4.7); a standing
+order alone since.
 
 **P3. A checkpoint is not a stopping point; the budget line is the signal.**
 Stopping early is not free — a fresh context re-derives subsystem knowledge
@@ -159,8 +161,8 @@ moment. A compaction is only free when the handoff is already current; the
 self-compaction script refuses on a dirty tree for exactly this reason.
 
 **P5. Hooks ask; they do not veto. And they fail open.** Only the model can
-tell an earned yield from an unearned one, so the Stop hook blocks *once* with
-a question and lists the legitimate exits. Every error path in every hook
+tell an earned yield from an unearned one, so the Stop hook (retired
+2026-11-13, §4.7) blocked *once* with a question and listed the legitimate exits. Every error path in every hook
 exits 0: a hook that fails closed can trap a session in a loop it cannot talk
 its way out of, which is worse than any missed nudge.
 
@@ -227,7 +229,8 @@ authoritative.** A lease is a statement from whoever knows. It expires on
 unit of work, so a 40-minute gate in one blocking call beats not at all (a
 peer's beat read "36m ago" mid-gate; heartbeat expiry would have handed their
 cores away at minute 3). An expired lease is not an open one: taking it is a
-deliberate, recorded `steal`. **Holding is no licence to kill** — it means
+deliberate, recorded `steal`, or yip's own hand-on to the head of the queue once
+it has been expired ten minutes with every registered runner dead. **Holding is no licence to kill** — it means
 nobody else *starts*; killing a peer's gate at boot 39 of 40 destroys the work
 and the evidence, and the killer never sees what they destroyed. Identify by
 cwd, notify, grace, escalate.
@@ -266,8 +269,7 @@ their fix is wrong — the finding survives independently.
  |                                                                                                     |
  |  on EVERY tool call (PostToolUse):  ctx-hook  -- silent below the checkpoint line                   |
  |                                     yip hook  -- heartbeat; "[yip] main spoke on 0021, floor yours" |
- |  on every attempt to end the turn:  Stop hook -- "is ending the turn a DECISION? (1-4)"  asks once  |
- |                                     yip hook  -- blocks while you owe the peer a reply              |
+ |  on every attempt to end the turn:  yip hook  -- blocks while you owe the peer a reply              |
  |                                                                                                     |
  |  ... 600k CHECKPOINT WINDOW (ctx-hook, once per crossing) ------------------------------------------+---+
  +-----------------------------------------------------------------------------------------------------+   |
@@ -329,7 +331,7 @@ wrote it, because that session never loaded it).
 | Whole-system stewardship | there is no "my chunk"; a surfaced defect preempts; encounter a bug → enqueue a bug, before anything else |
 
 **How it was proven.** Behaviourally, twice, by failing (field report §2) —
-which is why the Stop hook exists. The stewardship and coordination rules each
+which is why the Stop hook was built (retired 2026-11-13, §4.7). The stewardship and coordination rules each
 carry a worked failure in the text itself, on purpose: a rule with its
 specimen attached is one a future reader can re-derive.
 
@@ -560,8 +562,8 @@ its own background tasks — three times in one day):
   like the operator asking for something, and is worse than a missed wake.
 
 The nudge text is tagged `[auto-nudge]` because it lands in the transcript
-looking like the operator speaking, and it is not; the Stop hook (§4.7)
-excludes it from "the user spoke".
+looking like the operator speaking, and it is not; the Stop hook (§4.7, now
+retired) excluded it from "the user spoke".
 
 **Proven.** Both stems discriminate; refuses without a pane; the bound exits 1
 and sends nothing; the send path proven end to end against a runtime-random
@@ -572,7 +574,12 @@ died instantly on `setsid` (absent on macOS) — caught only by the second leg,
 in the ledger, so the residual risk the commit named ("neither marker has been
 observed in a real pane") is retired.
 
-### 4.7 The Stop hook — "is ending the turn a decision?"
+### 4.7 The Stop hook — "is ending the turn a decision?" (retired)
+
+**Retired 2026-11-13.** The operator disabled it globally as obsolete, built
+for older models, and `tools/stop-hook.sh` was deleted. Nothing enforces the
+question now; the hand-back skill keeps it as a rule the model applies itself.
+The rest of this section is the record of what the hook did and why.
 
 **Why.** The 600k rule was behavioural only, and it failed twice. `CLAUDE.md`
 itself named the mechanism that would make it structural — a Stop hook —
@@ -792,7 +799,11 @@ been fixed by adding axes.
   depends on the heartbeat, so the "improvement" cannot be reintroduced.
 - **An expired lease is not an open one**: `steal` needs a reason, is refused
   while time remains, and records `stolen_from` + `steal_why` so a reclaim can
-  never read as an ordinary acquire in the log.
+  never read as an ordinary acquire in the log. Since yip 7b51147 (2026-11-13,
+  operator vote 105) a lease expired ten minutes with every runner its holder
+  registered verified dead, or none registered, passes to the head of the queue
+  at its next `hold` or `request`, recorded the same way; a runner that is alive
+  or cannot be checked keeps it.
 - **Release refuses to end someone else's claim** — the whole value is that
   the holder's word is authoritative.
 - **`ViolationAdvice`** is prose, on purpose (no mechanism): identify the owner
@@ -850,6 +861,21 @@ re-exec'd detached with `nohup … </dev/null &`:
   block every peer for its whole TTL. If the box stays unusable for
   `THYLA_WAKE_HELD_BOUND` seconds (default 600), it releases the lease too, then
   types a line saying so once the box frees.
+- **An EXPIRED lease in the way is said, once.** yip shows a lease whose TTL ran
+  out as `EXPIRED`, which is not `FREE`. yip passes it to the head of the queue
+  ten minutes after expiry when no runner its holder registered is alive; while
+  one may be, it goes to nobody until its holder releases or renews it, so the
+  queue behind it stands still, and a holder whose turn ended with the lease does
+  not know. (2026-11-10: the Mac idle for about thirteen hours with two agents
+  queued behind one.) yip's EXPIRED line ends with which case it is. While its `yip hold`
+  blocks, the watcher reads the resource's line every `THYLA_WAKE_EXPIRED_POLL`
+  seconds (default 300). On finding it EXPIRED under another agent it opens one
+  call to that agent, carrying yip's own entry for the resource and the two ways
+  out (release it, or renew it with `--now`), and types one line into the
+  waiting pane that names the holder and says whether the ring went out. Once
+  per expiry: a lease renewed and expired again is a new one. `watch` tells its
+  pane and rings nobody. It never steals: that takes a check of the holder's
+  runners and a reason, and stays the agent's decision.
 - `watch <res>` claims nothing and wakes when the machine is free or already
   the agent's; `cancel` stops the caller's own watchers (the state directory is
   shared by every agent, so `cancel --all` is the operator's) and touches
@@ -857,8 +883,10 @@ re-exec'd detached with `nohup … </dev/null &`:
 - yip names the asker's own lease `HELD by you`, a peer's by name — the match
   takes both.
 
-**Proven.** 48 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
-names as an agent) against throwaway panes running a fake input box and,
+**Proven.** 65 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
+names as an agent: the working directory decides who `yip presence` calls "you",
+so the same script started from another checkout fails every real-yip leg at
+"arm") against throwaway panes running a fake input box and,
 for every lease state, a fake `yip`: a shell pane and a missing pane are
 refused; an empty box is typed into once, verbatim; a half-typed line is waited
 out and never glued to; a dialog is never typed into, and the bound gives up
@@ -869,7 +897,20 @@ screens (one measured from an idle pane) through a stand-in tmux, including a
 colour whose parameters contain a 2, which must not read as dim; a real pane
 showing a dim suggestion is typed into; a box that stays typed past the held
 bound gets the lease released and the agent told; `cancel` leaves a peer's
-watcher alone and `--all` does not. Three of
+watcher alone and `--all` does not; behind an EXPIRED lease a hold rings the
+holder exactly once across several looks, with yip's entry in the call, tells
+the pane once, releases nothing, and still wakes on the grant; a peer's lease
+that is merely HELD, looked at as often, rings nobody and types nothing, while
+its hold is shown to be running; a watch tells and does not ring; a failed ring
+is named in the line; the agent's own expired lease is silent; a second expiry
+is rung and told again. Sixteen of those seventeen were made to fail by six
+mutants (2026-11-11): the look removed from `hold` (10 red), the ring not
+remembered (9 red, three rings where one was owed), a HELD line read as EXPIRED
+(9 red, three of them in controls that predate the feature), the own-lease
+exception removed (1 red), a release added on expiry (1 red), a watch that
+rings (2 red). The seventeenth, "its hold was running", is the liveness control
+for the silent leg and has no mutant.
+Three of
 those controls failed on the first build, each a real bug: the `HELD by you`
 spelling would have missed every grant; trailing blank rows of a tall pane
 pushed the box out of the bottom-rows window; and the missing-pane check passed
@@ -981,8 +1022,7 @@ the machine and unversioned today, which the field report flags). Wire them:
 {
   "hooks": {
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "~/.claude/resume-note.py" }] }],
-    "PostToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.claude/ctx-hook.sh" }] }],
-    "Stop":         [{ "hooks": [{ "type": "command", "command": "<repo>/tools/stop-hook.sh" }] }]
+    "PostToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.claude/ctx-hook.sh" }] }]
   }
 }
 ```
@@ -1041,7 +1081,7 @@ reasoning.
 | resume-note | arm a slot by hand (fresh `.note` → `.pending` + `.meta`), start a session: header names head/reason; slot deleted; `consumed` row | fresh transcript, no slot: nothing emitted |
 | selfcompact `--check` | first run allows; static HEAD twice → BELAY rc 3; HEAD moved resets | dirty tracked change → REFUSED; not in tmux → REFUSED; untracked-only → allowed (the control that must not refuse) |
 | nudge-watch | runtime-random marker rendered in a scratch pane: fires within ~2 s, ledger row | marker absent: silent to the bound, `nudge-timeout`, **and the process was alive the whole time** |
-| stop-hook | a transcript ≥ floor with ≥ 6 assistant turns and no genuine user turn → block JSON; with tool-results and notifications interleaved → still blocks; **and the second stop of a continuation after ≥ 6 further turns → blocks again** (R12) | below floor / above ceiling / few turns → exit 0 silently; the immediate re-stop after an answer (few turns since the block record) → silent; a "Stop hook feedback" record or a textless user record does NOT reset the user counter |
+| stop-hook (retired 2026-11-13) | a transcript ≥ floor with ≥ 6 assistant turns and no genuine user turn → block JSON; with tool-results and notifications interleaved → still blocks; **and the second stop of a continuation after ≥ 6 further turns → blocks again** (R12) | below floor / above ceiling / few turns → exit 0 silently; the immediate re-stop after an answer (few turns since the block record) → silent; a "Stop hook feedback" record or a textless user record does NOT reset the user counter |
 | yip | `make test` (Go tests + e2e over an isolated line); `yip doctor` in each checkout; from each checkout `yip presence` shows `(you)` on the *right* member | an uninstalled checkout attaches to a peer — the impersonation trap |
 | leases | two shells `hold` the same resource: exactly one HELD, the other WAITING #1; `release` resolves it; `steal` refused while time remains | `go test -race` — the 24-goroutine exclusivity test |
 
@@ -1085,7 +1125,7 @@ Numbers from the running system as of 2026-08-17; every one has a source.
 |---|---|
 | Runs cross context boundaries unattended | ledger: two full automatic cycles (`allow` → `nudge-sent` 4–11 s → `consumed` 90–120 s) on 2026-08-16 for main; journal 2026-08-16 opens "Resumed from a self-compaction at the 600k checkpoint. The nudge fix worked on its first live test" |
 | Compaction volume the human no longer hand-pastes | 163 boundaries in main's live transcript, 123 in aux's, 58 in the vault's (`isCompactSummary` records) — each was a manual `/compact` + paste before the note hook, and is a manual `/compact` still on the tracks without the self-compaction pair |
-| The Stop hook catches unearned yields and yields to earned ones | fired at 132k/20 turns this session; answered "2"; no repeat |
+| The Stop hook (retired 2026-11-13) catches unearned yields and yields to earned ones | fired at 132k/20 turns this session; answered "2"; no repeat |
 | Cross-track review finds what one track cannot | field report §3: three files one sweep could not see; a stale-doc line refuted by measurement (5 scenarios/76 min/4 burned retries contended vs 8/10 min/0 quiet); every cross-track finding right about the defect (and wrong about the fix — P15) |
 | The channel carries what a human could not | 22 calls, 149 turns, 25 notes, ~618 KB of turn text since 2026-08-04; the largest single merge instruction ~14 KB |
 | Serialization pays in evidence, not just wall clock | after standing down: 33/35, 0 fail, 0 retries burned vs 4 burned contended — a burned retry cannot distinguish "host was busy" from "intermittently broken" |
@@ -1290,7 +1330,7 @@ hazard and asserts it away is what keeps the hazard unexamined.
 *Files referenced (Thylacine main worktree unless noted): `CLAUDE.md`
 (§"Autonomy + escalation", "The checkpoint contract", "A checkpoint is not a
 stopping point", "Operational summary patterns"), `docs/JOURNAL.md`,
-`docs/AUTONOMY-FIELD-REPORT.md`, `tools/stop-hook.sh`,
+`docs/AUTONOMY-FIELD-REPORT.md`, `tools/stop-hook.sh` (deleted 2026-11-13),
 `tools/thyla-selfcompact.sh`, `tools/thyla-nudge-watch.sh`,
 `tools/thyla-tmux.sh`, `~/.claude/ctx-hook.sh`, `~/.claude/resume-note.py`,
 `~/.claude/settings.json`; memory `feedback_turn_end_is_a_decision.md`,

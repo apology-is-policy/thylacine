@@ -69,11 +69,23 @@
 # Leg R (refused): shot 11 has the kernel's RESTORED refused after a completed
 # restore (as the kernel refuses it when a grantee exits before the commit).
 # Restoration must stay owed -- lictor rebinds again before the seat returns
-# -- and the NEXT takeover (leg 2) must exclude and bind afresh: a seat that
+# -- and the NEXT takeover (leg T) must exclude and bind afresh: a seat that
 # carried "active" across the refusal skipped both and acknowledged a frame
 # that was on no scanout (vote-30 audit F1).
 #
-# Leg 2 (dead): shot 12 stalls the engine with the trusted scanout up and its
+# Leg T (restore stall): shot 12 stalls the engine just before the ordinary
+# return's restore, and the device retires the chain. A stall is no answer, so
+# the restore must wait for the device and then rebind the compositor's frame;
+# until the restore chunk the seat failed an ended episode here and cancelled its
+# grant.
+#
+# Leg B (bind stall): shot 13 makes the restore's own first command, the rebind,
+# retire late, so the stall begins inside the restore. Only the stall count the
+# restore reads before staging tells that from a refusal, so the same wait and
+# rebind must follow; a seat that read it as a refusal would give the frame up
+# or fail the episode.
+#
+# Leg 2 (dead): shot 14 stalls the engine with the trusted scanout up and its
 # chain's retirement withheld, so the engine dies 30 s later. Until vote 30
 # the failed seat retried its restore forever: every compositor request
 # parked for good and the serial SAK was refused (OPEN-BUGS 04:20Z). The seat
@@ -87,7 +99,6 @@ set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(
 set ::env(THYLACINE_SERIAL_SAK) 0
 set ::env(THYLACINE_TEST_LATCH_DEAD) 1
 source [file join [file dirname [info script]] lib.exp]
-if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} { lc_require_host_pil }
 set repo $lc_repo
 set qmp [lc_qmp_sock]
 
@@ -723,15 +734,98 @@ rejoined refused
 after 1500
 witness cancelled
 
-# ---- leg 2: the engine dies under the trusted scanout ----
+# ---- leg T: a stall stands as the restore begins ----
 # A fresh "trusted scanout active" here is also leg R's verdict: a seat that
 # carried "active" across the refused RESTORED skips the takeover entirely.
+key "ctrl+alt+f10"
+set timeout 30
+# Expect takes the first ARM that matches anywhere in what it has read, not the
+# earliest line, so in each wait below the line that must not come first is listed
+# first: lines a single pass prints arrive in one read.
+expect {
+    -ex "INJECTED by test-latch-dead" { lc_fail "restore-stall: a shot fired inside the takeover" }
+    -ex "lictor: trusted scanout active" { lc_step "restore-stall: the trusted scanout is up (a fresh takeover)" }
+    -re {EXTINCTION:} { lc_extinction_fail "restore-stall takeover" }
+    timeout { lc_fail "restore-stall: no takeover within 30s of the chord (did the seat carry 'active' across leg R's refused RESTORED?)" }
+}
+after 1000
+key "ret"
+# The shot is the restore's first line and the seat cannot fail at it before it, so
+# its arm goes first: a failure printed in the same pass stays for the next wait.
+expect {
+    -re {lictor: restore shot: a synchronous chain stalled ahead of the restore stalled=([01]) generation=[0-9]+} {
+        if {$expect_out(1,string) != 1} { lc_fail "restore-stall: the shot stalled nothing, so this leg tests nothing" }
+        lc_step "restore-stall: a stall stands as the restore begins"
+    }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the episode failed before its restore: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "restore-stall shot" }
+    timeout { lc_fail "restore-stall: the empty episode never reached its restore within 30s -- did Enter end it?" }
+}
+# The wait line goes first for the same reason: the seat cannot fail ahead of it
+# without the restore having failed on the stall, which the second arm reports.
+expect {
+    -re {lictor: restore met a stall, waiting for the device generation=[0-9]+} { lc_step "restore-stall: the restore waits for the device" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the seat failed an ended episode on a stall: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "restore-stall wait" }
+    timeout { lc_fail "restore-stall: lictor never said the restore waited, so the stall was not in its way" }
+}
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "restore-stall: the seat failed after waiting: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "restore-stall: the seat came back through a failure, not through its restore" }
+    -re {lictor: episode closed: frame rebound generation=[0-9]+} { lc_step "restore-stall: the stall retired and the episode closed with the frame rebound" }
+    -re {EXTINCTION:} { lc_extinction_fail "after the restore's stall" }
+    timeout { lc_fail "restore-stall: the episode never closed within 30s" }
+}
+settled restore-stall
+witness waited
+
+# ---- leg B: a stall begins on the restore's own first command ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "INJECTED by test-latch-dead" { lc_fail "bind-stall: a shot fired inside the takeover" }
+    -ex "lictor: trusted scanout active" { lc_step "bind-stall: the trusted scanout is up" }
+    -re {EXTINCTION:} { lc_extinction_fail "bind-stall takeover" }
+    timeout { lc_fail "bind-stall: no takeover within 30s of the chord" }
+}
+after 1000
+key "ret"
+# The shot's line comes before the restore runs, so nothing the restore prints can
+# precede it; each later wait lists first the line that must not come first, as in
+# leg T.
+expect {
+    -re {lictor: restore shot: the restore's first command will stall generation=[0-9]+} {
+        lc_step "bind-stall: the restore's first command is armed to stall"
+    }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "bind-stall: the episode failed before its restore: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "bind-stall shot" }
+    timeout { lc_fail "bind-stall: the empty episode never reached its restore within 30s -- did Enter end it?" }
+}
+expect {
+    -ex "lictor: stall shot LOST" { lc_fail "bind-stall: the shot rode no command that retired, so this leg tests nothing" }
+    -re {lictor: restore met a stall, waiting for the device generation=[0-9]+} { lc_step "bind-stall: the restore waits for the device" }
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "bind-stall: the seat failed an ended episode on a stall begun in its restore: $expect_out(0,string)" }
+    -re {EXTINCTION:} { lc_extinction_fail "bind-stall wait" }
+    timeout { lc_fail "bind-stall: lictor never said the restore waited, so the stall was read as something else" }
+}
+expect {
+    -re {lictor: seat failed: [^\r\n]*[\r\n]} { lc_fail "bind-stall: the seat failed after waiting: $expect_out(0,string)" }
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_fail "bind-stall: the seat came back through a failure, not through its restore" }
+    -re {lictor: episode closed: output blank generation=[0-9]+} { lc_fail "bind-stall: the restore gave the frame up, so it read the stall as a refusal" }
+    -re {lictor: episode closed: frame rebound generation=[0-9]+} { lc_step "bind-stall: the stall retired and the episode closed with the frame rebound" }
+    -re {EXTINCTION:} { lc_extinction_fail "after the bind's stall" }
+    timeout { lc_fail "bind-stall: the episode never closed within 30s" }
+}
+settled bind-stall
+witness bound
+
+# ---- leg 2: the engine dies under the trusted scanout ----
 key "ctrl+alt+f10"
 set timeout 30
 expect {
     -ex "lictor: trusted scanout active" { lc_step "dead: the trusted scanout is up (a fresh takeover)" }
     -re {EXTINCTION:} { lc_extinction_fail "second takeover" }
-    timeout { lc_fail "dead: no takeover within 30s of the chord (did the seat carry 'active' across leg R's refused RESTORED?)" }
+    timeout { lc_fail "dead: no takeover within 30s of the chord" }
 }
 expect {
     -ex "INJECTED by test-latch-dead, retirement withheld" { lc_step "dead: lictor stalled the engine with the chain's retirement withheld" }

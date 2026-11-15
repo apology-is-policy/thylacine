@@ -68,6 +68,29 @@ The Thylacine (abstractly depicted in the logo above) is an extinct (though I be
 
 ## Latest
 
+### Never blocked by a server: asynchronous service connections
+
+_2026-11-13_
+
+When you copy or paste in Nora, the editor never waits on the clipboard service. Its single UI thread speaks 9P to the service over a private Loom ring, Thylacine's kernel submission and completion queue: connecting, the protocol handshake, walking to the file, opening it, and every read and write are requests on that ring, and the kernel answers each one with exactly one completion. The ring sits in the same `poll()` that reads your keys, so the window keeps drawing and typing carries on while the bytes move (a full 1 MiB paste arrives as 64 reads). A service that stops answering costs a deadline and one error event, never a frozen window, and closing the ring ends the whole connection at once, whatever the server is doing.
+
+```mermaid
+sequenceDiagram
+    participant App as Nora (UI thread)
+    participant Ring as Private Loom ring (kernel)
+    participant Srv as Clipboard service
+    App->>Ring: connect, walk, open, read
+    Note over App: keeps drawing and reading keys in its one poll()
+    Ring->>Srv: 9P handshake and requests
+    Srv-->>Ring: replies
+    Ring-->>App: exactly one completion per request
+    alt the service stops answering
+        Note over App: a deadline passes: one error event, typing carries on
+        App->>Ring: close
+        Ring->>Srv: the whole connection ends at once
+    end
+```
+
 ### Halcyon, the first light
 
 ![](readme_assets/halcyon/halc1.png)

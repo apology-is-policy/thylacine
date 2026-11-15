@@ -1020,6 +1020,8 @@ struct Controlq {
     parked: alloc::vec::Vec<Parked>,
     /// The slots parked chains hold: not allocatable, not published.
     fslot_parked: [bool; FENCED_SLOTS],
+    /// The seat is in an episode (`Gpu::hold_parked`): nothing parked goes.
+    parked_held: bool,
     /// Contexts with a released client chain: everything later of theirs parks
     /// and is released too, until a destroy of that device context completes.
     released: crate::gpu_api::Released,
@@ -1622,6 +1624,12 @@ impl Controlq {
     /// stall's revival publishes at the next pump. A context `released` records
     /// has its parked chains released, as a poisoned one's are.
     ///
+    /// Nothing goes while the seat holds them either. A chain published inside an
+    /// episode would be client work the takeover never waited out, and the restore's
+    /// fenced commands retire behind it: a client could time its readback's release
+    /// so that the restore waits past the kernel's deadline, and an authenticated
+    /// episode would fail.
+    ///
     /// A context with an abandoned chain not yet retired has its parked chains
     /// released as refused. The chain may never retire, a parked chain has no
     /// abandonment clock, and it counts in `fenced_outstanding`, so without this
@@ -1631,7 +1639,7 @@ impl Controlq {
     /// do needs them. The compositor's readback is released the same way, which
     /// frees the reserved slot for every other surface.
     fn unpark(&mut self) {
-        if self.parked.is_empty() || self.refusing() {
+        if self.parked.is_empty() || self.refusing() || self.parked_held {
             return;
         }
         let plan = crate::gpu_api::unpark_plan(
@@ -2499,6 +2507,7 @@ impl Gpu {
                 fslot_reach: [ChainReach::default(); FENCED_SLOTS],
                 parked: alloc::vec::Vec::new(),
                 fslot_parked: [false; FENCED_SLOTS],
+                parked_held: false,
                 released: crate::gpu_api::Released::default(),
                 owed_reach: crate::gpu_api::OwedReach::default(),
                 fslot_poison_ring: [0; FENCED_SLOTS],
@@ -3426,13 +3435,13 @@ impl Gpu {
         self.condemned_n += 1;
     }
 
-    /// Test lever, self-test only: make the next display DISABLE
-    /// (`set_scanout(0, ..)`) report a device refusal without issuing it, so
-    /// the condemn/defer/drain chain has a real driver. Deliberately NOT a
-    /// client verb -- `warp_img_selftest` runs pre-READY, before any
-    /// connection exists, so this needs no external surface at all, and giving it one
-    /// "for symmetry" would be the #178 box-wide-kill-switch anti-pattern its
-    /// `ring-inject` sibling is already bounded against.
+    /// Test lever for the compositor's self-test: make the next display DISABLE
+    /// a client asks for (`set_scanout_client(0, ..)`) report a device refusal
+    /// without issuing it, so the condemn/defer/drain chain has a real driver.
+    /// The compositor reaches it through the broker in every build, so it is
+    /// scoped, not trusted: only a client's own disable spends it, never a bind
+    /// the broker issues for itself. The seat's restore is such a bind, and a
+    /// refusal there fails the episode and cancels its grant.
     pub fn arm_scanout_disable_refusal(&mut self) {
         self.fail_next_scanout_disable = true;
     }
@@ -4265,8 +4274,25 @@ impl Gpu {
         )
     }
 
-    /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout).
+    /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout). The
+    /// broker's own bind of the trusted image, which no lever reaches.
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.set_scanout_as(resource_id, w, h, false, true)
+    }
+    /// A client's bind: the one the self-test lever reaches.
+    pub fn set_scanout_client(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.set_scanout_as(resource_id, w, h, true, true)
+    }
+    /// The seat's restore: the broker's bind and nothing else, which no lever
+    /// reaches. The frees an accepted bind lets go are a client's, so they wait
+    /// for a later bind that drains: a client's accepted image or blob bind, or
+    /// the next takeover's trusted one (a blob probe drains nothing). Draining
+    /// here, one free the device is slow to take would stand between an
+    /// authenticated episode and its return.
+    pub fn set_scanout_restore(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.set_scanout_as(resource_id, w, h, false, false)
+    }
+    fn set_scanout_as(&mut self, resource_id: u32, w: u32, h: u32, client: bool, drain: bool) -> Result<(), Error> {
         self.cmd_seq = self.cmd_seq.wrapping_add(1);
         self.last_scanout_seq = self.cmd_seq;
         let req_va = self.req(REQ_OFF)?;
@@ -4276,12 +4302,12 @@ impl Gpu {
             w32(req_va + 40, 0); // scanout_id
             w32(req_va + 44, resource_id);
         };
-        // The self-test lever, checked for the DISABLE only. It returns the
+        // The self-test lever, checked for a client's DISABLE only. It returns the
         // same Err the wire path returns, WITHOUT issuing the command, so
         // everything downstream is driven by a refusal indistinguishable from
         // a real one -- a lever that took a different path would prove
         // nothing about the path that matters.
-        if resource_id == 0 && self.fail_next_scanout_disable {
+        if client && resource_id == 0 && self.fail_next_scanout_disable {
             self.fail_next_scanout_disable = false;
             self.injected_refusal = true;
             return Err(Error::Hardware);
@@ -4294,7 +4320,9 @@ impl Gpu {
             VIRTIO_GPU_RESP_OK_NODATA,
         );
         if r.is_ok() {
-            self.drain_condemned(resource_id);
+            if drain {
+                self.drain_condemned(resource_id);
+            }
         } else {
             self.condemn_if_stalled(resource_id, stalls);
         }
@@ -4392,6 +4420,31 @@ impl Gpu {
         format: u32,
         stride: u32,
     ) -> Result<(), Error> {
+        self.blob_then_flush(resource_id, w, h, format, stride, true)
+    }
+
+    /// The seat's restore of a blob frame: as `set_scanout_restore`, the pair
+    /// and no free.
+    pub fn set_scanout_blob_restore(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+    ) -> Result<(), Error> {
+        self.blob_then_flush(resource_id, w, h, format, stride, false)
+    }
+
+    fn blob_then_flush(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+        drain: bool,
+    ) -> Result<(), Error> {
         let req_va = self.req(REQ_OFF)?;
         let req2_va = self.req(REQ2_OFF)?;
         unsafe {
@@ -4411,7 +4464,9 @@ impl Gpu {
                 }
                 // Same drain obligation as set_scanout_blob (round-3 F2):
                 // an accepted blob bind changes what the display names.
-                self.drain_condemned(resource_id);
+                if drain {
+                    self.drain_condemned(resource_id);
+                }
                 Ok(())
             }
             Ok(_) => Err(Error::Hardware),
@@ -4998,7 +5053,7 @@ impl Gpu {
 
     /// The engine can stage and publish a synchronous command now. A refusal
     /// made on this answer is a KNOWN outcome: nothing reached the device.
-    fn takes_commands(&self) -> bool {
+    pub fn takes_commands(&self) -> bool {
         !(self.ctrl.refusing() || self.ctrl.sync_pending || self.ctrl.sync2_pending)
     }
 
@@ -5284,6 +5339,16 @@ impl Gpu {
     /// dies, or the cursor lane is abandoned.
     pub fn bound_takeover(&mut self, chord: Option<Instant>) {
         self.ctrl.takeover_from = chord;
+    }
+
+    /// Set by the seat from each STATUS it reads: held from the chord until the seat
+    /// is NORMAL again, so the client chains parked meanwhile go only after the
+    /// restore. The takeover's synchronous chains are fenced on the device's timeline
+    /// (`fence_sync`), so what a client put on that timeline before the chord has
+    /// retired once the takeover is up; with this, nothing of a client's joins it until
+    /// the seat returns.
+    pub fn hold_parked(&mut self, hold: bool) {
+        self.ctrl.parked_held = hold;
     }
 
     /// What trusted takeover asks of the device. A fenced chain need not have

@@ -138,8 +138,8 @@ Missing optional residents may
 stay reserved/offline; no wildcard fallback. Add another resident only by an
 intentional login-policy update. No home-*, halcyon-* or boot-test service routes.
 
-November 12 login-policy update (PROPOSED by corona; implemented on the landing
-branch so that its proof exists; AWAITING THE OPERATOR'S RATIFICATION): login adds
+November 12 login-policy update (ratified by the operator on November 13, as
+the route narrowed below and with the reach the next paragraph states): login adds
 `halcyon`, the console renderer's inline-media place channel, to its manifest
 unless it would start the session compositor on a successful authentication,
 that is unless the image has the session lever and login was not passed
