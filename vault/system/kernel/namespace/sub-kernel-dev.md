@@ -3,7 +3,7 @@ id: sub-kernel-dev
 type: sub
 title: "The Dev vtable and the bestiary — the interface every namespace resolves through"
 parent: moc-kernel-namespace
-code: ["kernel/dev.c", "kernel/include/thylacine/dev.h", "kernel/devnone.c", "kernel/null.c", "kernel/zero.c", "kernel/full.c"]
+code: ["kernel/dev.c", "kernel/include/thylacine/dev.h", "kernel/devnone.c", "kernel/null.c", "kernel/zero.c", "kernel/full.c", "kernel/test/test_dev.c"]
 audit: light
 guarded-by: []
 validated-by: [gate-smp]
@@ -111,7 +111,7 @@ struct Dev  *dev_lookup_by_name(const char *);  // NULL if absent (tests build o
 int          dev_count(void);                   // registered, excluding the sentinel (tests build only)
 
 struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype);   // alloc + qid{0,0,qtype}
-struct Spoor *dev_simple_open(struct Spoor *c, int omode);  // set COPEN + mode
+struct Spoor *dev_simple_open(struct Spoor *c, int omode);  // set COPEN + mode, offset 0
 void          dev_simple_close(struct Spoor *c);            // clear COPEN
 
 extern struct Dev *bestiary[];                     // BESTIARY_MAX + 1, NULL-terminated
@@ -216,10 +216,21 @@ register outside `dev_init` — `devpipe` from `pipe.c` and `dev9p` from
 
 **The simple-leaf helpers** exist because most kernel Devs are one
 file: `dev_simple_attach` allocates and stamps a qid of `{path 0,
-vers 0, type qtype}`; `dev_simple_open` sets `COPEN` and records the
-mode; `dev_simple_close` clears `COPEN`. `dev_simple_open` is
-deliberately idempotent — re-opening updates the mode, matching the
-Plan 9 idiom.
+vers 0, type qtype}`; `dev_simple_open` sets `COPEN`, records the
+mode and starts the cursor at 0; `dev_simple_close` clears `COPEN`.
+The cursor is Plan 9's `devopen`: every open's caller (stalk's quarry,
+the single-hop walk-open, a union member's root) opens a walk clone,
+and `spoor_clone` copied the source's offset. Before 2026-11-13 it was
+left there: an `openat` from a `/proc` directory a readdir had read
+started `status` at the readdir cookie's byte, and a mounted `/ctl/procs`
+whose reader had read into it was crossed at that reader's offset (audit
+round 29 F1). dev9p and devsrv already started at 0; devenv's open went
+through `dev_simple_open` and carried the offset too (only its create
+reset it), so this fixes it with the rest. devcap (write-only control
+files) and devpipe (streams) do not read by offset, and devnone never
+opens. `devproc.open_rewinds` walks from a root whose
+offset is a readdir cookie, checks the clone carried it, and requires
+the opened `status` to start at 0 and read from its first line.
 
 **`devnone`** is the no-op Dev (`dc='-'`), registered first, and it is
 better than it looks. Its documented role is an audit guard — "any
@@ -270,13 +281,27 @@ is matched on `dc` alone, the conservative direction. A NEW per-walk
 stamper that leaves the flag false makes the shed drop live mounts, which
 is why the flag is opt-in to the *unsafe* behaviour's accommodation and
 the assigners of `devno` are an enumerated set.
-`no_file_mapping` (2026-10-28) says this Dev's files back no file
-mapping: both mapping cores refuse it with `ENODEV`, after the exec floor
-(an executable mapping answers `EPERM` first, Linux's order) and before
-the Image cache.
-`devenv` sets it, because a variable has no version (the Image cache keys
-pages on `qid.vers`) and its open Spoor holds the environment it was opened
-in, which a cached mapping would keep alive past every handle.
+`may_back_mapping` says this Dev's files may back a file mapping; every
+other Dev's files are refused by both mapping cores with `ENODEV`, after
+the exec floor (an executable mapping answers `EPERM` first, Linux's
+order) and before the Image cache. It is opt-in, as `may_back_exec` is
+(operator vote 113, 2026-11-13; it replaced the opt-out `no_file_mapping`
+of 2026-10-28), and only dev9p and devramfs set it. The Image cache keys
+pages on (dc, devno, qid.path, qid.vers), holds a Spoor reference past the
+mapper and past every close, and serves a later mapper of the same key the
+bytes the first mapper's Spoor read. So a Dev whose files keep state per
+open or render per reader stays out: devenv's variables have no version and
+their Spoor holds an environment, a `/ctl/procs` open file holds a snapshot
+page rendered for its reader, a pipe end holds its ring, a `/srv` endpoint
+its connection (audit round 30 F1). Sharing is a second question, the
+per-file slot `content_versioned` (vote 114, round 31 F1): dev9p, which
+reaches every userspace server, answers per session from the Larder's L1e
+latch; devramfs answers yes; a NULL slot means no, and the file maps
+privately, its own Burrow, never cached, freed with its last mapping. `dev_register` refuses a Dev that sets `may_back_exec` without
+`may_back_mapping`: an exec image is served from the same cache, and the
+phenotype maps executables through the mapping cores. `dev.mapping_is_opt_in`
+holds the registered set to exactly dev9p and devramfs, holds that no Dev
+outside it answers `content_versioned`, and that devramfs files answer yes.
 
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.

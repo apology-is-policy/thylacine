@@ -685,7 +685,8 @@ u32  territory_mount_fail_nodes_for_test(u32 n);
 // (territory_root_pheno; Design D, VIVARIUM 13.10.3) -- "root: pheno-linux\n".
 // The mount-point name is the entry's ref-held mp_path (I-33; "?" when unknown);
 // the source name is its Spoor's ->path, or "#<dc>" (the Plan 9 device spec)
-// when the source is a device root with no namespace name.
+// when the source is a device root with no namespace name. A name writes space,
+// tab, newline and backslash as \040 \011 \012 \134 (operator vote 97).
 //
 // The listing is as long as the table, so this copies a window of it: the
 // listing's bytes from `off`, at most `cap` of them, ending at the last line end

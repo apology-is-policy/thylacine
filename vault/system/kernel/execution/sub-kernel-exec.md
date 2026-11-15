@@ -438,7 +438,9 @@ literal now.
 On any change: that the Spoor ref ledger balances on every path — the Image
 lookup consumes a ref, the thunk keeps the borrow, and a NULL return consumed
 nothing; that the dispatch gate keeps all three conjuncts, and in particular
-that `PF_W` never becomes shareable; that the I-cache sync stays over the
+that `PF_W` never becomes shareable; that a file-backed segment's Image
+lookup passes `PF_X` as the exec class its mapping prot implies (`vma_args_ok`
+refuses an executable map of any other FILE Burrow); that the I-cache sync stays over the
 **page-rounded** span and stays ungated on `filesz > 0`, because a pure-bss
 executable segment is exactly the case that has no copied bytes; that
 `exec_read_header`'s phdr bound stays ahead of `elf_load`'s deref; that the
@@ -560,6 +562,14 @@ refusal is `-T_E_NOMEM` ([[sub-kernel-vma]]), `burrow_map_in` propagates it
 `-T_E_NOMEM` when the frame's populate or its `kzalloc` is refused, -1
 otherwise; 0 stays the unambiguous failed sp) carry it to `exec_load_into`
 and the blob entry.
+
+**A private image's payer is the space being built (operator vote 118,
+2026-11-13).** `map_file_backed` passes `image_lookup_or_create` the detached
+address space and its I-32 verdict, so a segment read from a file whose Dev
+does not version its content ([[sub-kernel-image]]) charges every page a fault
+mints into it to the image the exec builds, not to the caller's outgoing one.
+A load that fails destroys that space, whose drain frees the image and whose
+teardown lapses any record left ([[sub-kernel-burrow]]).
 
 ## B-1b: the 8 MiB stack and its extent in the auxv (2026-09-23)
 

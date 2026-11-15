@@ -198,6 +198,7 @@ set(KERNEL_TEST_SRCS
     test/test_cow.c
     test/test_burrow_map_proc.c
     test/test_demand_page.c
+    test/test_shared_anon.c
     test/test_vdso.c
     test/test_exec.c
     test/test_fork.c

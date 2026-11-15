@@ -297,9 +297,9 @@ never marked, because no program mounted it.
 copy of its shell's, and compares the absolute path of each entry it lists with
 the mount-point names in that list. The name of a mount point is recorded when
 the mount is made, so a mount point that is listed under a different name, for
-example through a bind, shows the realm the directory has without the mount. The
-list does not quote names, and a mount point whose name contains whitespace is
-not recognized reliably.
+example through a bind, shows the realm the directory has without the mount. A
+name holding a space, tab, newline or backslash is written in the list with an
+escape (`\040`, `\011`, `\012`, `\134`), and the tools read it back as the name.
 
 ### How links in a remote tree resolve
 

@@ -127,6 +127,7 @@ mirrors:
   - "tools/interactive/s7-nora-probe.exp"
   - "tools/interactive/manual.exp"
   - "tools/interactive/pts-probe.exp"
+  - "tools/interactive/ps-many.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"

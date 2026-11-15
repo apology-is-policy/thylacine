@@ -62,6 +62,12 @@ int dev_register(struct Dev *d) {
         extinction("dev_register: .wstat_native without .perm_enforced "
                    "(#47: perm_wstat_check is the only wstat authority gate)");
 
+    // An exec image is served from the same Image cache a file mapping is, and
+    // the phenotype maps executable files through the mapping cores: a Dev that
+    // backs exec and refused mappings would be a contradiction (vote 113).
+    if (d->may_back_exec && !d->may_back_mapping)
+        extinction("dev_register: .may_back_exec without .may_back_mapping");
+
     // #98: readiness that lives in a server is all three remote slots or none,
     // and never beside .poll. The poll core calls the release and the arm of any
     // Dev whose snapshot slot it used, so a partial set is a NULL call at the
@@ -195,12 +201,15 @@ struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype) {
     return c;
 }
 
-// dev_simple_open: mark COPEN + record omode. Idempotent — re-opening
-// an already-open Spoor just updates omode (matches Plan 9 idiom).
+// dev_simple_open: mark COPEN, record omode, and start the cursor at 0 (Plan 9
+// devopen). The Spoor being opened is a walk clone, and spoor_clone copied its
+// source's offset: a directory's readdir cookie, or the place a mounted file's
+// reader had reached.
 struct Spoor *dev_simple_open(struct Spoor *c, int omode) {
     if (!c) return NULL;
     c->flag |= COPEN;
     c->mode = omode;
+    c->offset = 0;
     return c;
 }
 

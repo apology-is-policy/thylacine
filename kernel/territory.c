@@ -902,6 +902,23 @@ static void ns_emit_str(struct ns_window *w, const char *s) {
     ns_emit(w, s, n);
 }
 
+// A name in a mount line, with space, tab, newline and backslash written as
+// \040 \011 \012 \134 (operator vote 97, the escapes of Linux's mountinfo). The
+// line's fields are split on spaces and the listing on newlines, so a raw one
+// would move a name's tail into the next field or forge a line of its own.
+static void ns_emit_path(struct ns_window *w, const char *s, u64 n) {
+    u64 run = 0;
+    for (u64 i = 0; i < n; i++) {
+        const char *esc = s[i] == ' '  ? "\\040" : s[i] == '\t' ? "\\011"
+                        : s[i] == '\n' ? "\\012" : s[i] == '\\' ? "\\134" : NULL;
+        if (!esc) continue;
+        ns_emit(w, s + run, i - run);
+        ns_emit(w, esc, 4);
+        run = i + 1;
+    }
+    ns_emit(w, s + run, n - run);
+}
+
 static void ns_emit_udec(struct ns_window *w, u64 v) {
     char tmp[24], out[24];
     int n = 0;
@@ -932,7 +949,7 @@ u64 territory_format_ns(struct Territory *p, u64 off, char *buf, u64 cap) {
 
         // Mount-point name (the Plan 9 Chan.path of the dir mounted onto). NULL
         // mp_path -> "?" (a kernel-internal mountpoint with no retained name).
-        if (m->mp_path && m->mp_path->len) ns_emit(&w, m->mp_path->s, m->mp_path->len);
+        if (m->mp_path && m->mp_path->len) ns_emit_path(&w, m->mp_path->s, m->mp_path->len);
         else                               ns_emit_str(&w, "?");
         ns_emit_str(&w, " ");
 
@@ -948,13 +965,13 @@ u64 territory_format_ns(struct Territory *p, u64 off, char *buf, u64 cap) {
         char odc = 0;
         if (!(m->flags & MCOVERED) && dev9p_spoor_origin(src, &origin, &odc)) {
             if (origin) {
-                ns_emit(&w, origin->s, origin->len);
+                ns_emit_path(&w, origin->s, origin->len);
             } else {
                 char dev[3] = { '#', odc, '\0' };
                 ns_emit_str(&w, dev);
             }
         } else if (src && src->path && src->path->len) {
-            ns_emit(&w, src->path->s, src->path->len);
+            ns_emit_path(&w, src->path->s, src->path->len);
         } else {
             char dev[3];
             dev[0] = '#';

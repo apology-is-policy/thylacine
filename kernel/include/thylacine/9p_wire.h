@@ -228,6 +228,7 @@ struct p9_qid {
 
 // QID type bits (mirrors Stratum's STM_9P_QT*).
 #define P9_QTDIR        0x80u
+#define P9_QTAPPEND     0x40u
 #define P9_QTFILE       0x00u
 #define P9_QTSYMLINK    0x02u
 #define P9_QTAUTH       0x08u

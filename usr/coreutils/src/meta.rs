@@ -61,7 +61,8 @@ pub fn mount_realms() -> MountRealms {
     }
     let path = format!("/proc/{}/ns", pid);
     match File::open(&path).and_then(|mut f| io::slurp(&mut f)) {
-        Ok(data) => MountRealms::from_text(core::str::from_utf8(&data).unwrap_or("")),
+        // Lossy: a name that is not UTF-8 spoils its own line, not the list.
+        Ok(data) => MountRealms::from_text(&String::from_utf8_lossy(&data)),
         Err(_) => MountRealms::default(),
     }
 }

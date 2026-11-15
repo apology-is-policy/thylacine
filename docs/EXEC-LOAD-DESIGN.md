@@ -276,18 +276,25 @@ Soundness — why this is an extension, not new mechanism:
   3's W^X: rodata maps `R`-only (no W, no X) — trivially clean.
 - **The fault arm is already prot-general**: `file_install_locked` /
   `file_install_cluster_locked` install at `vma->prot`; the #317 I-cache sync
-  is gated on `freq->exec` — a rodata page is never synced, which is sound
-  because each FILE Burrow backs exactly ONE segment at ONE **exec-class**, so
-  no page ever migrates from a non-exec to an exec mapping. **This is ENFORCED,
-  not assumed (#45 audit F1)**: the Image key is `(dc, devno, qid.path,
-  qid.vers, file_offset, size, exec)` — the `exec` component splits a crafted
-  ELF's aliased R+X + R-only PT_LOADs (identical file window, different X-ness)
-  into DISTINCT Burrows, so no single FILE Burrow is ever mapped at both an
-  executable and a non-executable prot. Without it, a rodata-first fill (no
-  sync) then a text resident-hit would execute stale I-cache lines — the #317
-  hazard, reachable by a crafted binary; the exec key closes it. A legit binary
-  is unaffected (the same file's same segment always carries the same X bit ->
-  the same key -> maximal cross-Proc sharing).
+  is gated on `freq->exec`, which is the faulting Burrow's **exec class**
+  (`file_exec`, fixed when the Burrow is created), never the faulting
+  mapping's prot. A rodata page is never synced, which is sound because a
+  Burrow outside the exec class is never mapped executable: `vma_args_ok`
+  refuses that mapping, and a protect never adds X. Every page filled into an
+  exec-class Burrow is synced, whichever mapping's fault filled it, because a
+  protect CAN cut an RX mapping down to R: one Burrow is then mapped at two
+  prots, and a page the R piece fills is executed by the RX piece's resident
+  hit (audit round 32 F2; the earlier argument here, "no single FILE Burrow is
+  ever mapped at both an executable and a non-executable prot", was true at
+  #45 and voided by the B-1a protect). **The class is ENFORCED, not assumed
+  (#45 audit F1)**: the Image key is `(dc, devno, qid.path, qid.vers,
+  file_offset, size, exec)`, and the Burrow takes the key's `exec` as its
+  class, so a crafted ELF's aliased R+X + R-only PT_LOADs (identical file
+  window, different X-ness) get DISTINCT Burrows of distinct classes. Without
+  that, a rodata-first fill (no sync) then a text resident-hit would execute
+  stale I-cache lines — the #317 hazard. A legit binary is unaffected (the same
+  file's same segment always carries the same X bit -> the same key -> maximal
+  cross-Proc sharing).
 - **The Image cache already keys per-segment** `(dc, devno, qid.path,
   qid.vers, file_offset, size)`; a binary now occupies two entries (text +
   rodata). `IMAGE_CACHE_MAX` doubles 64 → 128 to keep the effective binary

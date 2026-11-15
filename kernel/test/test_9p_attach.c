@@ -671,3 +671,42 @@ void test_p9_attached_ctl_registry(void) {
 
     p9_loopback_destroy(&g_loopback);
 }
+
+// A label is one column of its /ctl/9p-sessions row, and the default label is
+// the attacher's own aname: it keeps ASCII graphics and nothing else, so it can
+// add neither a column nor a line. The session is gone before any assert runs.
+void test_p9_attached_ctl_label_alphabet(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                attach_responder, NULL);
+    const u8 uname[] = {'r'};
+    // Eleven bytes, the label's whole width: the edges of the graphic range
+    // ('!' and '~') stay, and the bytes on either side of it do not.
+    const u8 aname[] = {'a',' ','=','\t','b','\n','c',0x7f,'!',0x80,'~'};
+    struct p9_attached *a = NULL;
+    if (rc == 0) {
+        a = p9_attached_create(
+            p9_loopback_ops_for(&g_loopback),
+            4096, 0, 8192,
+            uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
+    }
+    struct att_ctl_probe p = { "a?=?b?c?!?~", false, 0, 0, 0, 0, 0 };
+    static char buf[2048];
+    size_t n = 0;
+    if (a) {
+        p9_attached_ctl_iterate(att_ctl_cb, &p);
+        struct Proc r;
+        for (size_t i = 0; i < sizeof(r); i++) ((u8 *)&r)[i] = 0;
+        r.principal_id = 0xC0FFEEu;
+        n = devctl_format_9p_sessions_for_test(&r, buf, sizeof buf);
+        p9_attached_destroy(a);
+    }
+    if (rc == 0) p9_loopback_destroy(&g_loopback);
+
+    TEST_EXPECT_EQ(rc, 0, "loopback init");
+    TEST_ASSERT(a != NULL, "attached created");
+    TEST_ASSERT(p.found,
+                "a session label keeps ASCII graphics only: a space, a tab, a newline, DEL and a high byte each read ?");
+    TEST_ASSERT(att_contains(buf, n, "sess a?=?b?c?!?~ id=- msize=8192 "),
+                "the label is one column of its sess row");
+}

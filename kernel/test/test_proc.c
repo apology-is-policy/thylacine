@@ -2452,8 +2452,8 @@ void test_proc_dying_takes_no_stop(void) {
     // A stop made before the kill leaves the job flag set: the column must
     // still not call the dying Proc STOPPED.
     __atomic_store_n(&dying->job_stop_req, 1u, __ATOMIC_RELEASE);
-    bool live_col  = dts_is_stopped(devctl_procs_state_name_for_test(live));
-    bool dying_col = dts_is_stopped(devctl_procs_state_name_for_test(dying));
+    bool live_col  = dts_is_stopped(proc_state_word(live));
+    bool dying_col = dts_is_stopped(proc_state_word(dying));
 
     s = proc_table_lock_acquire();
     proc_debug_resume(live);

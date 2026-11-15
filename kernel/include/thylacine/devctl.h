@@ -15,8 +15,13 @@ struct Proc;
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
+size_t devctl_format_kstack_for_test(const struct Proc *reader, char *buf, size_t cap);
+size_t devctl_format_kstack_budget_for_test(char *buf, size_t cap, u32 budget_words);
+u32 devctl_kstack_budget_words_for_test(void);
+u32 devctl_kstack_visit_words_for_test(void);
+u64 devctl_procs_snaps_held_for_test(void);   // /ctl/procs snapshots allocated, not yet freed
+void devctl_procs_snap_race_for_test(void (*fn)(void *), void *arg);
 bool devctl_kernel_base_readable(const struct Proc *caller);
-const char *devctl_procs_state_name_for_test(const struct Proc *p);
 bool devctl_system_counters_readable(const struct Proc *reader);
 #endif // KERNEL_TESTS
 

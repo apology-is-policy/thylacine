@@ -170,6 +170,21 @@ enum fault_result userland_demand_page(struct Proc *p,
 // the probe and the leaf write) -- the last instant the original's share must
 // still be held. `original` is the page the copy replaced.
 extern void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+// Votes 117 + 119 (tests only): a shared anonymous miss fires this after its
+// mint is charged and its page allocated, immediately before the install --
+// where another sharer's fault into the same slot makes this one the loser.
+struct Burrow;
+extern void (*g_shared_mint_probe_for_test)(struct Proc *p, struct Burrow *v, size_t slot);
+// Round 35 F2 (tests only): a FILE cluster fill fires this after its faulting
+// slot is installed and adopted, immediately before the read-ahead mints.
+extern void (*g_cluster_readahead_probe_for_test)(struct Proc *p, struct Burrow *v);
+// Vote 124: a FILE fill's window between a private image's page charge and its
+// install (the single fill's, and each cluster slot's) -- where a test lapses
+// the payer, as its teardown on another CPU would, or installs the slot first,
+// as a racing faulter would.
+extern void (*g_file_mint_probe_for_test)(struct Proc *p, struct Burrow *v);
+// Every I-cache sync of a filled FILE page (the single and the cluster fill).
+extern u64 g_file_fill_syncs_for_test;
 #endif
 
 #endif // THYLACINE_ARCH_ARM64_FAULT_H

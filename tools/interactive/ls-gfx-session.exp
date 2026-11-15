@@ -38,7 +38,8 @@
 #         past the built leaf + focuses it; the tool exits -> tapestryd
 #         releases the reservation + fans TEV_LAYOUT -> the compositor hosts
 #         the tag in a kaua-term ("spawned ... /bin/halcyon welcome"); the
-#         tour goes out RICH ("welcome shown (tier rich)") and lands in the
+#         tour goes out RICH ("welcome shown (tier rich) systems N"), lists
+#         the loaded systems it read from /proc (N is not 0) and lands in the
 #         tile's transcript as objects ("presents objs"); two tiles.
 #   H-4d  the MENU in a session tile: `ls /lib/halcyon` typed into the shell
 #         -> objects; Esc, `b` (the previous obj run), Enter -> the verb menu
@@ -227,7 +228,7 @@ proc h4d_flags {} {
 while {(!$saw_armed || !$saw_ingest || !$saw_init || !$saw_tagged || !$saw_focus || !$saw_released || !$saw_wspawn || !$saw_tier || !$saw_objs || !$saw_exit) && $tries < 80} {
     incr tries
     expect {
-        -re {ut: beacon rich \(transcript zones armed\)|halcyond: session tile ingest live|halcyond: session init: /bin/halcyon layout restore default \(pid \d+\)|tapestryd: claim on pane [0-9]+ reserved by conn [0-9]+ \(E_AGAIN\)|halcyon: tagged 1 pane\(s\) for the session compositor|halcyon: focus -> pane ([0-9]+)|tapestryd: conn [0-9]+ released [0-9]+ reserved empty leaf/leaves|halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ [0-9]+x[0-9]+ /bin/halcyon welcome|halcyon: welcome shown \(tier (rich|none)\)|halcyond: session tile leaf=([0-9]+) presents objs \(([0-9]+)\)|halcyond: session init exited \(code ([0-9-]+)\)|tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)\r} {
+        -re {ut: beacon rich \(transcript zones armed\)|halcyond: session tile ingest live|halcyond: session init: /bin/halcyon layout restore default \(pid \d+\)|tapestryd: claim on pane [0-9]+ reserved by conn [0-9]+ \(E_AGAIN\)|halcyon: tagged 1 pane\(s\) for the session compositor|halcyon: focus -> pane ([0-9]+)|tapestryd: conn [0-9]+ released [0-9]+ reserved empty leaf/leaves|halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ [0-9]+x[0-9]+ /bin/halcyon welcome|halcyon: welcome shown \(tier (rich|none)\) systems [0-9]+\r|halcyond: session tile leaf=([0-9]+) presents objs \(([0-9]+)\)|halcyond: session init exited \(code ([0-9-]+)\)|tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)\r} {
             # ONE alternation: the leftmost marker in the buffer is the one
             # consumed, so a chunk carrying several markers yields them in
             # arrival order, one per iteration. Groups: 1 focus pane, 2 the
@@ -270,6 +271,10 @@ while {(!$saw_armed || !$saw_ingest || !$saw_init || !$saw_tagged || !$saw_focus
                     lc_fail "H-4d: the tour went out PLAIN (tier $expect_out(3,string)) -- the tile's pts did not advertise BEACON, or the pts slave did not read as a terminal"
                 }
                 lc_step "H-4d: the tour went out at the rich tier"
+                if {![regexp {systems ([0-9]+)} $m -> nsys] || $nsys == 0} {
+                    lc_fail "H-4d: the tour lists no loaded system ([string trim $m]) -- it could not read the process set from its tile"
+                }
+                lc_step "H-4d: the tour lists $nsys loaded system(s), read from /proc in its tile"
             } elseif {[string match "*presents objs*" $m]} {
                 # The count is whatever the ingest batch held when the FIRST
                 # object landed (a read-batching artifact), so the witness is

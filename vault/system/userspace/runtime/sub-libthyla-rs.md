@@ -32,6 +32,7 @@ code:
   - usr/kaua-term-probe/src/readiness_qualification.rs
   - usr/lib/libthyla-rs/src/pty_observer.rs
   - usr/lib/libthyla-rs/src/process.rs
+  - usr/lib/libthyla-rs/src/procs.rs
   - usr/lib/libthyla-rs/src/rand.rs
   - usr/lib/libthyla-rs/src/sched.rs
   - usr/lib/libthyla-rs/src/territory.rs
@@ -50,7 +51,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-11
+updated: 2026-11-13
 ---
 ## Dedicated service owner (October 2)
 
@@ -281,11 +282,16 @@ back to its verbatim output (2026-11-11).
 `io::read_rendered` reads such a file with ONE read into a `RENDERED_MAX`
 buffer, twice `KERNEL_RENDER_MAX` (4096, devctl's `DEVCTL_READ_BUF`; devproc's
 `DEVPROC_READ_BUF` is 2048), and refuses a read that fills it (`OutOfRange`).
-`ps` and Halcyon's `ctl_field` and loaded-systems list call it. prowl's
-`read_ctl_file`, diorama's `read_native`, joey's status readers and the probes
-that parse such text (capacity-probe, cpubench, exec-probe, lsp-probe,
-srvfull-probe, u-job-test) do the same thing with one `read` into a buffer of
-their own, sized to the kernel's and without the refusal. Its host tests feed
+Halcyon's `ctl_field` calls it. `procs::read_status` (under `ps`, prowl,
+srvfull-probe, Halcyon's loaded-systems list and diorama's parent walk),
+prowl's `read_ctl_file`, diorama's `read_native`, joey's status readers and the
+probes that parse such text (capacity-probe, cpubench, exec-probe, lsp-probe,
+u-job-test) do the same thing with one `read` into a buffer of their own, sized
+to the kernel's and without the refusal. A buffer only as large as the kernel's
+cannot tell a whole text from a cut one by its length, so `procs::field` and
+diorama's `parse_kv_dec` read only lines that end in a newline: a status cut
+at `ppid:    4` names no parent (host test `a_cut_last_line_is_no_field`).
+`read_rendered`'s host tests feed
 it a reader whose second read answers from a longer rendering (`read_rendered`
 returns the first, and `slurp` beside it returns the splice), a rendering of
 exactly `KERNEL_RENDER_MAX` bytes (returned whole), and a reader that fills
@@ -316,6 +322,35 @@ instead). A generic reader -- `cat`, a ported program's stdio -- still loops
 and can still show a spliced tail. Whether the kernel should hand a
 read-to-EOF reader one rendering (a length latched at the first read, or a
 per-open snapshot) is an open design question, not settled here.
+
+### The process set is read from `/proc` (`procs`)
+
+A program that reasons over EVERY Proc -- a listing, a monitor, "is there a
+Proc named X" -- does not read `/ctl/procs`: that table holds only the rows
+that fit one page, and it ends with a cut line when some
+did not. `procs::pids` lists `/proc`, whose directory is whole at any number of
+Procs (ascending pids), and `procs::read_status` takes one
+`/proc/<pid>/status` with one read into a `STATUS_MAX` (2048, devproc's
+`DEVPROC_READ_BUF`) buffer. `Row::parse` turns that text into the nine fields
+`/ctl/procs` prints (`None` when a field is missing or is not a number, `-`
+for a withheld `cpu_ns`), `row` and `list` compose the two. `ps`, prowl,
+srvfull-probe and Halcyon's loaded-systems list read rows; diorama reads the
+status itself for a parent pid.
+
+A row is one instant of its Proc. The set is not: a Proc that ends between the
+listing and its status read is skipped (`read_status` answers `None` when the
+open finds no such pid, and also when a read fails with an I/O error and a
+second open finds none; a read that is denied is an error), and one born after
+the listing passed its pid is seen by the next call.
+Pids are never reused, so no row is another Proc's. A status that is read but
+does not parse is an error (`Io`), never an absence. `field` matches a key at
+the start of a line only, so `pid` does not find `ppid`, and reads only lines
+that end in a newline.
+
+`list` costs the square of the set on today's kernel: one open and one read
+per Proc, and the kernel walks its Proc table under the table lock for each
+(the open's pid lookup, the read's walk), where one read of `/ctl/procs` was
+one walk. That belongs to the Proc table's locking (#62), not to this module.
 
 ### The 9P serving codec (`ninep`)
 

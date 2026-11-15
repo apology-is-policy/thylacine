@@ -23,6 +23,9 @@
 
 #include "test.h"
 
+#include <thylacine/dev.h>       // devnone: the escapes test's Spoors
+#include <thylacine/path.h>
+#include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
@@ -229,6 +232,45 @@ void test_territory_render_root_pheno(void) {
     TEST_ASSERT(decl_has_root, "F6: a declared Territory renders 'root: pheno-linux' after binds");
     TEST_ASSERT(decl_ends_nl,  "whole lines only");
     TEST_ASSERT(tiny_whole, "a cap that fits binds but not the root line renders binds alone");
+}
+
+// Operator vote 97: a name in a mount line writes space, tab, newline and
+// backslash as \040 \011 \012 \134, so no name moves into the next field or
+// forges a line. The point's name carries all four and the text of a whole
+// mount line; the source's name carries a space. The listing is exactly one
+// mount line, then the binds line.
+void test_territory_render_escapes_names(void) {
+    static const char pt[] = "a b\tc\nmount / evil\\d";
+    static const char sn[] = "s p";
+    static const char want[] =
+        "mount /a\\040b\\011c\\012mount\\040/\\040evil\\134d /s\\040p\nbinds: 0\n";
+    struct Territory *t    = territory_alloc();
+    struct Spoor     *src  = spoor_alloc(&devnone);
+    struct Spoor     *mp   = spoor_alloc(&devnone);
+    struct Path      *root = path_make_root();
+    bool built = t && src && mp && root;
+    if (built) {
+        src->qid.path = 0xD6000001u;
+        src->qid.type = QTDIR;
+        mp->qid.path  = 0xD6000002u;
+        mp->qid.type  = QTDIR;
+        src->path = path_addelem(root, sn, (u64)(sizeof sn - 1));
+        mp->path  = path_addelem(root, pt, (u64)(sizeof pt - 1));
+        built = src->path && mp->path && mount(t, src, mp, 0) == 0;
+    }
+    char buf[256];
+    u64 n = built ? territory_format_ns(t, 0, buf, (u64)sizeof buf) : 0;
+    bool exact = n == (u64)(sizeof want - 1);
+    for (u64 i = 0; exact && i < n; i++) if (buf[i] != want[i]) exact = false;
+    int lines = 0;
+    for (u64 i = 0; i < n; i++) if (buf[i] == '\n') lines++;
+    if (t) territory_unref(t);
+    if (src) spoor_unref(src);
+    if (mp) spoor_unref(mp);
+    if (root) path_unref(root);
+    TEST_ASSERT(built, "a Territory with one mount whose names carry the four characters");
+    TEST_EXPECT_EQ(lines, 2, "one mount line and the binds line: no name forges a line");
+    TEST_ASSERT(exact, "each of the four characters, in the point and in the source, is written as its octal escape");
 }
 
 // --- LS-4: per-Proc cwd ("dot") --------------------------------------------

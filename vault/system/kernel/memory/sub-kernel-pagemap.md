@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-09-23
-updated: 2026-10-27
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -52,6 +52,9 @@ u32          pagemap_node_count(const struct pagemap *pm);            // node pa
 int          pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx, struct page *pg,
                              struct AddrSpace *as, bool exempt, struct page **out_winner);
                                                                       // 0 installed / 1 a page was there (*out_winner) / -1 nothing changed
+int          pagemap_install_paid(struct pagemap *pm, spin_lock_t *lock, size_t idx, struct page *pg,
+                                  const struct pagemap_payer *payer, bool exempt, struct page **out_winner);
+                                                                      // the same, the nodes charged through `payer` (NULL: the pool alone)
 void         pagemap_take(struct pagemap *pm, spin_lock_t *lock, size_t idx, struct AddrSpace *as,
                           struct page **out_pg, struct page **freed, u32 *nfreed);
 size_t       pagemap_take_next(struct pagemap *pm, spin_lock_t *lock, size_t from, size_t hi,
@@ -82,7 +85,16 @@ nodes could not be had -- buddy OOM, or the charge refused when `as` is
 non-NULL -- and NOTHING changed. It takes `lock` for the slot walk and
 allocates the missing nodes OUTSIDE it, charging them to `as` (under
 `exempt`'s policy) BEFORE allocating, so a cap hit allocates nothing.
-`pagemap_take` empties slot `idx` (an absent or out-of-range slot reads as
+`pagemap_install_paid` is the same install with the node charge routed
+through a `struct pagemap_payer` -- a `charge(ctx, n, exempt)` that takes all
+`n` or none and an `uncharge(ctx, n)`, both called with no lock held -- for a
+payer that is not an address space: a shared anonymous Burrow's payer record
+(operator vote 121; [[sub-kernel-burrow]]'s `burrow_record_install`).
+`pagemap_install` is that install with an address-space payer built from `as`
+(or none, when `as` is NULL). Under KERNEL_TESTS,
+`g_pagemap_install_probe_for_test(pm, idx)` runs in the window where the
+shortfall is charged and allocated and the lock is dropped, so a test can have
+a rival build the path there (`shared_anon.node_leftovers_refunded`). `pagemap_take` empties slot `idx` (an absent or out-of-range slot reads as
 absent; it never fails) and hands back, in `freed[]` (capacity
 `PAGEMAP_MAX_DEPTH`), every node the take emptied, for the caller to
 `free_pages(.., 0)` AFTER dropping the lock; those nodes are uncharged from
@@ -130,7 +142,8 @@ links the pool nodes into every gap (a linked node is a valid empty node, so
 nothing partial is ever undone), the leaf entry is installed or the winner
 reported, the lock drops, and any pool nodes a racer made unnecessary are
 freed and uncharged. Otherwise the lock drops, the shortfall is CHARGED to
-`as` (`addrspace_charge_pages(as, need, exempt)`) and only then allocated
+the payer (`as`'s `addrspace_charge_pages(as, need, exempt)`, or the given
+payer's `charge`) and only then allocated
 with `node_alloc`; a partial allocation uncharges the part never allocated
 and the whole attempt fails -- every pool node freed and uncharged. The pool
 is a prefix of at most `PAGEMAP_MAX_DEPTH` entries, consumed from the front.
@@ -285,9 +298,11 @@ refusal; the take that empties a node uncharges it; `page_count` = data
 pages + nodes. This is the invariant's new axis at B-1a': the flat array was
 kernel memory proportional to the RESERVATION and charged to nobody, so the
 only bound on it was the byte cap the pagemap retired. FILE Burrows pass
-`as = NULL` on purpose -- their pages are the Image cache's, shared and
-uncharged, bounded by `EXEC_FILE_MAX` (256 MiB of map span) and the cache's
-image count -- so their nodes keep the same posture as their pages. The
+`as = NULL` on purpose -- their pages are the system cache's and uncharged
+(a cached image's shared, a private image's held only by its mapping, vote
+114; whether to charge the private ones per page is an open question),
+bounded by `EXEC_FILE_MAX` (256 MiB of map span) and, for cached images, the
+cache's image count -- so their nodes keep the same posture as their pages. The
 pool's half of the same invariant is [[sub-kernel-addrspace]]'s.
 
 [[inv-i32]] -- **the conservation law** ([[spec-capacity]]): `pagemap_destroy`

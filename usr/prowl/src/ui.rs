@@ -401,7 +401,9 @@ fn render_footer(buf: &mut Buffer, area: Rect, app: &App) {
     // token is UPPERCASE (TREE/FLAT) so it is distinct from the lowercase "t tree"
     // key hint on the left -- the E2E can assert the toggle unambiguously.
     let mode = if app.show_tree { "TREE" } else { "FLAT" };
-    let right = match &app.status {
+    // An unreadable process set outranks an action's result: it is why the
+    // table above is empty.
+    let right = match app.set_error.as_ref().or(app.status.as_ref()) {
         Some(s) => format!("[{}]  {} sort:{} ", s, mode, app.sort.label()),
         None => format!("{} sort:{} ", mode, app.sort.label()),
     };

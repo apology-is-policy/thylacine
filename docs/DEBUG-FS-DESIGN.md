@@ -673,6 +673,230 @@ the image, even after the aliases or the windows are gone.
   peer whose caps cover the driver's covers its orphan, exactly as it covers the
   live driver.
 
+### 3.4 The join across address spaces: shared anonymous memory (operator votes 120 and 122, 2026-11-14)
+
+> **An image whose space maps shared anonymous memory also includes every image of
+> its share family: the address spaces that a chain of forks has joined through
+> shared anonymous memory. The family keeps one record of the guards of every Proc
+> that has held a member image, and the join reads that record.** Cover must cover
+> every Proc in the family. `NOTRACE` or `NODUMP` on any of them refuses control or
+> extraction. No Proc elevates while its space belongs to a family and maps shared
+> anonymous memory.
+
+**The defect (audit round 35 F1).** Section 3.3's join is computed over the Procs
+sharing ONE `AddrSpace`. Shared anonymous memory (`MAP_SHARED|MAP_ANONYMOUS`, vote
+117) is the first writable memory a fork shares between TWO spaces: the child's
+space maps the parent's `BURROW_TYPE_ANON_SHARED` Burrow itself, with no copy. So a
+parent holding elevation-only caps forks a child, the I-2 carve strips the child,
+and a same-owner debugger that covers only the child writes the parent's bytes
+through `/proc/<child>/mem`. The same shape defeats the seals: `NODUMP` on the
+parent does not refuse reading the child's `mem`. It also defeats the elevation
+refusal: the parent can elevate in place while it still shares the memory, which
+is the state the refusal exists to prevent. Linux never meets this, because Linux
+elevates by a setuid exec and exec drops every shared mapping. Thylacine elevates
+in place, so the mapping survives.
+
+**Why a family, not a record per Burrow (operator vote 122; audit round 36 F1).**
+The first build of vote 120 kept the record on each shared Burrow, and the join
+found those Burrows by walking the target's mappings under `g_proc_table_lock` with
+interrupts off. Round 36 showed that the walk had no practical bound. One shared
+mapping and a fork armed it, and the space could then hold `PROC_VMA_MAX` (65,536)
+mappings at no page cost. After that, every reader of its `maps` paid two full walks
+and each of its forks paid three, all under the global lock. `format_maps` bounds its
+own hold by its output buffer for exactly this reason. The operator chose a record
+per family instead. It is read in constant time and adds no limit, at the price of
+precision described below. The other option, a cap on the shared regions one space
+may map, would have kept the per-Burrow record exact but added a new `ENOMEM` to
+`mmap`.
+
+**The record.** A `ShareFamily` holds `caps` and `guards` (the `NODUMP`, `NOTRACE`
+and `DEBUG_TAINTED` bits). Both are atomics, and nothing clears them. The record
+also holds a reference count, one reference per member space. Each `AddrSpace`
+carries two fields for it:
+
+- `family` points at the space's family. It is NULL until the space's first share.
+- `shared_maps` counts the space's shared anonymous mappings. `vma_insert_in` and
+  `vma_remove_in` keep it, under `as->lock`, and they are the only two places a
+  mapping is linked or unlinked. The join reads it without that lock.
+
+**Joining a family.** Only a fork maps a shared anonymous Burrow into a second space
+(`addrspace_clone`; `burrow_share_into` refuses the type), so only a fork joins one:
+
+- **At the clone.** `addrspace_clone` gives the child's unpublished space the
+  parent's family, or a new one when the parent has none.
+- **At the publication.** `proc_image_share_fork_locked` runs in the `rfork_internal`
+  publication hold, beside the taint inheritance. When the parent's space has no
+  family, it links the parent's space to the child's. That write is made under
+  `g_proc_table_lock` alone, once, and never undone, so every reader holding that
+  lock sees a stable pointer. Two readers do not hold it, and both are sound on
+  either value. A concurrent clone that reads NULL gives its child a new family,
+  which its own publication moves onto the parent's (the rival arm below). An unmap
+  fold that reads NULL folds nothing, and loses nothing: the child's family holds
+  nothing until the publication's ORs, and what those add is the parent's own.
+  Taking the parent's `as->lock` here would make the publication wait, with the
+  global lock held, on a clone of the parent, which holds that lock across its
+  whole copy (audit round 37 P2-1).
+- **A rival fork.** A peer thread's fork may give the parent a family between this
+  fork's clone and its publication. If it does, the publication moves the child's
+  space onto the parent's family, and the spare record is freed after the hold.
+
+A space gets a family only at its own birth, as a fork's child, or at its first
+sharing fork, as the parent. So two families never meet and never need merging.
+Exec's fresh space starts in none.
+
+**Writing the record.** Both writers run under `g_proc_table_lock`:
+
+- **The publication.** It ORs into the family the parent's whole join, the parent's
+  own word and the child's word.
+- **The stamp.** `proc_image_stamp_locked` ORs a seal or the taint into every Proc on
+  the stamped Proc's space, and now into that space's family as well.
+
+**Reading the record.** The join reads `shared_maps`, the family record and the
+space's own record of departed holders without taking any address space's lock. A
+space with a family and at least one shared anonymous mapping ORs the family record
+into the join's caps and flags and is `shared`. The count is read first, with
+acquire. The unmap fold writes the family's taint into the space's record and only
+then lowers the count, with a release store. So a join that sees the count lowered
+also sees the fold. The fold itself must see every stamp that covers bytes the
+space read before it unmapped them. A debugger writes a target only while holding
+it stopped, a stop needs the debug owner, and the attach stamps the target's family
+before it takes the slot, so the stamp happens before any write it covers. A full
+fence ahead of the fold orders the CPU's earlier user loads, a load of such a write
+among them, before the fold's family and taint reads (audit round 38 F4). The
+range's uninstall, a broadcast TLBI and DSB, gives the same order, but it sits in
+the caller. No VMA operation takes the count through zero while the bytes
+stay mapped:
+
+- a split inserts its pieces while the original still counts;
+- a merge removes a piece while the survivor still counts;
+- a `MAP_FIXED` replace that unmaps the last shared piece and maps a fresh region in
+  its place is an unmap followed by a map, and the join may observe the state
+  between them.
+
+An earlier draft took `as->lock` for this read (round 36's close). That made every
+join, taint read and elevation check under the global lock wait on any holder of a
+family space's lock, including a clone, which holds it across its whole copy (audit
+round 37 P2-1). The lock-free read also removes the `g_cap_grants.lock -> as->lock`
+edge that the clearance redeem's join took.
+
+**What the family costs in precision.** The family is coarser than the bytes, in two
+ways. The operator accepted both, and both refuse more than strictly needed, never
+less:
+
+- A seal, taint or cap of any family member binds every member image that maps
+  shared anonymous memory, even one that never mapped the region that member shares.
+- In a member space, every shared anonymous mapping counts as shared, including one
+  made after the fork that no other space maps.
+
+**Why one snapshot at the fork is enough.** Caps grow only by elevation, and
+elevation is refused for every Proc whose space belongs to a family and maps shared
+anonymous memory. So once the publication has run, no sharer's caps grow. Before it,
+the publication reads the parent's join under the lock that the elevation paths
+hold. An elevation that raced ahead of the publication is therefore in the snapshot,
+and one that comes after is refused. A Proc that joins a member space later, such as
+an `RFMEM` peer or a later fork's child, carries caps bounded by a Proc already
+weighed (I-2). A seal or taint taken after the fork arrives through the stamp.
+
+A member space that has unmapped all its shared anonymous memory may elevate, and
+that is sound. Its image no longer holds bytes that another member can reach: only a
+fork maps a shared Burrow into a space, and the clone goes from parent to child. If
+the space later maps new shared memory and forks again, that publication ORs its
+raised caps into the family.
+
+One fork needs care: a fork that is still in flight when the elevation lands (audit
+round 37 P1-1). Its clone copied the parent's image while the parent still mapped
+the shared memory, so the child maps it. If a peer thread then unmaps it and
+elevates, a carve that read the parent's caps only at that moment would hand the
+raised caps to a child whose image another member may already have debugged. The
+carve therefore bounds the child twice: by the parent's caps read before the clone,
+and by its caps now (`proc_fork_carve`). The result is the caps the parent held both
+when the image was taken and at the carve. Without the race, the two reads are
+equal. With it, the fork is linearized at its clone, which is the moment that fixed
+the child's image.
+
+**`shared` means "in a family, while mapping shared memory".** The record cannot tell
+when another member unmapped its share or died, so the refusal is conservative. A Proc
+that needs to elevate unmaps its shared memory first, which is what Linux's setuid
+exec does implicitly. The record itself is never lifted, because bytes that a
+departed sharer wrote, or kept secrets in, are still there.
+
+**The taint follows the image across spaces, and outlives the mapping.** A debug
+stamp through one member goes on the family record, not on the word of any Proc in
+the other spaces: nothing can find those Procs cheaply. So every reader of the taint
+asks the IMAGE through `proc_image_tainted_locked`. It checks the Proc's word, its
+space's departed-holder record and, while the space maps shared anonymous memory, the
+family's record. Those readers are the elevation refusal, the interaction bind's
+sealed-and-untainted gate (`pts_interaction_locked`) and the fork's taint
+inheritance. Because the taint is monotone in every direction (3.3), three points
+also write it down where the record would otherwise lose it:
+
+- An unmap of shared anonymous memory (`vma_remove_in`) ORs the family's taint into
+  the space's `guards_ever` before it lowers `shared_maps` with a release store. A
+  reader, which loads the count with acquire first, therefore sees either the
+  mapping or the fold, never neither.
+- The exec swap puts the image's taint on the Proc's word before the space goes.
+- A fork inherits the parent's image taint, not only its word.
+
+A taint stamped through the family after this space unmapped all its shared memory
+does not reach it: that debug control happened after this image stopped holding the
+bytes.
+
+**A self-attach taints the image (operator vote 123; audit round 36 F4).** A fork
+child whose caps were stripped can attach to its own `ctl`, through the reflexive
+arm of the owner axis. The attach stamps the child's image, and with it the family
+record. The sharing parent can then never elevate while it maps the shared memory.
+Because the unmap fold and the exec carry write the taint down, it cannot elevate
+after those either. The operator kept this behaviour. The attach claims the debug
+slot, and the `ctl` descriptor that holds the claim can be handed to anyone, so the
+claim marks every image the slot reaches. It only ever restricts, and a parent that
+shares writable memory with a child already trusts that child with those bytes. The
+same already happens within one space: a vfork child's attach taints its parent.
+
+**Cost.** Constant per join and per taint read: a few atomic loads, with no lock and
+no wait. The stamp and the publication touch the family record and the parent's
+family pointer, and take no address space's lock. The clone may allocate one small
+record. An ordinary space has no family and pays a NULL test.
+
+**Witnesses.** These tests cover the join across spaces, and each has a control one
+variable away (the same fork over a private map):
+
+- `devproc.share_join_cover`, `devproc.share_join_elevation`,
+  `devproc.share_join_seals`, `devproc.share_join_taint` and
+  `devproc.share_join_fork_and_exec`;
+- `pts.bind_weighs_shared_taint`.
+
+Five more cover the family itself:
+
+- `devproc.share_family_rival_fork` covers the rival fork's re-link. It also checks
+  that the re-linked child's caps land in the family the parent reads.
+- `devproc.share_family_counts_every_piece` covers the count across an `mprotect`
+  split.
+- `devproc.share_family_lifetime` covers the record's reference count.
+- `devproc.share_family_second_fork_adopts` covers a clone of a space that already
+  has a family. The clone takes the family's reference, and the publication hands
+  nothing back.
+- `devproc.share_family_fork_in_flight` covers the carve's two bounds against an
+  unmap and an elevation landing between the clone and the carve.
+
+The fork's inheritance and the exec swap run on a kernel-thread child's own thread.
+Only a fork from EL0 clones a space, so three things in `rfork_internal` are checked
+by review alone: the publication's call site, the spare put after the hold, and the
+read of the parent's caps before the clone. The witnesses run the publication, and
+call the carve, as it does.
+
+**What this does NOT close.**
+
+- **Weft `SHARED_IN` regions** (`burrow_share_into`) are writable in two spaces
+  too, netd's and its client's, and they stay out of the join (operator vote 125,
+  settled). Such a region is a protocol buffer that the server validates (I-37). It
+  carries only that client's traffic and confers no authority of netd's. Joining
+  netd's caps into the client's image would put every weft client out of its owner's
+  debugger's reach and gain nothing. The residue is that a `NODUMP` netd's ring bytes
+  can be read through the client's `mem`, and those bytes are the client's own
+  traffic.
+- A COW child's *private* copies are untouched: whether a copy of a secret is
+  itself secret is still decision A.
+
 ## 4. 8a-1 — the software-checkpoint tier
 
 The first landing: a working cross-Proc inspector — stop a target at a checkpoint,

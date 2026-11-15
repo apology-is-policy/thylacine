@@ -999,19 +999,21 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
     spoor_ref(exe);
     struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
                                               (seg->flags & PF_X) != 0,
-                                              spoor_file_size(exe));
+                                              spoor_file_size(exe), as, exempt);
     if (!b) { spoor_clunk(exe); return -T_E_NOMEM; }   // the slab (the arguments hold by the gate)
 
     // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X
     // (I-12) holds by construction: the gate admits only NOT-PF_W segments, so
-    // nothing mapped here is ever writable. Each FILE Burrow backs exactly ONE
-    // segment at ONE prot (the Image keys per-segment), which is what keeps the
-    // fault arm's freq->exec-gated I-cache sync sound (REVENANT §4.6).
+    // nothing mapped here is ever writable. The Burrow's exec class is the
+    // segment's PF_X (the Image key's `exec`), so the prot below is one
+    // vma_args_ok admits and the fault arm syncs every fill of a text Burrow.
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map_in(as, exempt, b, seg->vaddr, size, prot);
-    // Drop the caller's handle ref. On success mapping_count + the cache's
-    // strong ref keep the image alive; on map failure the image stays validly
-    // cached (idle) for a later exec -- never leaked.
+    // Drop the caller's handle ref. On success mapping_count (+ the cache's
+    // strong ref, for a cached image) keeps the image alive. On map failure a
+    // cached image stays validly cached (idle) for a later exec; a private or
+    // bypass image has no other ref, so this is its last and frees it here
+    // (it may sleep in spoor_clunk: no lock is held).
     burrow_unref(b);
     return rc == 0 ? 0 : (rc == -(int)T_E_NOMEM ? rc : -1);   // a refused VMA (F18)
 }

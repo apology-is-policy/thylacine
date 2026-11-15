@@ -1,0 +1,241 @@
+#!/usr/bin/expect -f
+# tools/interactive/ps-many.exp -- the process listing with more Procs alive
+# than the /ctl/procs table holds.
+#
+# /ctl/procs is rendered into one page per open file (4092 bytes of text), about
+# sixty rows. ps and
+# prowl took it for the whole set until they moved to /proc's directory, whose
+# listing has no such bound, and /ctl/procs now ends with a cut line when a row
+# did not fit. This scenario starts seventy sleeps on a booted system and
+# asserts:
+#   - /ctl/procs has no cut line on the small system and ends with it on the
+#     large one. The pair is one variable apart: a line that is always there,
+#     or never, fails one leg. The file is rendered once per open (votes 99
+#     and 108): cat's first read holds the table and its second finds end of
+#     file, so nothing of a later rendering follows the cut line -- no whole
+#     row and no cut line's end; hexdump, reading 16 bytes at a time, reads
+#     one whole table to the line. Without the rule a later rendering
+#     shows only when it was longer; the kernel test devctl.procs_snapshot
+#     turns red without it at every run, and devctl.procs_rows_whole holds
+#     every buffer size to whole rows and the line. The small leg holds while
+#     the booted system fits the table (about sixty Procs).
+#   - every pid /proc lists both before and after a ps is in that ps. Such a
+#     Proc was alive throughout the listing (pids are never reused), and the
+#     listing owes it a row. Reading the sixty rows that fit omits the rest.
+#   - a program whose file name holds a space shows '?' for it in its status
+#     and in ps: the name is printed into line- and column-shaped text, and
+#     has one alphabet.
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+set cutline {\(cut: more processes than the table holds; /proc lists them all\)}
+
+# Run `cmd` and collect group 1 of every line `rowre` matches.
+proc pids_of {cmd rowre leg} {
+    lc_send "$cmd; echo many-$leg-end"
+    set timeout 60
+    set pids {}
+    expect {
+        -re $rowre { lappend pids $expect_out(1,string); exp_continue }
+        -re "\[\r\n\]many-$leg-end" {}
+        -re {EXTINCTION:} { lc_extinction_fail "extinction during `$cmd` ($leg)" }
+        timeout           { lc_fail "no end of `$cmd` ($leg)" }
+        eof               { lc_fail "qemu exited during `$cmd` ($leg)" }
+    }
+    return $pids
+}
+
+# Start `cmd` in the background and return its pid from the shell's job line.
+proc start_job {cmd what} {
+    lc_send "$cmd &"
+    set timeout 30
+    set pid ""
+    expect {
+        -re {\[\d+\][ \t]+(\d+)\r?\r?\n} { set pid $expect_out(1,string) }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction starting $what" }
+        timeout           { lc_fail "no `\[N\] pid` job line for $what" }
+        eof               { lc_fail "qemu exited starting $what" }
+    }
+    return $pid
+}
+
+# ls prints one name per line; a directory may carry its classify suffix.
+set ls_row {\n([0-9]+)/?\r}
+set ps_row {\n([0-9]+) {4}[0-9]+ {4}[^ \r\n]+ {4}[A-Z?]+ {4}}
+# One whole /ctl/procs row: nine columns, the last a number or `-`.
+set row9 {[0-9]+ +[0-9]+ +[^ \r\n]+ +[A-Z?]+ +[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +(?:[0-9]+|-)}
+
+# ---- (1) a freshly booted system fits one read: no cut line -----------------
+lc_send "cat /ctl/procs; echo many-small-end"
+set timeout 30
+set saw_kproc 0
+expect {
+    -re {\n0 +0 +kproc } { set saw_kproc 1; exp_continue }
+    -re $cutline      { lc_fail "/ctl/procs carries the cut line on a freshly booted system (1)" }
+    -re "\[\r\n\]many-small-end" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction reading /ctl/procs (1)" }
+    timeout           { lc_fail "no end of /ctl/procs (1)" }
+    eof               { lc_fail "qemu exited reading /ctl/procs (1)" }
+}
+if {!$saw_kproc} { lc_fail "no kproc row in /ctl/procs (1)" }
+lc_pass "ps-many(1): /ctl/procs holds a freshly booted system whole, with no cut line"
+
+# ---- (2) seventy more Procs: the table is cut and says so -------------------
+set sleeps {}
+for {set i 1} {$i <= 70} {incr i} {
+    lappend sleeps [start_job "sleep 900" "sleep $i"]
+}
+lc_send "cat /ctl/procs; echo many-large-end"
+set timeout 30
+set table ""
+set after_cut ""
+expect {
+    -re "\nPID +PPID +NAME\[^\n\]*\n((?:$row9\r*\n)+)$cutline\r*\n((?:\[^\n\]*\n)*)many-large-end" {
+        set table $expect_out(1,string)
+        set after_cut $expect_out(2,string)
+    }
+    -re "\[\r\n\]many-large-end" {
+        if {[regexp -- $cutline $expect_out(buffer)]} {
+            lc_fail "/ctl/procs with seventy more Procs: its first table is not a header, whole rows and then the cut line (2)"
+        }
+        lc_fail "/ctl/procs with seventy more Procs ends without the cut line (2)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction reading /ctl/procs (2)" }
+    timeout           { lc_fail "no end of /ctl/procs (2)" }
+    eof               { lc_fail "qemu exited reading /ctl/procs (2)" }
+}
+# One rendering lists a Proc once. A pid twice says the rows came from two:
+# a first table with no cut line, and the end of a later one after it.
+set seen {}
+foreach {- pid} [regexp -all -inline -line {^([0-9]+) } [string map [list "\r" ""] $table]] {
+    if {[lsearch -exact $seen $pid] >= 0} {
+        lc_fail "/ctl/procs with seventy more Procs lists pid $pid twice before its cut line: two renderings, the first without the line (2)"
+    }
+    lappend seen $pid
+}
+# What cat printed after that table. Its second read is past offset 0 and finds
+# end of file, so a whole row there, or a line that ends a cut line (an empty
+# line is one: the line's newline alone), is a later rendering's tail: the read
+# past offset 0 was answered. A line that is neither is another program's,
+# written to the same console; it says nothing about how the table ends.
+set plain [string map [list "\\" ""] $cutline]
+set after_cut [string map [list "\r" ""] $after_cut]
+set others 0
+foreach line [lrange [split $after_cut "\n"] 0 end-1] {
+    set at [expr {[string length $plain] - [string length $line]}]
+    if {$at >= 0 && [string range $plain $at end] eq $line} {
+        lc_fail "/ctl/procs with seventy more Procs: after the cut line, a cut line's end `$line` -- cat read a second rendering, so a read past offset 0 was answered (2)"
+    } elseif {[regexp "^$row9\$" $line]} {
+        lc_fail "/ctl/procs with seventy more Procs: after the cut line, a whole row -- cat read a second rendering, so a read past offset 0 was answered (2)"
+    } else {
+        incr others
+        lc_step "ps-many(2): after the cut line, a line that is neither a whole row nor a cut line's end: `[string range $line 0 79]`"
+    }
+}
+lc_pass "ps-many(2): /ctl/procs with more rows than fit ends its table of [llength $seen] whole rows with the cut line, and cat read nothing after it ($others other line(s) on the console)"
+
+# ---- (2b) a reader taking 16 bytes at a time reads one whole cut table ------
+# hexdump reads 16-byte rows, prints each row's bytes in hex, and ends with the
+# total it read. Put back together from the hex, the bytes must be one table:
+# the header, whole nine-column rows with no pid twice, and the cut line last.
+# The file is rendered once per open (vote 108). A rule that ends the file after
+# the first read leaves 16 bytes, and one that refuses a small read leaves none.
+# A file rendered afresh at every read tears only where a row's length changes
+# between two of the reads, and nothing here makes one change: such a kernel is
+# caught at every run by the kernel test devctl.procs_snapshot, not here. This
+# leg proves the small reader's path, through the file's own offset.
+lc_send "hexdump /ctl/procs; echo many-hex-end"
+set timeout 60
+set hexbytes ""
+set hexnext 0
+set hextotal -1
+expect {
+    -re {\n([0-9a-f]{8})  ([0-9a-f ]{49}) \|[^\n]*\|\r} {
+        set at [expr {"0x$expect_out(1,string)" + 0}]
+        if {$at != $hexnext} {
+            lc_fail "hexdump /ctl/procs: a row at offset $at where $hexnext came next (2b)"
+        }
+        set hx [string map {" " ""} $expect_out(2,string)]
+        append hexbytes [binary format H* $hx]
+        set hexnext [expr {$hexnext + [string length $hx] / 2}]
+        exp_continue
+    }
+    -re {\n([0-9a-f]{8})\r*\nmany-hex-end} { set hextotal [expr {"0x$expect_out(1,string)" + 0}] }
+    -re "\[\r\n\]many-hex-end" { lc_fail "hexdump /ctl/procs ended without its total (2b)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during hexdump /ctl/procs (2b)" }
+    timeout           { lc_fail "no end of hexdump /ctl/procs (2b)" }
+    eof               { lc_fail "qemu exited during hexdump /ctl/procs (2b)" }
+}
+if {$hextotal != $hexnext} {
+    lc_fail "hexdump /ctl/procs printed rows of $hexnext bytes and a total of $hextotal (2b)"
+}
+if {$hextotal < 3000 || $hextotal > 4096} {
+    lc_fail "hexdump /ctl/procs with seventy more Procs read $hextotal bytes, where the cut table is about 4 KiB (2b)"
+}
+set hexlines [split $hexbytes "\n"]
+if {[lindex $hexlines end] ne ""} {
+    lc_fail "hexdump /ctl/procs: the bytes do not end at a line's end (2b)"
+}
+set hexlines [lrange $hexlines 0 end-1]
+if {![regexp {^PID +PPID +NAME} [lindex $hexlines 0]]} {
+    lc_fail "hexdump /ctl/procs: the bytes do not start with the header (2b)"
+}
+if {[lindex $hexlines end] ne $plain} {
+    lc_fail "hexdump /ctl/procs with seventy more Procs: the last line is not the cut line: `[string range [lindex $hexlines end] 0 79]` (2b)"
+}
+set hexseen {}
+foreach line [lrange $hexlines 1 end-1] {
+    if {![regexp "^$row9\$" $line]} {
+        lc_fail "hexdump /ctl/procs: a line that is not a whole row: `[string range $line 0 79]` -- the reads joined two renderings (2b)"
+    }
+    regexp {^([0-9]+) } $line - hexpid
+    if {[lsearch -exact $hexseen $hexpid] >= 0} {
+        lc_fail "hexdump /ctl/procs lists pid $hexpid twice: the reads joined two renderings (2b)"
+    }
+    lappend hexseen $hexpid
+}
+lc_pass "ps-many(2b): hexdump read /ctl/procs 16 bytes at a time: one table of [llength $hexseen] whole rows and the cut line, $hextotal bytes"
+
+# ---- (3) ps lists every Proc alive throughout it ----------------------------
+set before [pids_of "ls /proc | cat" $ls_row "ls1"]
+set shown  [pids_of "ps --color=never --beacon=never" $ps_row "ps"]
+set after  [pids_of "ls /proc | cat" $ls_row "ls2"]
+if {[llength $before] <= [llength $sleeps]} {
+    lc_fail "/proc lists [llength $before] pids with [llength $sleeps] sleeps and their shell alive: {$before} (3)"
+}
+set owed {}
+foreach p $before { if {[lsearch -exact $after $p] >= 0} { lappend owed $p } }
+foreach p $sleeps {
+    if {[lsearch -exact $owed $p] < 0} { lc_fail "/proc did not list sleep $p in both listings (3)" }
+}
+set missing {}
+foreach p $owed { if {[lsearch -exact $shown $p] < 0} { lappend missing $p } }
+if {[llength $missing] > 0} {
+    lc_fail "ps omitted [llength $missing] of the [llength $owed] Procs alive throughout it: {$missing} (3)"
+}
+lc_pass "ps-many(3): ps listed all [llength $owed] Procs alive throughout it ([llength $shown] rows)"
+
+# ---- (4) a file name with a space: one alphabet for the name ----------------
+lc_send {cp /bin/sleep '/tmp/a b'}
+lc_send {chmod 755 '/tmp/a b'}
+set odd [start_job {'/tmp/a b' 900} "the program named `a b`"]
+lc_send "cat /proc/$odd/status"
+lc_expect_re {name: +a\?b\r*\n} "the status shows the space in the file name as ? (4)"
+lc_send "ps --color=never --beacon=never; echo many-name-end"
+set timeout 60
+set saw_row 0
+expect {
+    -re "\n$odd {4}\[0-9\]+ {4}a\\?b {4}ALIVE {4}" { set saw_row 1; exp_continue }
+    -re "\[\r\n\]many-name-end" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during ps (4)" }
+    timeout           { lc_fail "no end of ps (4)" }
+    eof               { lc_fail "qemu exited during ps (4)" }
+}
+if {!$saw_row} { lc_fail "no row for pid $odd named a?b in ps (4)" }
+lc_pass "ps-many(4): a space in a program's file name shows as ? in its status and its ps row"
+
+lc_pass "ps-many: ps lists every Proc where /ctl/procs is cut, the cut is said, and a name has one alphabet"
+lc_quit
+exit 0

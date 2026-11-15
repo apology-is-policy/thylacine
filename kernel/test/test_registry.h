@@ -202,6 +202,7 @@ void test_pts_tty_signal_routing(void);
 void test_pts_tty_tstp_stop_cont_seam(void);
 void test_pts_teardown_hup_cont(void);
 void test_pts_interaction_wakes_after_the_table_lock(void);
+void test_pts_bind_weighs_shared_taint(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_page_peak_high_water(void);
@@ -258,6 +259,7 @@ void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
 void test_territory_clone_copies_root_pheno(void);   // Design D F2/SA-1
 void test_territory_render_root_pheno(void);         // Design D audit F6
+void test_territory_render_escapes_names(void);     // vote 97: \040 \011 \012 \134 in a mount line
 void test_territory_cwd_join(void);
 void test_territory_cwd_dot(void);
 void test_territory_mount_smoke(void);
@@ -359,6 +361,8 @@ void test_vmo_file_create_failure_retains_spoor(void);
 void test_vmo_file_map_unmap_lifecycle(void);
 void test_vmo_file_resident_pages_freed(void);
 void test_image_miss_then_hit_shares(void);
+void test_image_private_unless_versioned(void);
+void test_image_bypass_takes_a_payer(void);
 void test_image_distinct_qid_distinct_entry(void);
 void test_image_qid_vers_bump_new_entry(void);
 void test_image_devno_full_width_distinct_entry(void);
@@ -435,10 +439,37 @@ void test_demand_page_file_smoke(void);
 void test_demand_page_file_nodes_are_the_system_caches(void);
 void test_demand_page_file_pagein_not_note_interruptible(void);
 void test_demand_page_file_pages_charge_the_holder(void);
+void test_demand_page_file_private_single_fill_charges(void);
+void test_demand_page_file_private_charges_its_payer(void);
+void test_demand_page_file_private_readahead_clamps_to_headroom(void);
+void test_demand_page_file_private_read_holds_no_charge(void);
+void test_demand_page_file_private_exempt_payer_binds_holder(void);
+void test_demand_page_file_private_holder_pays_leaves(void);
+void test_demand_page_file_private_payer_death_hands_over(void);
+void test_demand_page_file_private_readahead_hand_over_adopts(void);
+void test_demand_page_file_private_single_fill_pays_its_node(void);
+void test_demand_page_file_private_node_hand_over_adopts(void);
+void test_demand_page_file_private_single_fill_loser_refunds(void);
+void test_demand_page_file_private_cluster_loser_refunds(void);
+void test_demand_page_file_cached_image_takes_no_payer(void);
+// Votes 117 + 119: shared anonymous memory (test_shared_anon.c).
+void test_shared_anon_fork_shares_the_page(void);
+void test_shared_anon_creator_pays_every_mint(void);
+void test_shared_anon_unmap_keeps_the_page(void);
+void test_shared_anon_creator_death_hands_over(void);
+void test_shared_anon_install_loser_refunds(void);
+void test_shared_anon_protect_split_keeps_payer(void);
+void test_shared_anon_dontneed_keeps_contents(void);
+void test_shared_anon_refused_mint_refunds(void);
+void test_shared_anon_nodes_paid_by_record(void);
+void test_shared_anon_node_charge_hand_over_adopts(void);
+void test_shared_anon_node_charge_takes_all_or_none(void);
+void test_shared_anon_node_leftovers_refunded(void);
 void test_demand_page_idle_image_reclaimed_under_pressure(void);
 void test_demand_page_reclaim_asks_for_the_shortfall(void);
 void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
+void test_demand_page_file_exec_class_syncs_every_fill(void);
 void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
@@ -973,6 +1004,7 @@ void test_devproc_attach_returns_dir(void);
 void test_devproc_walk_root_to_kproc_dir(void);
 void test_devproc_walk_unknown_pid_misses(void);
 void test_devproc_walk_to_status_file(void);
+void test_devproc_open_rewinds(void);          // an open starts the cursor at 0, whatever the clone carried
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
 void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gate
@@ -987,6 +1019,7 @@ void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_maps_shared_anon(void);      // votes 117 + 119
 void test_devproc_maps_code_visible(void);     // B-2b audit F2
 void test_devproc_maps_code_redacted(void);    // B-2b audit F2
 void test_devproc_maps_code_truncated(void);   // B-2b audit F2
@@ -1024,6 +1057,16 @@ void test_proc_seal_stamps_the_image(void);
 void test_proc_elevation_ignores_a_zombie_sharer(void);
 void test_proc_debug_taint_refuses_elevation(void);
 void test_proc_debug_taint_crosses_fork(void);
+void test_devproc_share_join_cover(void);
+void test_devproc_share_join_elevation(void);
+void test_devproc_share_join_seals(void);
+void test_devproc_share_join_taint(void);
+void test_devproc_share_join_fork_and_exec(void);
+void test_devproc_share_family_rival_fork(void);
+void test_devproc_share_family_counts_every_piece(void);
+void test_devproc_share_family_lifetime(void);
+void test_devproc_share_family_second_fork_adopts(void);
+void test_devproc_share_family_fork_in_flight(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_birth_hold_ctl(void);
@@ -1161,6 +1204,11 @@ void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_cons_drain_tap_mirrors_output(void);       // G-4
 void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
+void test_vivarium_mmap_dev_zero_is_anonymous(void);
+void test_vivarium_mmap_shared_anon(void);              // votes 117 + 119
+void test_vivarium_mmap_shared_dev_zero(void);
+void test_vivarium_mmap_descriptor_errnos(void);
+void test_vivarium_mmap_order_is_linux(void);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_git_chunk_rows(void);
@@ -1176,6 +1224,7 @@ void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
 void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
+void test_vivarium_mmap_shared_domain(void);            // votes 117 + 119
 void test_vivarium_mprotect_domain(void);                // B-1a
 void test_vivarium_madvise_domain(void);                 // B-1b
 void test_vivarium_nanosleep_domain(void);               // VIVARIUM 6.29
@@ -1287,11 +1336,16 @@ void test_devctl_read_procs_format(void);
 void test_devctl_procs_tables_column(void);
 void test_devctl_counters_gated(void);         // IMPERIUM 11.3 item 10: owner/system-only counters
 void test_devctl_procs_rows_whole(void);       // a /ctl/procs row is committed whole
+void test_devctl_procs_snapshot(void);        // /ctl/procs: one rendering per open file
+void test_devctl_backs_no_mapping(void);      // /ctl: no mapping keeps a snapshot
+void test_dev_mapping_is_opt_in(void);        // vote 113: only dev9p + devramfs map
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_kstack_gated(void);
+void test_devctl_kstack_says_truncated(void);  // /ctl/kstack: every Proc's visit is paid for, and a spent budget says so
+void test_devctl_kstack_ends_whole(void);      // /ctl/kstack: a cut table says so and keeps its peak
 void test_devctl_read_sched_format(void);
 void test_devctl_read_cons_format(void);
 void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
@@ -1946,6 +2000,8 @@ void test_larder_downgrade_guards_raced_populate(void);
 void test_larder_gen_scope_qid(void);
 
 void test_dev9p_registered(void);
+void test_dev9p_qid_type_from_wire(void);
+void test_dev9p_content_versioned_follows_latch(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
 void test_dev9p_walk_clone(void);
@@ -2044,6 +2100,7 @@ void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
 void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
+void test_p9_attached_ctl_label_alphabet(void);
 void test_p9_closer_dying_close_delivers_tclunk(void);
 void test_p9_closer_exit_close_hands_off_tclunk(void);
 void test_p9_closer_dying_close_hands_off_staged_run(void);
@@ -2138,6 +2195,7 @@ void test_pipe_transport_reads_now_without_sleeping(void);
 void test_pipe_pump_treats_a_closed_transport_as_dead(void);
 void test_pipe_attach_9p_admits_pipes_only(void);
 void test_pipe_fstat_reports_fifo(void);
+void test_pipe_backs_no_mapping(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);

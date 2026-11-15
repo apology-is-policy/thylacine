@@ -2199,6 +2199,10 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     //                          Its fill is alloc_pages + install entirely under
     //                          the already-held vma_lock: no read, no pin, no
     //                          slow path (fault.c, the ANON_LAZY case).
+    //   BURROW_TYPE_ANON_SHARED  demand-zero shared memory (MAP_SHARED|
+    //                          MAP_ANONYMOUS, votes 117 + 119): the same fill
+    //                          under the held vma_lock plus the payer record's
+    //                          charge, a spinlock -- no read, no pin, no sleep.
     //
     // File-backed is excluded separately and for a different reason: no
     // WRITABLE mapping is file-backed at v1.0 (REVENANT backs text and R-only

@@ -9,6 +9,12 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>
+#include <thylacine/exec.h>      // EXEC_USER_BURROW_BASE
+#include <thylacine/handle.h>
+#include <thylacine/image.h>     // image_cache_evict_idle_for_test
+#include <thylacine/territory.h>
+#include <thylacine/vivarium.h>  // VIV_PROT_READ
+#include <thylacine/vma.h>
 #include <thylacine/page.h>       // prowl-6: PAGE_SIZE
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>     // V-4c-2b: sched_cpu_ctxt
@@ -22,6 +28,7 @@
 #include "../../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count
 #include "../../arch/arm64/fault.h"    // prowl-6: userland_demand_page
 #include "../../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident
+#include "../../mm/slub.h"     // kfree_large_watch: the snapshot's page is freed
 #include <thylacine/devctl.h>
 
 // =============================================================================
@@ -490,6 +497,249 @@ void test_devctl_kstack_gated(void) {
     if (k) spoor_clunk(k);
 }
 
+// The shape of one /ctl/kstack render: its rows' pids, whether the cut line
+// follows them, and the peak line's figures. The shape, not the bytes: a
+// running thread's own figure deepens between two renders.
+#define KSW_PIDS 32
+struct ksw_shape {
+    int  rows;
+    int  pids[KSW_PIDS];
+    bool cut;
+    bool trunc;       // carries the scan-budget line
+    bool bad;         // not the layout: a torn line, a row without five columns, no peak line last
+    u32  peak;
+    int  peak_pid;
+};
+
+static bool ksw_line_is(const char *buf, size_t ls, size_t le, const char *want) {
+    size_t k = 0;
+    for (; want[k]; k++)
+        if (ls + k >= le || buf[ls + k] != want[k]) return false;
+    return ls + k == le;
+}
+
+static bool ksw_line_starts(const char *buf, size_t ls, size_t le, const char *want) {
+    for (size_t k = 0; want[k]; k++)
+        if (ls + k >= le || buf[ls + k] != want[k]) return false;
+    return true;
+}
+
+// The decimal at token `want` (0-based) of the line, and how many tokens it has.
+static int ksw_tokens(const char *buf, size_t ls, size_t le, int want, u32 *out) {
+    int ntok = 0;
+    for (size_t k = ls; k < le; k++) {
+        if (buf[k] == ' ' || (k != ls && buf[k - 1] != ' ')) continue;
+        if (ntok == want) {
+            u32 v = 0;
+            for (size_t d = k; d < le && buf[d] >= '0' && buf[d] <= '9'; d++)
+                v = v * 10u + (u32)(buf[d] - '0');
+            *out = v;
+        }
+        ntok++;
+    }
+    return ntok;
+}
+
+static void ksw_shape_of(const char *buf, size_t got, struct ksw_shape *o) {
+    o->rows = 0;
+    o->cut = false;
+    o->trunc = false;
+    o->bad = false;
+    o->peak = 0;
+    o->peak_pid = -1;
+    if (got == 0 || buf[got - 1] != '\n') { o->bad = true; return; }
+    bool table = false, peak_seen = false;
+    size_t ls = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (buf[i] != '\n') continue;
+        u32 v = 0;
+        if (peak_seen) {
+            o->bad = true;                       // the peak line is the last
+        } else if (!table) {
+            if (ksw_line_is(buf, ls, i, "PID    NAME    PEAK    TID")) table = true;
+        } else if (ls < i && buf[ls] >= '0' && buf[ls] <= '9') {
+            if (o->cut || o->trunc || ksw_tokens(buf, ls, i, 0, &v) != 5) o->bad = true;
+            if (o->rows < KSW_PIDS) o->pids[o->rows] = (int)v;
+            o->rows++;
+        } else if (ksw_line_is(buf, ls, i, "(cut: more processes than the table holds)")) {
+            if (o->cut || o->trunc) o->bad = true;
+            o->cut = true;
+        } else if (ksw_line_starts(buf, ls, i, "peak:")) {
+            if (ksw_tokens(buf, ls, i, 1, &o->peak) != 6) o->bad = true;
+            (void)ksw_tokens(buf, ls, i, 3, &v);
+            o->peak_pid = (int)v;
+            peak_seen = true;
+        } else if (ksw_line_is(buf, ls, i, "(scan budget exhausted -- rows above are partial and "
+                                           "peak is a LOWER BOUND)")) {
+            if (o->trunc) o->bad = true;
+            o->trunc = true;
+        } else if (ls != i) {
+            o->bad = true;
+        }
+        ls = i + 1;
+    }
+    if (!peak_seen) o->bad = true;
+}
+
+static bool ksw_has(const struct ksw_shape *o, int pid) {
+    for (int i = 0; i < o->rows && i < KSW_PIDS; i++)
+        if (o->pids[i] == pid) return true;
+    return false;
+}
+
+// /ctl/kstack ends whole at every buffer size: the whole table's first rows,
+// the cut line exactly when a row is missing, and the peak line last -- over
+// every Proc, its row shown or not. A table that stopped at the first row
+// that did not fit said nothing and lost its peak.
+void test_devctl_kstack_ends_whole(void) {
+    static char buf[2048];
+    static char whole[2048];
+
+    // The deepest stack there can be, on a Proc of the test's own, and a
+    // shallow one linked after it: kproc's children are walked newest first,
+    // so a row always comes before the deepest Proc's, whatever kproc shows.
+    struct Proc *deep = proc_alloc();
+    TEST_ASSERT(deep != NULL, "proc_alloc for the deepest Proc");
+    struct Proc *ahead = proc_alloc();
+    if (!ahead) {
+        deep->state = PROC_STATE_ZOMBIE;
+        proc_free(deep);
+    }
+    TEST_ASSERT(ahead != NULL, "proc_alloc for the Proc ahead of the deepest");
+    deep->state = PROC_STATE_ALIVE;
+    deep->reaped_kstack_peak = THREAD_KSTACK_SIZE;
+    deep->reaped_kstack_tid = 1;
+    proc_test_link(deep);
+    ahead->state = PROC_STATE_ALIVE;
+    ahead->reaped_kstack_peak = 64;
+    ahead->reaped_kstack_tid = 1;
+    proc_test_link(ahead);
+    int deep_pid = deep->pid;
+    int ahead_pid = ahead->pid;
+
+    struct ksw_shape ref, sh;
+    size_t full = devctl_format_kstack_for_test(NULL, whole, sizeof whole);
+    ksw_shape_of(whole, full, &ref);
+    bool ref_ok = full > 0 && !ref.bad && !ref.cut && !ref.trunc && ref.rows >= 2 &&
+                  ksw_has(&ref, deep_pid) &&
+                  ref.peak == THREAD_KSTACK_SIZE && ref.peak_pid == deep_pid;
+    // The row ahead of the deepest Proc's is what makes a walk that stops at
+    // its first cut row lose the peak.
+    bool ahead_ok = false;
+    for (int i = 0; i + 1 < ref.rows && i + 1 < KSW_PIDS; i++)
+        if (ref.pids[i] == ahead_pid && ref.pids[i + 1] == deep_pid) ahead_ok = true;
+
+    // Past `full` by the room the end reserves beyond what it used: there the
+    // whole table fits again.
+    int bad = 0, not_prefix = 0, silent = 0, lying = 0, low_peak = 0;
+    int sized = 0, cut_before_deep = 0, uncut = 0;
+    for (size_t cap = 1; ref_ok && cap <= sizeof buf && cap <= full + 256; cap++) {
+        size_t got = devctl_format_kstack_for_test(NULL, buf, cap);
+        if (got == 0) continue;                  // no room for the header and the table's end
+        sized++;
+        ksw_shape_of(buf, got, &sh);
+        if (sh.bad) { bad++; continue; }
+        if (sh.rows > ref.rows) { not_prefix++; continue; }
+        for (int i = 0; i < sh.rows && i < KSW_PIDS; i++)
+            if (sh.pids[i] != ref.pids[i]) { not_prefix++; break; }
+        if (!sh.cut && sh.rows != ref.rows) silent++;
+        if (sh.cut && sh.rows == ref.rows) lying++;
+        if (sh.peak != THREAD_KSTACK_SIZE || sh.peak_pid != deep_pid) low_peak++;
+        if (sh.cut && !ksw_has(&sh, deep_pid)) cut_before_deep++;
+        if (!sh.cut) uncut++;
+    }
+
+    proc_test_unlink(ahead);
+    ahead->state = PROC_STATE_ZOMBIE;
+    proc_free(ahead);
+    proc_test_unlink(deep);
+    deep->state = PROC_STATE_ZOMBIE;
+    proc_free(deep);
+
+    TEST_ASSERT(ref_ok, "the whole kstack table, the deepest Proc's row and peak in it, fits 2 KiB uncut (enlarge the buffers if not)");
+    TEST_ASSERT(ahead_ok, "a row of the test's own comes directly before the deepest Proc's");
+    TEST_ASSERT(sized > 1, "some sizes fit the kstack header and the table's end");
+    TEST_EXPECT_EQ(bad, 0, "every size of /ctl/kstack ends on its peak line, each row whole");
+    TEST_EXPECT_EQ(not_prefix, 0, "the rows of a cut kstack table are the whole table's first rows");
+    TEST_EXPECT_EQ(silent, 0, "a kstack table short of a row ends its rows with the cut line");
+    TEST_EXPECT_EQ(lying, 0, "a kstack table with every row carries no cut line");
+    TEST_EXPECT_EQ(low_peak, 0, "the kstack peak is the deepest Proc's at every size, its row shown or not");
+    TEST_ASSERT(cut_before_deep > 0, "some size cuts the deepest Proc's row and still names it in the peak");
+    TEST_ASSERT(uncut > 0, "some size past the header holds the whole kstack table uncut");
+}
+
+// /ctl/kstack's walk is paid for by the Proc as well as by the word scanned.
+// A Proc that has reaped every thread costs no scan and the walk goes on past
+// the cut, so without a price on the visit a farm of such Procs is walked
+// whole, IRQs masked, however long it is. Past what the budget pays for, the
+// walk stops and the table says its peak is a lower bound -- at every size,
+// the cut line and the budget line both fitting the smallest.
+#define KSF_MAX 1100
+void test_devctl_kstack_says_truncated(void) {
+    static char buf[2048];
+    static struct Proc *farm[KSF_MAX];
+    struct ksw_shape sh;
+    u32 visit = devctl_kstack_visit_words_for_test();
+    u32 whole_budget = devctl_kstack_budget_words_for_test();
+
+    size_t got = devctl_format_kstack_budget_for_test(buf, sizeof buf, 0);
+    ksw_shape_of(buf, got, &sh);
+    bool zero_says = got > 0 && !sh.bad && sh.trunc && sh.rows == 0;
+
+    // The smallest power-of-two budget that scans the system as it stands
+    // whole. A stack only deepens and a deeper stack costs fewer words, so
+    // that budget stays enough for the system; the farm is what it cannot pay.
+    u32 enough = 0;
+    for (u32 b = 2u * visit; b != 0 && b <= whole_budget && enough == 0; b *= 2u) {
+        got = devctl_format_kstack_budget_for_test(buf, sizeof buf, b);
+        ksw_shape_of(buf, got, &sh);
+        if (got > 0 && !sh.bad && !sh.trunc) enough = b;
+    }
+
+    // One visit more than `enough` pays for, each Proc with a reaped peak and
+    // no thread: a zombie's shape, free to scan.
+    int want = enough ? (int)(enough / visit) + 1 : 0;
+    int have = 0;
+    for (; have < want && have < KSF_MAX; have++) {
+        farm[have] = proc_alloc();
+        if (!farm[have]) break;
+        farm[have]->state = PROC_STATE_ALIVE;
+        farm[have]->reaped_kstack_peak = 64;
+        farm[have]->reaped_kstack_tid = 1;
+        proc_test_link(farm[have]);
+    }
+
+    int sized = 0, bad = 0, unsaid = 0, both = 0;
+    for (size_t cap = 1; have == want && want > 0 && cap <= sizeof buf; cap += (cap < 400 ? 1 : 97)) {
+        got = devctl_format_kstack_budget_for_test(buf, cap, enough);
+        if (got == 0) continue;                  // no room for the header and the table's end
+        sized++;
+        ksw_shape_of(buf, got, &sh);
+        if (sh.bad) { bad++; continue; }
+        if (!sh.trunc) unsaid++;
+        if (sh.cut && sh.trunc) both++;
+    }
+
+    for (int i = 0; i < have; i++) {
+        proc_test_unlink(farm[i]);
+        farm[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(farm[i]);
+    }
+
+    got = enough ? devctl_format_kstack_budget_for_test(buf, sizeof buf, enough) : 0;
+    ksw_shape_of(buf, got, &sh);
+    bool control_ok = got > 0 && !sh.bad && !sh.trunc;
+
+    TEST_ASSERT(zero_says, "a kstack walk with no budget shows no row and says its peak is a lower bound");
+    TEST_ASSERT(enough != 0, "the kstack scan budget covers the suite's own system (raise KSTACK_SCAN_BUDGET_WORDS if not)");
+    TEST_ASSERT(want <= KSF_MAX && have == want, "proc_alloc for a farm one visit longer than the budget pays for");
+    TEST_ASSERT(sized > 1, "some sizes fit the kstack header and the table's end");
+    TEST_EXPECT_EQ(bad, 0, "every size of a kstack table out of budget ends on its peak line, the budget line before it");
+    TEST_EXPECT_EQ(unsaid, 0, "a kstack walk over more Procs than its budget pays for says its peak is a lower bound, at every size");
+    TEST_ASSERT(both > 0, "some size is both cut and out of budget, and both lines fit");
+    TEST_ASSERT(control_ok, "without the farm the same budget scans the system whole");
+}
+
 void test_devctl_read_sched_format(void) {
     struct Spoor *c = open_ctl_leaf("sched");
     TEST_ASSERT(c != NULL, "open /ctl/sched");
@@ -577,7 +827,7 @@ void test_devctl_read_9p_sessions_format(void) {
         // One row is live, so a buffer that holds the summary and not a row cuts,
         // and one that does not hold the summary is the cut line alone.
         {
-            static const char cut[] = "(cut: more rows than one read holds)\n";
+            static const char cut[] = "(cut: more rows than the table holds)\n";
             char small[192];
             size_t s = devctl_format_9p_sessions_for_test(&r, small, sizeof small);
             TEST_ASSERT(s <= sizeof small && contains(small, s, "admission count="), "a short read keeps the summary");
@@ -960,28 +1210,365 @@ void test_devctl_counters_gated(void) {
     TEST_ASSERT(!devctl_system_counters_readable(NULL), "no reader does not");
 }
 
-// A /ctl/procs row is committed whole or not at all. At every buffer size the
-// output is the header and whole rows of nine columns: a row cut mid-number
-// would hand ps and prowl a plausible smaller figure.
-void test_devctl_procs_rows_whole(void) {
-    static char buf[1024];
-    const struct Proc *self = current_thread()->proc;
-    size_t full = devctl_format_procs_for_test(self, buf, sizeof buf);
-    TEST_ASSERT(full > 0 && buf[full - 1] == '\n', "procs formats into 1 KiB");
-    int cut = 0, short_rows = 0, sized = 0;
-    for (size_t cap = 1; cap <= full; cap++) {
-        size_t got = devctl_format_procs_for_test(self, buf, cap);
-        if (got == 0) continue;                  // the header alone does not fit
-        sized++;
-        if (buf[got - 1] != '\n') { cut++; continue; }
-        size_t ls = got - 1;
-        while (ls > 0 && buf[ls - 1] != '\n') ls--;
-        int ntok = 0;
-        for (size_t i = ls; i < got - 1; i++)
-            if (buf[i] != ' ' && (i == ls || buf[i - 1] == ' ')) ntok++;
-        if (ntok != 9) short_rows++;
+// The shape of one /ctl/procs render: its rows' pids, whether it ends with the
+// cut line, and whether every line of it is whole. The shape, not the bytes:
+// CPU_NS moves between two renders of the same table.
+#define PRW_PIDS 32
+struct prw_shape {
+    int  rows;
+    int  pids[PRW_PIDS];
+    bool cut;
+    bool torn;        // does not end at a line end
+    bool short_row;   // a row without nine columns
+};
+
+static void prw_shape_of(const char *buf, size_t got, struct prw_shape *o) {
+    static const char cutline[] =
+        "(cut: more processes than the table holds; /proc lists them all)\n";
+    const size_t cl = sizeof cutline - 1;
+    o->rows = 0;
+    o->torn = false;
+    o->short_row = false;
+    o->cut = got >= cl;
+    for (size_t i = 0; o->cut && i < cl; i++)
+        if (buf[got - cl + i] != cutline[i]) o->cut = false;
+    size_t body = o->cut ? got - cl : got;
+    if (body == 0 || buf[body - 1] != '\n') { o->torn = true; return; }
+    size_t ls = 0;
+    bool header = true;
+    for (size_t i = 0; i < body; i++) {
+        if (buf[i] != '\n') continue;
+        if (!header) {
+            int ntok = 0, pid = 0;
+            for (size_t k = ls; k < i; k++)
+                if (buf[k] != ' ' && (k == ls || buf[k - 1] == ' ')) ntok++;
+            if (ntok != 9) o->short_row = true;
+            for (size_t k = ls; k < i && buf[k] >= '0' && buf[k] <= '9'; k++)
+                pid = pid * 10 + (buf[k] - '0');
+            if (o->rows < PRW_PIDS) o->pids[o->rows] = pid;
+            o->rows++;
+        }
+        header = false;
+        ls = i + 1;
     }
+}
+
+// A /ctl/procs row is committed whole or not at all, and a table that does not
+// hold every row says so. At every buffer size the output is the header, the
+// whole table's first rows, each of nine columns, and -- exactly when a row is
+// missing -- the cut line last: a row cut mid-number would hand a parser a
+// plausible smaller figure, and a table short without a sign reads as "no
+// other Proc".
+void test_devctl_procs_rows_whole(void) {
+    static char buf[2048];
+    static char whole[2048];
+    const struct Proc *self = current_thread()->proc;
+
+    // Two rows of the test's own beside kproc's: with three rows some buffer
+    // size holds a row and the cut line while a row is still owed, whatever
+    // else is alive.
+    struct Proc *own[2] = { proc_alloc(), proc_alloc() };
+    TEST_ASSERT(own[0] != NULL && own[1] != NULL, "proc_alloc for the table's own rows");
+    for (int i = 0; i < 2; i++) {
+        own[i]->state = PROC_STATE_ALIVE;
+        proc_test_link(own[i]);
+    }
+
+    struct prw_shape ref, sh;
+    size_t full = devctl_format_procs_for_test(self, whole, sizeof whole);
+    prw_shape_of(whole, full, &ref);
+    bool ref_ok = full > 0 && !ref.torn && !ref.short_row && !ref.cut && ref.rows >= 3;
+
+    int torn = 0, short_rows = 0, silent = 0, lying = 0, not_prefix = 0;
+    int sized = 0, cuts_with_rows = 0;
+    for (size_t cap = 1; ref_ok && cap <= full; cap++) {
+        size_t got = devctl_format_procs_for_test(self, buf, cap);
+        if (got == 0) continue;                  // no room for the header and the cut line
+        sized++;
+        prw_shape_of(buf, got, &sh);
+        if (sh.torn) { torn++; continue; }
+        if (sh.short_row) short_rows++;
+        if (sh.rows > ref.rows) { not_prefix++; continue; }
+        for (int i = 0; i < sh.rows && i < PRW_PIDS; i++)
+            if (sh.pids[i] != ref.pids[i]) { not_prefix++; break; }
+        if (!sh.cut && sh.rows != ref.rows) silent++;
+        if (sh.cut && sh.rows == ref.rows) lying++;
+        if (sh.cut && sh.rows > 0) cuts_with_rows++;
+    }
+    size_t again = devctl_format_procs_for_test(self, buf, sizeof buf);
+    prw_shape_of(buf, again, &sh);
+
+    for (int i = 0; i < 2; i++) {
+        proc_test_unlink(own[i]);
+        own[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(own[i]);
+    }
+
+    TEST_ASSERT(ref_ok, "the whole table, three rows or more, fits 2 KiB uncut (enlarge the buffers if not)");
     TEST_ASSERT(sized > 1, "some sizes fit the header and more");
-    TEST_EXPECT_EQ(cut, 0, "no buffer size leaves a row cut mid-field");
-    TEST_EXPECT_EQ(short_rows, 0, "every last line carries nine columns");
+    TEST_EXPECT_EQ(torn, 0, "no buffer size leaves a row cut mid-field");
+    TEST_EXPECT_EQ(short_rows, 0, "every row carries nine columns");
+    TEST_EXPECT_EQ(not_prefix, 0, "the rows of a cut table are the whole table's first rows");
+    TEST_EXPECT_EQ(silent, 0, "a table short of a row ends with the cut line");
+    TEST_EXPECT_EQ(lying, 0, "a table with every row carries no cut line");
+    TEST_ASSERT(cuts_with_rows > 0, "some size holds rows and the cut line");
+    TEST_ASSERT(again > 0 && !sh.cut && !sh.torn && sh.rows == ref.rows,
+                "the whole table again, at full size, is whole and uncut");
+}
+
+// Whether a row of a /ctl/procs render starts with `pid`.
+static bool prw_has_pid(const char *buf, size_t got, int pid) {
+    size_t ls = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (buf[i] != '\n') continue;
+        int v = 0;
+        size_t k = ls;
+        while (k < i && buf[k] >= '0' && buf[k] <= '9') v = v * 10 + (buf[k++] - '0');
+        if (k > ls && v == pid) return true;
+        ls = i + 1;
+    }
+    return false;
+}
+
+// Read the open file `c` from `got` to end of file in `piece`-byte reads.
+// Returns the total length read, or -1 on an error or a table past `cap`.
+static long prw_read_rest(struct Spoor *c, char *out, size_t cap, size_t got, long piece) {
+    for (;;) {
+        if (got + (size_t)piece > cap) return -1;
+        long r = devctl.read(c, out + got, piece, (s64)got);
+        if (r < 0) return -1;
+        if (r == 0) return (long)got;
+        got += (size_t)r;
+    }
+}
+
+// The race leg's second reader: a Proc joins, then a read of the same open file
+// at offset 0 arrives while the first read's rendering waits to be published.
+struct psnap_race {
+    struct Spoor *c;
+    struct Proc  *join;
+    char         *out;
+    long          got;
+    bool          linked;
+};
+static void psnap_race_read(void *arg) {
+    struct psnap_race *r = arg;
+    proc_test_link(r->join);
+    r->linked = true;
+    r->got = devctl.read(r->c, r->out, 4096, 0);
+}
+
+// /ctl/procs is rendered once per open file (vote 108). The first read keeps
+// the rendering, a whole read too, and its next read is end of file. A reader
+// taking 16 bytes at a time reads the table a whole read had just shown, even
+// when a Proc joins between its first piece and the rest -- the Proc a fresh
+// open does show, so the join happened. A second read of the same open file
+// arriving at offset 0 before the first publishes is served the first
+// published table, and the loser's copy is freed. A walk clone carries no
+// snapshot, and the clone opened from a read-into file (a mount crossing does
+// that) starts at offset 0 and reads its own whole table. The last close frees
+// the snapshot's page; one-byte reads read a whole table. The table can change
+// between the reference read and the pieced one (a Proc reaped), so the pieced
+// read is taken again until it matches, within four tries.
+void test_devctl_procs_snapshot(void) {
+    static char whole[4096];   // devctl's own cap: a larger buffer reads no more
+    static char pieced[4096 + 16];
+    static char fresh[4096];
+    static char ones[4096 + 1];
+    static char outer[4096], nested[4096];
+
+    struct Proc *own[3] = { proc_alloc(), proc_alloc(), proc_alloc() };
+    TEST_ASSERT(own[0] != NULL && own[1] != NULL && own[2] != NULL,
+                "proc_alloc for the table's own rows");
+    for (int i = 0; i < 3; i++) own[i]->state = PROC_STATE_ALIVE;
+    for (int i = 0; i < 2; i++) proc_test_link(own[i]);
+    const u64 held0 = devctl_procs_snaps_held_for_test();
+
+    struct prw_shape ref = { 0 }, sh = { 0 };
+    long full = -1, w_next = -1, got = -1, fl = -1;
+    bool w_kept = false, same = false, fresh_joined = false, pieced_joined = true;
+    u64 held_open = 0;
+    struct Spoor *p = NULL;
+    for (int attempt = 0; attempt < 4 && !same; attempt++) {
+        struct Spoor *w = open_ctl_leaf("procs");
+        if (!w) break;
+        full = devctl.read(w, whole, (long)sizeof whole, 0);
+        w_kept = w->aux != NULL;
+        w_next = devctl.read(w, fresh, (long)sizeof fresh, full > 0 ? full : 1);
+        spoor_clunk(w);
+        if (full <= 16) break;
+        prw_shape_of(whole, (size_t)full, &ref);
+
+        if (p) spoor_clunk(p);
+        p = open_ctl_leaf("procs");
+        if (!p) break;
+        long first = devctl.read(p, pieced, 16, 0);
+        proc_test_link(own[2]);
+        got = first == 16 ? prw_read_rest(p, pieced, sizeof pieced, 16, 16) : -1;
+        held_open = devctl_procs_snaps_held_for_test();
+        struct Spoor *f = open_ctl_leaf("procs");
+        fl = f ? devctl.read(f, fresh, (long)sizeof fresh, 0) : -1;
+        if (f) spoor_clunk(f);
+        proc_test_unlink(own[2]);
+        if (got <= 0 || fl <= 0) break;
+
+        prw_shape_of(pieced, (size_t)got, &sh);
+        fresh_joined = prw_has_pid(fresh, (size_t)fl, own[2]->pid);
+        pieced_joined = prw_has_pid(pieced, (size_t)got, own[2]->pid);
+        same = got == full && !sh.torn && !sh.short_row && sh.rows == ref.rows;
+        for (int i = 0; same && i < ref.rows && i < PRW_PIDS; i++)
+            if (sh.pids[i] != ref.pids[i]) same = false;
+    }
+
+    // The clones, both walk shapes: devctl's own spoor_clone, and the caller's
+    // pre-clone. A clone found carrying the snapshot is detached before its
+    // close, so the failure is the assertion and not a page freed twice.
+    bool clone_bare = false, nc_bare = false, opened_rewound = false;
+    u64 held_opened = 0;
+    long opened_len = -1;
+    struct prw_shape osh2 = { 0 };
+    if (p) {
+        struct Walkqid *wq = devctl.walk(p, NULL, (const char **)0, 0);
+        if (wq) {
+            struct Spoor *cl = wq->spoor;
+            clone_bare = cl != NULL && cl != p && cl->aux == NULL;
+            if (cl && cl != p) {
+                cl->aux = NULL;
+                spoor_clunk(cl);
+            }
+            walkqid_free(wq);
+        }
+        struct Spoor *nc = spoor_clone(p);
+        if (nc) {
+            wq = devctl.walk(p, nc, (const char **)0, 0);
+            nc_bare = wq != NULL && wq->spoor == nc && nc->aux == NULL;
+            if (wq) walkqid_free(wq);
+            nc->aux = NULL;
+            spoor_clunk(nc);
+        }
+
+        // A mount crossing clones the mounted Spoor and opens the clone; p's
+        // cursor stands where its reader left it.
+        p->offset = got > 0 ? got : 16;
+        struct Spoor *mc = spoor_clone(p);
+        if (mc) {
+            wq = devctl.walk(p, mc, (const char **)0, 0);
+            if (wq) walkqid_free(wq);
+            mc->aux = NULL;
+            if (devctl.open(mc, 0)) {
+                opened_rewound = mc->offset == 0;
+                opened_len = devctl.read(mc, fresh, (long)sizeof fresh, mc->offset);
+                if (opened_len > 0) prw_shape_of(fresh, (size_t)opened_len, &osh2);
+                held_opened = devctl_procs_snaps_held_for_test();
+            }
+            spoor_clunk(mc);
+        }
+    }
+    long past = p && got > 0 ? devctl.read(p, fresh, (long)sizeof fresh, got) : -1;
+    bool page_freed = false;
+    if (p) {
+        if (p->aux) kfree_large_watch_arm_for_test(p->aux);
+        spoor_clunk(p);
+        page_freed = kfree_large_watch_fired_for_test();
+        kfree_large_watch_disarm_for_test();
+    }
+
+    // The race: the second reader publishes first, so the first read must serve
+    // its table (the joined Proc in it) and free its own copy.
+    struct psnap_race race = { .c = open_ctl_leaf("procs"), .join = own[2], .out = nested,
+                               .got = -1, .linked = false };
+    long out_len = -1;
+    u64 held_race = 0;
+    if (race.c) {
+        devctl_procs_snap_race_for_test(psnap_race_read, &race);
+        out_len = devctl.read(race.c, outer, (long)sizeof outer, 0);
+        devctl_procs_snap_race_for_test(NULL, NULL);
+        held_race = devctl_procs_snaps_held_for_test();
+        spoor_clunk(race.c);
+        if (race.linked) proc_test_unlink(own[2]);
+    }
+    bool race_same = out_len > 0 && out_len == race.got;
+    for (long i = 0; race_same && i < out_len; i++)
+        if (outer[i] != nested[i]) race_same = false;
+    bool race_joined = race.got > 0 && prw_has_pid(nested, (size_t)race.got, own[2]->pid);
+
+    struct Spoor *o = open_ctl_leaf("procs");
+    long one = o ? devctl.read(o, ones, 1, 0) : -1;
+    long onelen = one == 1 ? prw_read_rest(o, ones, sizeof ones, 1, 1) : -1;
+    struct prw_shape osh = { 0 };
+    if (onelen > 0) prw_shape_of(ones, (size_t)onelen, &osh);
+    if (o) spoor_clunk(o);
+    const u64 held_end = devctl_procs_snaps_held_for_test();
+
+    for (int i = 0; i < 2; i++) proc_test_unlink(own[i]);
+    for (int i = 0; i < 3; i++) {
+        own[i]->state = PROC_STATE_ZOMBIE;
+        proc_free(own[i]);
+    }
+
+    TEST_ASSERT(full > 16 && !ref.torn && !ref.cut && ref.rows >= 3,
+                "the whole table, three rows or more, in one read");
+    TEST_ASSERT(w_kept, "a whole read keeps its rendering too");
+    TEST_EXPECT_EQ(w_next, 0, "after it, the next read is end of file");
+    TEST_ASSERT(got > 0, "16-byte reads reach end of file");
+    TEST_ASSERT(fresh_joined, "a fresh open shows the Proc that joined between the pieces");
+    TEST_ASSERT(!pieced_joined, "the pieced table does not");
+    TEST_ASSERT(same, "the pieced table is the whole table, row for row, within four tries");
+    TEST_EXPECT_EQ(held_open, held0 + 1, "the pieced read holds one snapshot");
+    TEST_ASSERT(clone_bare, "a walk clone of the open file carries no snapshot");
+    TEST_ASSERT(nc_bare, "nor does the caller's pre-clone after the walk");
+    TEST_ASSERT(opened_rewound, "a clone opened from a read-into file starts at offset 0");
+    TEST_ASSERT(opened_len > 0 && !osh2.torn && !osh2.short_row && osh2.rows >= 3,
+                "and reads a whole table of its own");
+    TEST_EXPECT_EQ(held_opened, held0 + 2, "the opened clone holds its own snapshot");
+    TEST_EXPECT_EQ(past, 0, "the pieced read's end is end of file");
+    TEST_ASSERT(page_freed, "the open file's last close frees its snapshot's page");
+    TEST_ASSERT(race_joined, "the racing read rendered the joined Proc");
+    TEST_ASSERT(race_same, "the read that lost the race serves the table published first");
+    TEST_EXPECT_EQ(held_race, held0 + 1, "the race leaves one snapshot: the loser's copy is freed");
+    TEST_EXPECT_EQ(one, 1, "a one-byte read is answered");
+    TEST_ASSERT(one == 1 && ones[0] == 'P', "with the header's first byte");
+    TEST_ASSERT(onelen > 0 && !osh.torn && !osh.short_row && osh.rows >= 3,
+                "one-byte reads read a whole table");
+    TEST_EXPECT_EQ(held_end, held0, "every last close freed its snapshot");
+}
+
+// /ctl backs no file mapping (Dev.may_back_mapping unset). A mapping is kept in the
+// Image cache with a Spoor reference, so an open /ctl/procs mapped once would
+// keep its snapshot page past every close. Measure first, assert last: a broken
+// gate leaves a mapping to drain before any assert returns.
+void test_devctl_backs_no_mapping(void) {
+    u64 held0 = devctl_procs_snaps_held_for_test();
+    struct Spoor *f = open_ctl_leaf("procs");
+    TEST_ASSERT(f != NULL, "open /ctl/procs");
+    char b[1];
+    long got = devctl.read(f, b, 1, 0);
+    u64 held_read = devctl_procs_snaps_held_for_test();
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->territory = territory_alloc();
+    spoor_ref(f); hidx_t fd  = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);
+    spoor_ref(f); hidx_t fdx = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);
+    s64 m = 0, mf = 0;
+    if (p->territory && fd >= 0 && fdx >= 0) {
+        m  = sys_mmap_file_for_proc(p, (u64)fd, PAGE_SIZE, false, 0);
+        mf = sys_mmap_fixed_file_for_proc(p, EXEC_USER_BURROW_BASE + 0x200000ull,
+                                          (u64)fdx, PAGE_SIZE, (u32)VIV_PROT_READ, 0);
+    }
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    spoor_clunk(f);
+    u64 held_end = devctl_procs_snaps_held_for_test();
+    // A broken gate leaves an idle Image entry holding the file; measured above,
+    // dropped here so the image suite's empty-cache premise is not its casualty.
+    if (m > 0 || mf > 0) (void)image_cache_evict_idle_for_test();
+
+    TEST_ASSERT(got == 1 && b[0] == 'P', "premise: the first read took a snapshot");
+    TEST_EXPECT_EQ(held_read, held0 + 1, "premise: the open file holds its snapshot");
+    TEST_ASSERT(fd >= 0 && fdx >= 0, "handle_alloc");
+    TEST_EXPECT_EQ(m, -(s64)T_E_NODEV, "a map of /ctl/procs: ENODEV");
+    TEST_EXPECT_EQ(mf, -(s64)T_E_NODEV, "its MAP_FIXED twin: ENODEV");
+    TEST_EXPECT_EQ(held_end, held0, "no mapping kept the snapshot past the close");
 }

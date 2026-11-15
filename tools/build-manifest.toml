@@ -58,8 +58,7 @@ feeds      = "the ambush debugger (staged into the /goroot bake)"
 forageable = "clone"
 
 [fork.stratum]
-path       = "~/projects/stratum/v2"
-clone_dest = "~/projects/stratum"
+path       = "~/projects/stratum"
 env        = "STRATUM_SRC"
 probe      = "CMakeLists.txt"
 repo       = "https://github.com/apology-is-policy/stratum.git"

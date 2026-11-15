@@ -3,7 +3,7 @@ id: sub-kernel-image
 type: sub
 parent: moc-kernel-execution
 title: "The Image cache — one copy of a binary's text, and a proof that eviction cannot race a mapper"
-code: [kernel/image.c, kernel/include/thylacine/image.h]
+code: [kernel/image.c, kernel/include/thylacine/image.h, kernel/test/test_image.c]
 audit: hard
 guarded-by: [inv-i36, inv-i7, inv-i32]
 validated-by: [prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-11-13
 ---
 ## Purpose
 
@@ -43,6 +43,30 @@ consumed nothing.
 That asymmetry is the part a caller gets wrong. The function reads like a
 lookup and behaves like a transfer.
 
+**Only versioned content is cached (operator vote 114, round 31 F1).** Before
+the search, the lookup asks the Spoor's Dev `content_versioned`. A file that
+answers no -- every file of a dev9p session not latched cacheable, netd's
+among them -- is created un-registered, as a bypass is: its Burrow holds the
+Spoor exactly as long as a mapping does and never answers a hit, so whatever
+the server keeps for that open (a connection slot) goes with the last
+mapping, no later mapper is served its bytes, and none inherits its size.
+A private image is never registered, so it never answers a hit whatever the
+order; asking before the search also keeps an unversioned open from taking a
+versioned entry's Burrow (round 32 F4 corrected the reason given here).
+
+**A private image's pages are its payer's (operator vote 118, 2026-11-13).**
+`image_lookup_or_create` takes the address space the caller is about to map
+the image into and its I-32 verdict (`payer`, `payer_exempt`). The private arm
+hands both to `burrow_payer_set` before the Burrow is returned, so the
+image is born with a payer: the mapping cores pass the mapper's space, exec the
+space it is building. So does the BYPASS arm (audit round 34 F2): an image the
+full cache cannot register is never served to another mapper and never
+idle-reclaimable, a private image in all but how it got there. A cached image ignores both; its pages stay the system
+cache's, shared and idle-reclaimable (below). A NULL payer is legal and leaves
+the record lapsed, so the first faulter that mints pays; the unit tests that
+never fault pass it. The record, the mint charge and the refund are
+[[sub-kernel-burrow]]'s; the fills that charge are [[sub-kernel-fault]]'s.
+
 The key is seven fields: device class, device number, qid path, **qid version**,
 file offset, page-rounded size, and executability. Three of those carry
 arguments worth stating.
@@ -65,7 +89,13 @@ can declare two `PT_LOAD`s over an identical file window with different X bits.
 Without that field they would share one Burrow mapped at two protections, and
 the fault handler's I-cache sync is gated on whether the fill is executable — so
 a non-executable fill could leave an executable mapping of the same pages
-unsynced. Splitting the key makes a dual-protection Burrow unconstructible. A
+unsynced. Each Burrow takes the key's executability as its **exec class**
+(`file_exec`): the fault handler syncs every fill of an exec-class Burrow,
+whichever mapping faulted, and `vma_args_ok` refuses an executable mapping of
+any other. The class, not the key alone, is what holds: a protect can cut an
+RX mapping of one Burrow down to R, so a dual-protection Burrow IS
+constructible, and a fill through the R piece is executed by the RX piece
+(audit round 32 F2; the key once claimed to make it unconstructible). A
 legitimate binary never notices: the same segment always carries the same bit.
 
 ## Mechanism
@@ -304,7 +334,11 @@ pool's reserve under pressure and charged its pages to their holders
 
 `image.*` drives it in isolation with synthetic Spoors: hit and miss, distinct
 files, the version discriminator, distinct offsets within one file, the
-executability split, table exhaustion, and the zero-length reject. The idle-evict
+executability split, table exhaustion, and the zero-length reject.
+`image.private_unless_versioned` holds two mappings of one identity off an
+unversioned Dev apart, each clunking its Spoor at its last unref and keeping
+its own size, with the versioned fake caching the same identity as the
+control. The idle-evict
 helper exists both for test isolation and as a real regression on the
 detach-under-lock / unref-outside lifetime.
 `demand_page.idle_image_reclaimed_under_pressure` drives the reclaim end to

@@ -159,8 +159,11 @@ error row into a first-class kind with its own colour and realm column.
 
 **Since LR-1 (2026-09-28) the mount list outranks that inference** (the
 operator's `la` vote, HAUL-DESIGN 4.8). `nsmount` parses the kernel's
-`/proc/<pid>/ns` text: `parse_line` gives each line's point, source and
-suffixes (` noexec`, ` pheno-linux`, ` covered`, ` remote`, and any unknown
+`/proc/<pid>/ns` text: `parse_line` gives each line's point and source,
+unescaped (`unescape`: a backslash and three octal digits below `\200` is that
+character -- the kernel writes `\040 \011 \012 \134` for space, tab, newline
+and backslash, operator vote 97 -- and anything else stays as written; a name
+with no backslash is borrowed), and its suffixes (` noexec`, ` pheno-linux`, ` covered`, ` remote`, and any unknown
 one as written), and `MountRealms::from_text` keeps each mount point's name
 and whether ANY of its member lines is remote, skipping covered entries,
 which nobody mounted. `entry_realm` / `source_realm` give the REALM `ns`
@@ -180,12 +183,14 @@ deliberate:
   table, which is not reported as cut, and every entry falls back to the
   inference, as before LR-1.
 
-Names are not quoted in the kernel's text, so a name with whitespace splits
-into the wrong fields; such a line lends no realm and nothing panics (queued
-in OPEN-BUGS as a format limit). The host tests cover every suffix, the
-covered skip, the cleaned-name compare, a broken list, the cut list and the
-space-split name; sabotaging the covered skip and the cut detection each
-turned them red.
+The kernel writes space, tab, newline and backslash in a name as octal escapes
+(vote 97), so a name with whitespace parses whole and lends its realm. The
+callers decode the listing with `from_utf8_lossy` and split it on `\n`, so a
+name that is not UTF-8 spoils only its own line and a name ending in `\r` keeps
+it. The host tests cover every suffix, the covered skip, the cleaned-name
+compare, a broken list, the cut list, the four escapes and what is not one,
+and an escaped name's realm; sabotaging the covered skip and the cut detection
+each turned them red.
 
 **`netpump` encodes one non-obvious fact about the network daemon**: its data
 write is non-blocking, so a full send window returns a zero-count write rather

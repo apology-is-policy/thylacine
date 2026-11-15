@@ -2317,7 +2317,9 @@ returns a kernel-chosen vaddr. The admitted domain:
 
 `MAP_FIXED` and `MAP_FIXED_NOREPLACE` decline: there they are a requirement, not
 a hint, and the target chooses the address. `MAP_SHARED` declines — no shared
-anonymous memory exists to map.
+anonymous memory exists to map. [SUPERSEDED 2026-11-14 by operator vote 119:
+shared anonymous memory exists and is served — see "Shared anonymous memory"
+at the end of this row.]
 
 **The protection question, decided explicitly.** Thylacine anonymous memory is
 always RW/XN, and **there is no prot-mutation syscall at all** — that is an I-12
@@ -2435,6 +2437,90 @@ admit `PROT_EXEC`, fails **exactly two** unit tests and nothing else. But
 breaking only the *shell* — leaving the table intact — keeps the unit suite at a
 full **1239/1239 PASS** while the in-guest leg fails at `L16`. The pure tests
 prove the decision; the guest legs prove the plumbing.
+
+**`/dev/zero` is anonymous memory (operator vote 115, 2026-11-13).** Linux maps
+it so (`mmap_zero`), and a program that predates `MAP_ANONYMOUS` still asks for
+memory that way. The shell turns a readable `/dev/zero` descriptor into the
+anonymous call before any arm judges it: flags gain `MAP_ANONYMOUS`, `fd`
+becomes -1, the offset 0. It is then served exactly where `MAP_ANONYMOUS` is and
+declined where that is (`PROT_EXEC`). [Until 2026-11-14 `MAP_SHARED` declined
+too, the phenotype having no shared anonymous memory: operator vote 117 kept the
+decline and queued shared anonymous memory as its own chunk, and vote 119 built
+it — a shared `/dev/zero` map is now served under one rule of its own, which
+"Shared anonymous memory" below states.] A
+write-only `/dev/zero` answers `EACCES` and an `O_PATH` one `EBADF`, in every
+shape, as Linux does. A read-only private map of any other device that backs no
+mapping answers `ENODEV`, which matches Linux for `/dev/null`, `/dev/urandom`,
+procfs and terminals; a request no arm admits at all (a writable private file
+map without `MAP_FIXED`, or any `MAP_SHARED` one) answers `ENOSYS` for a
+readable descriptor before any device is asked, where Linux would answer
+`ENODEV` for such a device.
+
+The shell judges an `mmap` in Linux's order (arm64 `sys_mmap`, then
+`ksys_mmap_pgoff`, then `do_mmap`, read from v6.12). An unaligned offset is
+`EINVAL` before anything else. An anonymous call ignores its descriptor and its
+offset, as Linux does (until 2026-11-13 the shell demanded -1 and 0 and answered
+`ENOSYS` otherwise). Any other call looks its descriptor up once -- `EBADF` for
+one naming nothing or opened `O_PATH`, the two `fget` refuses -- and holds that
+file through every arm, so the `/dev/zero` decision is made about the file that
+gets mapped (the shell used to look twice, and a sibling's `dup2` between the
+looks could turn a file map into `ENODEV`). A zero length is `EINVAL` next, then
+the arm's window (`ENOMEM` past the length cap or outside the burrow window,
+`EINVAL` for a range that wraps), then the access mode: `EACCES` for a
+descriptor not open for reading, which Linux asks at `do_mmap`'s `FMODE_READ`,
+after its window. A call no arm serves is judged on its map type first: one
+that is not shared, shared-validate or private is `EINVAL` whatever the
+descriptor, as `do_mmap`'s switch is, and only then the access mode (round 34
+F5). Past that the arms keep their own gates in Linux's relative
+order: `EPERM` for an executable map off a noexec mount, then `ENODEV` for a
+device that backs no mapping. Four divergences remain: a `MAP_SHARED_VALIDATE` call carrying a flag Linux does not know is declined (`ENOSYS`, or `EACCES` for an unreadable descriptor) where Linux answers `EOPNOTSUPP`; a range that wraps is `EINVAL` where Linux says `EOVERFLOW`; a
+write-only descriptor in a shape no arm serves, or a write-only `/dev/zero`,
+has no arm window to judge first, so a length too large to map answers `EACCES`
+there where Linux answers `ENOMEM`; and a `MAP_FIXED` request outside the burrow
+window is declined by the arm's domain before its window. The native door,
+`SYS_BURROW_MAP_FILE`, keeps its own order -- the length and window before the
+descriptor -- with the same codes (operator vote 116).
+
+**Shared anonymous memory (operator votes 117 + 119, 2026-11-14).** Linux gives
+`MAP_SHARED|MAP_ANONYMOUS`, and a shared map of `/dev/zero`, one zero-filled
+object that a fork's child shares rather than copies (`shmem_zero_setup`, a
+shmem file the size of the mapping, its offset ignored): a write by either
+process is the other's. A program uses it to talk to its children without a
+file -- a pre-fork server's scoreboard, a test harness's shared counter. The
+phenotype serves it with a `BURROW_TYPE_ANON_SHARED` Burrow, demand-zero like
+every anonymous mapping, which `fork` maps into the child as it is (ARCH 28
+I-44: the one writable share across fork). Vote 119 decided who pays: the
+creating address space pays every page that any sharer's fault creates, its
+own leaves free and every other sharer's charged one page each; when the
+creator dies the next process to create a page takes the residency over
+(ARCH 28 I-32; `specs/payer.tla`). The admitted shapes, judged in Linux's order
+(v6.12 `do_mmap` and `mmap_zero`):
+
+| call | answer |
+|---|---|
+| `MAP_SHARED\|MAP_ANONYMOUS`, any subset of `PROT_READ\|PROT_WRITE` | a shared mapping at the requested prot under an RW ceiling (the private arm's prot rule). The descriptor and the offset are ignored, as Linux ignores them; the length rules are the private arm's (`EINVAL` for 0, `ENOMEM` past the cap) |
+| the same with `MAP_FIXED` | the fixed overlay, with the private fixed arm's window and rules, minting a shared mapping |
+| an anonymous call whose map type is none of `MAP_SHARED`, `MAP_DROPPABLE` and `MAP_PRIVATE`, `MAP_SHARED_VALIDATE\|MAP_ANONYMOUS` among them | `EINVAL`: those three are the types Linux's anonymous switch knows (a length past the window is `ENOMEM` first, as `get_unmapped_area` answers ahead of the switch); until this chunk a typeless anonymous call was declined (`ENOSYS`) |
+| `MAP_DROPPABLE\|MAP_ANONYMOUS` (Linux 6.11: memory the kernel may drop under pressure) | declined (`ENOSYS`): Linux serves it on arm64; the phenotype has no droppable memory |
+| `MAP_SHARED` or `MAP_SHARED_VALIDATE` of `/dev/zero` open for writing | as the anonymous shared call |
+| the same, the descriptor not open for writing, `PROT_WRITE` asked | `EACCES` (do_mmap's `FMODE_WRITE` test) |
+| the same, the descriptor not open for writing, no `PROT_WRITE` | a PRIVATE anonymous mapping whose ceiling is READ: Linux clears `VM_MAYWRITE` and `VM_SHARED` for a descriptor not open for writing, so `mmap_zero` sets up a private mapping that `mprotect` can never make writable (`EACCES`) |
+| any `/dev/zero` call past the window | `ENOMEM`, ahead of the map type and the access-mode tests above, as `get_unmapped_area` answers ahead of `do_mmap`'s file switch |
+| `PROT_EXEC` in any of them | declined, as every anonymous executable map is (I-42) |
+| `MAP_SHARED` of any other file | declined, as before: a shared file mapping is write-back, and the phenotype has none |
+
+What the guest can then do with the mapping, each against Linux's answer:
+`munmap` trims and splits it as it does any mapping, and the pages stay while
+any mapping of the memory remains -- another process's or the unmapper's own
+remainder -- charged to the creator until the memory is freed (Linux's shmem
+keeps them the same way); `mprotect` works under the ceiling; `MADV_DONTNEED`
+over a shared range drops the process's own view and keeps the contents (0 --
+the next touch reads what is there, as Linux's zap does); `MADV_FREE` there is
+`EINVAL`, as Linux's is for any mapping that is not private anonymous; `fork`
+shares it; `execve` drops it. Not served: `mremap` (no row at all, private or
+shared) and `msync` (no row: a no-op on Linux for shared anonymous memory,
+`ENOSYS` here, as for every mapping). The native `SYS_BURROW_DECOMMIT` refuses a
+shared range, since its contract hands back zeroes.
 
 ### 6.22 Signals — the frame shape (V-6, design)
 
@@ -3552,7 +3638,9 @@ because `devproc.perm_enforced == false` means principal alignment alone scopes
   territory, *unreachable by the container* (the container speaks only 9P to
   it); both enumeration and per-pid existence answer only for pids in the
   container's process tree — membership by ppid-descent from the entrypoint
-  (the `/ctl/procs` PPID column). A pid outside the tree does not resolve, so
+  (the `ppid:` line of each native `/proc/<pid>/status`; one read of
+  `/ctl/procs` holds only the rows that fit it). A pid outside the tree does
+  not resolve, so
   the diorama cannot be a read oracle for the surface the native mounts
   withheld (the F6 close). Pids are **host-numbered** — consistent with what
   `getpid()` returns inside the container, which is what `busybox ps`

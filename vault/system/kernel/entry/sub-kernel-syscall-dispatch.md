@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-10
+updated: 2026-11-14
 ---
 ## Session registry factory
 
@@ -977,8 +977,20 @@ The kernel half is thin because the Dev vtable **always** took an explicit offse
 syscall-layer sugar. So `sys_read_for_proc` and `sys_write_for_proc` were
 refactored onto a shared inner (`spoor_read_common` / `spoor_write_common`)
 carrying a `positioned` flag: cleared, it reads `c->offset` and advances it after
-the transfer, byte-identical to the pre-existing bodies; set, it passes the
-caller's offset straight through and touches the cursor on no path.
+the transfer; set, it passes the caller's offset straight through and touches the
+cursor on no path. The read side's cursor is an acquire load and a release
+advance (`__atomic_add_fetch`, 2026-11-13): what a Dev published beside the cursor
+before its read returned, devctl's `/ctl/procs` snapshot in `Spoor.aux`, is seen
+by the next read at the advanced cursor on another CPU. As plain accesses, a
+second thread sharing the open file could see the advanced cursor and not the
+snapshot, and read end of file in the table's middle (audit round 29 F2). Two
+threads reading one open file at once still share one cursor, as on Plan 9;
+only the ordering is promised. The add keeps two reads from losing an advance,
+but the cursor's other writers stay plain (`spoor_write_on`, weft's fast paths,
+lseek, readdir's cookie), and a read and its advance are not one step: two
+readers can both read the bytes at one cursor. POSIX 2.9.7 asks read, write and
+lseek on a shared regular file to be atomic with respect to each other (Linux's
+`f_pos_lock`); that is owed, as its own item.
 
 Three positioned-specific gates guard the offset, and their ORDER is load-bearing:
 
@@ -1902,7 +1914,11 @@ The wrapper adds no syscall operation and is excluded from the production build.
 **`sys_burrow_map_file_for_proc(p, fd, offset, length, prot, flags, addr)`**
 is the native door onto the three cores the phenotype's file-backed `mmap`
 rows already used, so the vouching, the eager copy and the Image cache are each
-spelled once. It decides the native word and dispatches:
+spelled once. (The phenotype's row, `viv_mmap`, looks its descriptor up once in
+Linux's order, turns a readable `/dev/zero` into the anonymous call (vote 115)
+and hands the held Spoor to the cores' bodies; the native door does neither,
+since native code asks for anonymous memory directly, and keeps its
+length-first order.) It decides the native word and dispatches:
 
 - no `BURROW_MAP_FIXED` -> `sys_mmap_file_for_proc` (arm 1: a kernel-chosen
   window, R or R|X, through the Image cache);
@@ -1911,11 +1927,22 @@ spelled once. It decides the native word and dispatches:
 - FIXED with a file -> `sys_mmap_fixed_file_for_proc` (arm 2: R or R|X
   through the Image cache, RW as `mmap_eager_copy`'s private copy).
 
+Both Image-cache arms pass `image_lookup_or_create` the mapper's space and
+its I-32 verdict (vote 118): a private image's every minted page is charged
+to the space that created the mapping ([[sub-kernel-image]],
+[[sub-kernel-fault]]).
+
 The order is fixed and observable: the prot and flag masks, W|X (`-EACCES`),
 W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`
 without FIXED (`-EINVAL`), fd -1 without FIXED (`-EBADF`), W without FIXED
 (`-EACCES`), X or a nonzero offset on the anonymous window, a file map without
-R -- and only then the cores, which own the lookups, the window check
+R -- and only then the cores, which own the lookups (`sys_lookup_mapping_spoor`,
+Linux's relative descriptor order, after the cores' own length and window
+checks: one naming nothing or opened `O_PATH` is `-EBADF`, one
+not open for reading `-EACCES` -- until audit round 32 they answered `-EBADF`
+and `-EINVAL` for the last two; `vivarium.mmap_descriptor_errnos` drives both
+cores, with a readable descriptor reaching the `may_back_mapping` floor as the
+control), the window check
 (`mmap_fixed_window`: `[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP]`), the
 vouching (`exec_map_vouched`: a `may_back_exec` Dev AND a mount not marked
 `MNOEXEC`) and the replace (`burrow_map_fixed` -> `vma_replace_range_in`, the
@@ -2454,3 +2481,30 @@ the identity check the weft clunk already made (G-2 audit F1). Without it a
 sibling thread could swap its own lazy mapping in at the VA and have it
 removed, and with the merge the orphaned slots became an extinction
 ([[sub-kernel-burrow]], OPEN-BUGS 20:36Z).
+
+## Shared anonymous memory through the mmap row (2026-11-14, votes 117 + 119)
+
+`lazy_reserve_core(p, length, align, prot, ceiling, shared)` gained the mint's
+ceiling and a shared bit. A shared reservation never extends a neighbour (an
+extension serves the range from another Burrow, which would make private
+memory shared or shared memory private), and neither does one under a ceiling
+below RW; otherwise it mints `burrow_create_anon_shared(length, p->as,
+exempt)` -- the payer set BEFORE `burrow_map`, so `vma_payer_mark_fresh` flags
+the creator's mapping ([[sub-kernel-vma]]) -- or the private lazy Burrow, then
+sets the ceiling. The two existing callers pass `(VMA_PROT_RW, false)` and are
+unchanged. `sys_mmap_anon_core(p, length, prot, ceiling, shared)` is the
+phenotype's anonymous body over it (`prot` above the ceiling `-T_E_ACCES`, a
+zero length `-T_E_INVAL`, a length past `BURROW_RESERVE_MAX` `-T_E_NOMEM`), and
+`sys_mmap_fixed_anon_core(p, addr, length, prot, ceiling, shared)` is the
+`MAP_FIXED` overlay's, which `sys_mmap_fixed_anon_for_proc` (the native door's
+arm 3) wraps at `(VMA_PROT_RW, false)`. `sys_get_mapping_spoor` reports the
+descriptor's write right beside its read right, for `viv_mmap`'s `/dev/zero`
+rules, which answer a length past the window (`ENOMEM`) before any of them
+([[sub-kernel-vivarium]] has the order and the mapping of each case).
+
+The madvise row's release split in two: `advise_release_core(p, vaddr, length,
+shared_ok)` is the shape-checking body, `sys_burrow_decommit_core` its
+`shared_ok = false` form (`MADV_FREE`; the native 84 still flattens it to -1)
+and `sys_burrow_dontneed_core` its `shared_ok = true` form (`MADV_DONTNEED`),
+which over a shared mapping only uninstalls ([[sub-kernel-burrow]]). No
+syscall number, native word or Linux row was added.

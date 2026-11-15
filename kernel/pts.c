@@ -670,6 +670,10 @@ s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *
     struct pti_binding *wake = NULL, *b = NULL;
     struct pts_entry *e = NULL;
     u64 who = proc_stripes(p);
+    // The image's taint, not the word's alone (votes 120 + 122): the space's
+    // records and its share family's, read in O(1) and without as->lock. The
+    // lifecycle lock held across both keeps it current.
+    bool tainted = (op == PTY_INTERACTION_BIND) && proc_image_tainted_locked(p);
     spin_lock(&g_pts_lock);
     if (op == PTY_INTERACTION_BIND) {
         e = pts_lookup_locked(c->pts_id);
@@ -677,7 +681,7 @@ s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *
         if (!e || !observer) { result = -T_E_NOENT; goto done; }
         u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
         u32 seal = PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP;
-        if ((flags & seal) != seal || (flags & PROC_FLAG_DEBUG_TAINTED)) {
+        if ((flags & seal) != seal || tainted) {
             result = -T_E_ACCES; goto done;
         }
         if (e->interaction_disabled || g_pti_next_id > PTY_INTERACTION_ID_MAX) {

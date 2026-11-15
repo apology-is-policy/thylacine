@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-11-09
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -1015,7 +1015,9 @@ drops the queue lock before counting peers rather than nesting the other way).
 **The user-stack push happens under the queue lock**, and that is worth
 examining rather than accepting. Writing a user address can fault, and a fault
 can demand-page. The source justifies it as "the allocator is non-blocking" —
-true for anonymous and lazy-anonymous pages, which is what a stack is. It is
+true for anonymous and lazy-anonymous pages, which is what a stack is, and for
+shared anonymous ones (2026-11-14: an alternate stack may sit in `MAP_SHARED`
+memory), whose arm adds only the payer record's charge, a spinlock. It is
 *not* the reason a file-backed page cannot appear here: that reason is that
 file-backed regions are read-only, so a *write* never reaches the arm that
 sleeps. The stated justification and the real one differ, and the real one

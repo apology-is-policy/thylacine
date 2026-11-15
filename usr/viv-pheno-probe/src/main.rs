@@ -332,7 +332,7 @@ extern "C" fn viv_fork_in_handler(_signo: i32, _info: *const u8, _uc: *const u8)
         }
     }
 }
-fn fork_handler_addr() -> u64 { viv_fork_in_handler as usize as u64 }
+fn fork_handler_addr() -> u64 { viv_fork_in_handler as *const () as usize as u64 }
 fn fih_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const FIH_CHILD) } }
 fn fih_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const FIH_AM_CHILD) } }
 
@@ -381,7 +381,7 @@ extern "C" fn viv_mask_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
         }
     }
 }
-fn mask_handler_addr() -> u64 { viv_mask_handler as usize as u64 }
+fn mask_handler_addr() -> u64 { viv_mask_handler as *const () as usize as u64 }
 fn mh_set_mode(m: u64) { unsafe { core::ptr::write_volatile(&raw mut MH_MODE, m) } }
 fn mh_runs() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_RUNS) } }
 fn mh_mask_in() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_MASK_IN) } }
@@ -486,7 +486,7 @@ extern "C" fn viv_escape_handler(_signo: i32, _info: *const u8, _uc: *const u8) 
         // phase 1: count only; fall off the end -> restorer -> rt_sigreturn.
     }
 }
-fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
+fn esc_handler_addr() -> u64 { viv_escape_handler as *const () as usize as u64 }
 fn esc_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_FIRED) } }
 fn esc_phase() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_PHASE) } }
 
@@ -504,7 +504,7 @@ extern "C" fn viv_latch_fault_handler(_signo: i32, _info: *const u8, _uc: *const
         asm!("mov {t}, #0", "ldr {t}, [{t}]", t = out(reg) _, options(nostack));
     }
 }
-fn latch_fault_handler_addr() -> u64 { viv_latch_fault_handler as usize as u64 }
+fn latch_fault_handler_addr() -> u64 { viv_latch_fault_handler as *const () as usize as u64 }
 
 // L330's half: the same write and fault with SP_EL0 = 8, below what the tail
 // needs for a note frame, so it defers every note but kill there too.
@@ -537,8 +537,8 @@ extern "C" {
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
 
-fn handler_addr() -> u64 { viv_sig_handler as usize as u64 }
-fn restorer_addr() -> u64 { viv_restore_rt as usize as u64 }
+fn handler_addr() -> u64 { viv_sig_handler as *const () as usize as u64 }
+fn restorer_addr() -> u64 { viv_restore_rt as *const () as usize as u64 }
 fn sig_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_FIRED) } }
 fn sig_signo() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_SIGNO) } }
 fn sig_info_va() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_INFO_VA) } }
@@ -556,11 +556,14 @@ const PROT_NONE: u64 = 0;
 const PROT_READ: u64 = 1;
 const PROT_WRITE: u64 = 2;
 const PROT_EXEC: u64 = 4;
+const MAP_SHARED: u64 = 0x01;
 const MAP_PRIVATE: u64 = 0x02;
+const MAP_SHARED_VALIDATE: u64 = 0x03;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANON: u64 = 0x20;
 const MADV_WILLNEED: u64 = 3;
 const MADV_DONTNEED: u64 = 4;
+const MADV_FREE: u64 = 8;
 const MADV_DONTFORK: u64 = 10;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
@@ -1445,6 +1448,51 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_MADVISE, bw as u64, 4096, MADV_DONTNEED) == NEG_ENOSYS, b"L23s\n");
     leg!(rep, bw.read_volatile() == 0x5a, b"L23t\n");
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
+
+    // Shared anonymous memory (votes 117 + 119, VIVARIUM 6.21): MAP_SHARED|
+    // MAP_ANONYMOUS is one object a fork shares, so the child's write is the
+    // parent's to read. The private map beside it is the control, one variable
+    // away: the same write in the child never reaches the parent. DONTNEED over
+    // the shared range drops this process's view and keeps the contents; FREE
+    // there is EINVAL, as Linux answers for anything but private anonymous
+    // memory; and the anonymous switch has no shared-validate case.
+    let sh = svc6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON,
+                  (-1i64) as u64, 0);
+    leg!(rep, sh > 0 && !(-4095..0).contains(&sh), b"L23u\n");
+    let pv = svc6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON,
+                  (-1i64) as u64, 0);
+    leg!(rep, pv > 0 && !(-4095..0).contains(&pv), b"L23v\n");
+    (sh as *mut u64).write_volatile(0x1111);
+    (pv as *mut u64).write_volatile(0x1111);
+    let sk = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if sk == 0 {
+        // The parent's write is visible before the child writes its own.
+        let seen = (sh as *const u64).read_volatile() == 0x1111;
+        (sh as *mut u64).write_volatile(0x2222);
+        (pv as *mut u64).write_volatile(0x2222);
+        linux_exit(if seen { 0 } else { 3 })
+    }
+    leg!(rep, sk > 0, b"L23w\n");
+    let mut shs: i32 = -1;
+    leg!(
+        rep,
+        wait4_r(sk as u64, &mut shs as *mut i32 as u64, 0) == sk
+            && (shs & 0x7f) == 0 && ((shs >> 8) & 0xff) == 0,
+        b"L23x\n"
+    );
+    leg!(rep, (sh as *const u64).read_volatile() == 0x2222, b"L23y\n");   // the child's write
+    leg!(rep, (pv as *const u64).read_volatile() == 0x1111, b"L23z\n");   // control: still private
+    leg!(rep, svc3(NR_MADVISE, sh as u64, 4096, MADV_DONTNEED) == 0, b"L23za\n");
+    leg!(rep, (sh as *const u64).read_volatile() == 0x2222, b"L23zb\n");  // the contents kept
+    leg!(rep, svc3(NR_MADVISE, sh as u64, 4096, MADV_FREE) == NEG_EINVAL, b"L23zc\n");
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED_VALIDATE | MAP_ANON,
+             (-1i64) as u64, 0) == NEG_EINVAL,
+        b"L23zd\n"
+    );
+    let _ = svc3(NR_MUNMAP, sh as u64, 4096, 0);
+    let _ = svc3(NR_MUNMAP, pv as u64, 4096, 0);
 
     // --- L24-L31: signals (V-6b) --------------------------------------------
     // musl calls BOTH of these before main(): __init_tls / pthread_create go
@@ -2747,7 +2795,7 @@ unsafe fn run_linux() -> ! {
     // fd_set is 128 bytes = 16 u64 words; bit `fd` lives in word fd/64.
     let mut rdset: [u64; 16] = [0; 16];
     let mut wrset: [u64; 16] = [0; 16];
-    let mut exset: [u64; 16] = [0; 16];
+    let mut exset: [u64; 16];
 
     // A zero timeout, so every leg below returns without waiting.
     let ts0: [i64; 2] = [0, 0];
@@ -2786,7 +2834,6 @@ unsafe fn run_linux() -> ! {
     // and EBADF, so instead assert the property on a set the kernel never
     // reports into: a zeroed exceptfds passed alongside a ready read.
     rdset = [0; 16];
-    wrset = [0; 16];
     exset = [0; 16];
     rdset[(rep as usize) / 64] = 1u64 << ((rep as usize) % 64);
     let n_ex = svc6(
@@ -2896,7 +2943,6 @@ unsafe fn run_linux() -> ! {
     // A real timeout, though zero would now do: the leg is about the restored
     // fd numbers, and L113 already owns the zero-timeout answer (task #98).
     let ts_200: [i64; 2] = [0, 200_000_000];
-    rdset = [0; 16];
     wrset = [0; 16];
     wrset[(psock as usize) / 64] = 1u64 << ((psock as usize) % 64);
     leg!(
@@ -4936,7 +4982,7 @@ unsafe fn run_linux() -> ! {
     const NT_SIG_SETMASK: u64 = 2;
     let mut nt_pp: [i32; 2] = [-1, -1];
     let nt_pipe = svc3(NR_PIPE2, nt_pp.as_mut_ptr() as u64, 0, 0) == 0;
-    ksa = [nt_sig_handler as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    ksa = [nt_sig_handler as *const () as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
     let nt_act = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8) == 0;
     // Unblocked before the clone, so the peer inherits it: both threads can
     // take the note, and the choice is the kernel's.
@@ -5526,7 +5572,7 @@ unsafe fn run_linux() -> ! {
     const TD_LONG_NS: i64 = 200_000_000;
     let mut td_pp: [i32; 2] = [-1, -1];
     let td_pipe = svc3(NR_PIPE2, td_pp.as_mut_ptr() as u64, 0, 0) == 0;
-    ksa = [nt_sig_handler as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    ksa = [nt_sig_handler as *const () as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
     let td_act = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8) == 0;
     let td_un = 1u64 << (SIGTERM - 1);
     let mut td_old = 0u64;

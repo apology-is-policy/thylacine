@@ -1443,60 +1443,31 @@ fn own_ns_path() -> String {
 }
 
 /// What `/` is mounted from, per this process's own namespace listing
-/// (`mount / <src>` in /proc/<pid>/ns -- devproc serves no `self`). The kernel
-/// serves that listing in windows, so it is read to the end.
+/// (`halcyon::ns_root_source`; devproc serves no `self`). The kernel serves that
+/// listing in windows, so it is read to the end. Shown in one line of text, so a
+/// control character in the name shows as `?`.
 fn root_source() -> Option<String> {
     let bytes = read_capped(&own_ns_path(), 64 * 1024).ok()?;
-    let text = core::str::from_utf8(&bytes).ok()?;
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        if it.next() == Some("mount") && it.next() == Some("/") {
-            let src = it.next()?;
-            // A union begun with `bind -a` lists the directory underneath first
-            // (`mount / / covered`): the root is then no mount's source.
-            if it.any(|flag| flag == "covered") {
-                return None;
-            }
-            return Some(String::from(src));
-        }
-    }
-    None
+    // Lossy: a name that is not UTF-8 spoils its own line, not the root's.
+    let text = String::from_utf8_lossy(&bytes);
+    let src = halcyon::ns_root_source(&text)?;
+    Some(src.chars().map(|c| if c.is_control() { '?' } else { c }).collect())
 }
 
-/// The loaded systems: init's children per /ctl/procs -- (name, pid), by
-/// pid, at most ten (five rows of two). Empty when /ctl/procs is unreadable.
+/// The loaded systems: init's children among every Proc /proc lists -- (name,
+/// pid), by pid, at most ten (five rows of two). Empty when the set is
+/// unreadable.
 fn loaded_systems() -> Vec<(String, u32)> {
-    let mut out: Vec<(String, u32)> = Vec::new();
-    let Ok(bytes) = read_rendered("/ctl/procs") else {
-        return out;
+    let Ok(rows) = libthyla_rs::procs::list() else {
+        return Vec::new();
     };
-    let Ok(text) = core::str::from_utf8(&bytes) else {
-        return out;
-    };
-    let mut rows: Vec<(u32, u32, String)> = Vec::new();
-    for line in text.lines().skip(1) {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(name)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
-            continue;
-        };
-        rows.push((pid, ppid, String::from(name)));
-    }
-    let init = rows
-        .iter()
-        .find(|r| r.2 == "joey")
-        .map(|r| r.0)
-        .unwrap_or(1);
-    for (pid, ppid, name) in rows.into_iter() {
-        if ppid == init && pid != init {
-            out.push((name, pid));
-        }
-    }
-    out.sort_by_key(|r| r.1);
-    out.truncate(10);
-    out
+    let init = rows.iter().find(|r| r.name == "joey").map_or(1, |r| r.pid);
+    // procs::list is ascending by pid.
+    rows.into_iter()
+        .filter(|r| r.ppid == init && r.pid != init)
+        .map(|r| (r.name, r.pid))
+        .take(10)
+        .collect()
 }
 
 /// `halcyon welcome`: the first-launch herald (HALCYON.md 13.7, H-4d;
@@ -1515,6 +1486,7 @@ fn welcome() -> i64 {
     let home = env::var("HOME")
         .map(|h| String::from(h.trim()))
         .filter(|h| !h.is_empty());
+    let systems = loaded_systems();
     {
         use beacon::sink::{Cell, Em, HdrClass, ObjType, Sink, Table};
         let mut out = StdoutOut;
@@ -1548,7 +1520,6 @@ fn welcome() -> i64 {
             s.text("\n");
         }
         // The loaded systems: init's children, name + pid, two columns.
-        let systems = loaded_systems();
         if !systems.is_empty() {
             s.hdr(2, "Loaded systems");
             s.text("\n");
@@ -1634,10 +1605,11 @@ fn welcome() -> i64 {
         s.text("\n");
     }
     // The serial witness (the tile's own output is pixels): which tier the
-    // tour went out at.
+    // tour went out at, and how many loaded systems it listed.
     let _ = libthyla_rs::t_putstr(&format!(
-        "halcyon: welcome shown (tier {})\n",
-        if rich { "rich" } else { "none" }
+        "halcyon: welcome shown (tier {}) systems {}\n",
+        if rich { "rich" } else { "none" },
+        systems.len()
     ));
     // Become the shell (LINEAGE: the image is replaced in place; the pts,
     // the pgrp and the pid stay the tile's).

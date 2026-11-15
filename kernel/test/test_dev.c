@@ -29,6 +29,7 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>       // dev9p: one of the two Devs that back mappings
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
@@ -421,4 +422,35 @@ void test_spoor_alloc_10k_no_leak(void) {
     TEST_EXPECT_EQ(alloc_delta, (u64)ITERS, "iters allocs observed");
     TEST_EXPECT_EQ(free_delta,  (u64)ITERS,
                    "iters frees observed (no leak)");
+}
+
+// File mapping is opt-in (Dev.may_back_mapping, vote 113): only dev9p and
+// devramfs serve sized content. A Dev added to that set is argued for here, in
+// the same change. Every Dev that backs exec backs mappings (dev_register
+// refuses the other shape at boot). Sharing an Image is asked per file
+// (content_versioned, vote 114), so only the mapping Devs may answer it.
+void test_dev_mapping_is_opt_in(void) {
+    int opted = 0, stray = 0, exec_only = 0, unmapped_versioned = 0;
+    for (int i = 0; i < BESTIARY_MAX + 1; i++) {
+        struct Dev *d = bestiary[i];
+        if (!d) break;
+        if (d->may_back_exec && !d->may_back_mapping) exec_only++;
+        if (d->content_versioned && !d->may_back_mapping) unmapped_versioned++;
+        if (!d->may_back_mapping) continue;
+        opted++;
+        if (d != &dev9p && d != &devramfs) stray++;
+    }
+    TEST_ASSERT(devramfs.may_back_mapping, "devramfs backs file mappings");
+    TEST_ASSERT(dev9p.may_back_mapping, "dev9p backs file mappings");
+    TEST_ASSERT(opted >= 1, "premise: the registered set holds devramfs");
+    TEST_EXPECT_EQ(stray, 0, "no registered Dev but dev9p and devramfs backs file mappings");
+    TEST_EXPECT_EQ(exec_only, 0, "every Dev that backs exec backs file mappings");
+    TEST_EXPECT_EQ(unmapped_versioned, 0,
+                   "only a Dev that backs mappings answers content_versioned");
+    // The baked archive's images stay shared (exec text, vote 114).
+    struct Spoor *r = devramfs.attach("");
+    TEST_ASSERT(r != NULL, "devramfs root");
+    TEST_ASSERT(devramfs.content_versioned && devramfs.content_versioned(r),
+                "devramfs files are versioned content");
+    spoor_clunk(r);
 }

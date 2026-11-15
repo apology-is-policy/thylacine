@@ -69,6 +69,13 @@ bool vma_args_ok(u64 vaddr_start, u64 vaddr_end, u32 prot,
     // syscalls already guard. Reject it here so the VMA prot matches the PTE.
     if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return false;
 
+    // I-36: a FILE page is I-cache synced by its Burrow's exec class, so an
+    // executable mapping of a Burrow outside that class would fetch pages no
+    // fill synced. A protect never adds X, so the constructor is the one gate.
+    if (burrow->type == BURROW_TYPE_FILE && (prot & VMA_PROT_EXEC) &&
+        !burrow->file_exec)
+        return false;
+
     // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
     // Burrow's end would name slots its pagemap does not have, and the range
     // release walks the mapping's own slot bound -- refused here, at the one
@@ -291,6 +298,11 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (prev) prev->next = v;
     else      as->vmas   = v;
     if (cur)  cur->prev  = v;
+    // Vote 122 (DEBUG-FS-DESIGN 3.4): the count the share family's join reads,
+    // paired with vma_remove_in's decrement (a linked Vma's Burrow never changes).
+    // Written under as->lock; read without it, so stored whole.
+    if (v->burrow && v->burrow->type == BURROW_TYPE_ANON_SHARED)
+        __atomic_store_n(&as->shared_maps, as->shared_maps + 1u, __ATOMIC_RELAXED);
 
     // ARCH 6.5, the merge's ONE BIAS, recorded when a mapping becomes real: a
     // VMA allocated and then refused never names its Burrow's bias.
@@ -304,6 +316,39 @@ void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     // A second remove of the same Vma would take the no-predecessor arm and wipe
     // the whole list head, and the clamp-safe uncharge below would hide it.
     if (!vma_linked_in(as, v))   extinction("vma_remove_in of a Vma not linked in this address space");
+
+    // Votes 120 + 122 (DEBUG-FS-DESIGN 3.4): shared memory debugged through
+    // another member of the share family taints every member image that
+    // holds it, and the taint outlives the mapping, so it goes into this
+    // space's record before the count that lets the join read the family
+    // drops. The join reads both without this lock, the count first with
+    // acquire: the release store orders the fold before the drop, so it sees
+    // the mapping or the fold, never neither. The family pointer may be
+    // written by a publication right now; NULL folds nothing, and the family
+    // it is about to become holds nothing yet but the parent's own.
+    //
+    // The fold owes a stamp only for bytes this space could have read, and
+    // what orders the two is not this lock (the stamp takes another): a
+    // debugger writes a target only while it holds it stopped, a stop needs
+    // the debug owner, and the attach stamps the target's family before it
+    // takes the slot, so the stamp happens before any write it covers. The
+    // fence orders every earlier access of this CPU -- among them a user load
+    // that read such a write -- before the family and taint reads below, so
+    // they see the stamp (message passing; audit round 38 F4). The range's
+    // uninstall, a broadcast TLBI and DSB, gives the same order today; the
+    // fence makes the fold hold without relying on its caller's order.
+    struct Burrow *sb = v->burrow;
+    if (sb && sb->type == BURROW_TYPE_ANON_SHARED) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        struct ShareFamily *f = __atomic_load_n(&as->family, __ATOMIC_ACQUIRE);
+        if (f)
+            __atomic_fetch_or(&as->guards_ever,
+                              __atomic_load_n(&f->guards, __ATOMIC_ACQUIRE)
+                                  & PROC_FLAG_DEBUG_TAINTED,
+                              __ATOMIC_RELAXED);
+        if (as->shared_maps == 0) extinction("vma_remove_in: shared mapping count underflow");
+        __atomic_store_n(&as->shared_maps, as->shared_maps - 1u, __ATOMIC_RELEASE);
+    }
 
     if (v->prev) v->prev->next = v->next;
     else         as->vmas      = v->next;
@@ -497,6 +542,7 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
     // mapping ref on `nb` across the detach.
     struct Vma *nv = vma_alloc(vaddr, end, prot, nb, nb_offset);
     if (!nv)                              return -(int)T_E_NOMEM;
+    vma_payer_mark_fresh(as, nv);
 
     struct Burrow *dead = NULL;
     int rc = vma_detach_range_in(as, exempt, payer, vaddr, length, 1, &dead);
@@ -572,11 +618,34 @@ long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
         if (a >= b) continue;
         long n = mmu_uninstall_user_range(as, a, b);
         if (n <= 0) continue;
-        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE)
-            addrspace_uncharge_file(as, (u32)n);
+        // The leaves the fault charged per leaf, refunded per leaf: a FILE
+        // mapping's (audit F8) and a shared anonymous one's (votes 117 + 119),
+        // each unless it is the payer's mapping, whose mints paid instead.
+        if (v->burrow && !(v->flags & VMA_FLAG_PAYER)) {
+            if (v->burrow->type == BURROW_TYPE_FILE)
+                addrspace_uncharge_file(as, (u32)n);
+            else if (v->burrow->type == BURROW_TYPE_ANON_SHARED)
+                addrspace_uncharge_pages(as, (u32)n);
+        }
         total += n;
     }
     return total;
+}
+
+void vma_payer_mark_fresh(struct AddrSpace *as, struct Vma *v) {
+    struct Burrow *b = v ? v->burrow : NULL;
+    if (b && b->payer_record && burrow_payer_is(b, as))
+        v->flags |= VMA_FLAG_PAYER;
+}
+
+void vma_payer_adopt_in(struct AddrSpace *as, struct Burrow *b) {
+    for (struct Vma *v = as->vmas; v; v = v->next) {
+        if (v->burrow != b || (v->flags & VMA_FLAG_PAYER)) continue;
+        // Unflagged, so the uninstall refunds each leaf it clears; the space
+        // re-faults them as payer leaves, which the mint has paid for.
+        (void)vma_uninstall_range_in(as, v->vaddr_start, v->vaddr_end);
+        v->flags |= VMA_FLAG_PAYER;
+    }
 }
 
 // P6-pouch-mem: first-fit free-range finder for SYS_BURROW_ATTACH. The
@@ -651,11 +720,14 @@ int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
 
 // The backing kinds a protect may touch. CODE is the I-42 pair (one charge, two
 // aliases: neither is a plain mapping); MMIO / DMA / HOSTMEM are I-34 hardware
-// windows whose permissions were conferred, not chosen.
+// windows whose permissions were conferred, not chosen. A shared anonymous
+// mapping's prot is its own space's view (each sharer's VMA is separate, its
+// leaves are its own), under a ceiling that never carries X.
 static bool reprotect_admits(const struct Burrow *b) {
     switch (b->type) {
     case BURROW_TYPE_ANON:
     case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_ANON_SHARED:
     case BURROW_TYPE_FILE:
         return true;
     default:

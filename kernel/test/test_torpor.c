@@ -957,7 +957,7 @@ void test_torpor_word_replaced_under_the_wait(void) {
     g_tr_reads_at[0] = g_tr_reads_at[1] = -1;
     struct Spoor *s = spoor_alloc(&g_tr_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    g_tr_file = burrow_create_file(s, 0, PAGE_SIZE);
+    g_tr_file = burrow_create_file(s, 0, PAGE_SIZE, false);
     TEST_ASSERT(g_tr_file != NULL, "burrow_create_file");
 
     struct Thread *consumer = thread_create(g_torpor_proc, tr_entry);

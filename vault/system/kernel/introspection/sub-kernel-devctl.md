@@ -14,7 +14,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 ## Session transport accounting
 
@@ -31,7 +31,7 @@ silently reinterpreted as credits.
 One read is the whole file. The render is bounded by the 4 KiB read buffer,
 connection rows first and session rows last. A row that does not fit is left
 out whole, and a render that left any row out ends with the line
-`(cut: more rows than one read holds)`, whose room no row may take, so a
+`(cut: more rows than the table holds)`, whose room no row may take, so a
 missing row is told apart from a row that does not exist. The line does not
 say how many are missing. The summary line is 133 bytes, a connection row 80
 to 110, a session row 105 to 115; the gate image's boot (15 connections, 10
@@ -72,8 +72,9 @@ unconditionally.
 ## Contract
 
 Walk `/ctl/<leaf>`, read text. Single-level: `..` from anywhere is the apex, and
-a walk from a leaf has no meaning. Offset-aware reads over a freshly generated
-2 KiB snapshot.
+a walk from a leaf has no meaning. A read renders its leaf afresh into a 4 KiB
+buffer and answers from the caller's offset, except `procs`, which is rendered
+once per open file (below).
 
 `stat_native` reports the apex as a directory and each leaf as a regular file,
 **with size 0** — deliberately. Every file is generated at read time from live
@@ -299,29 +300,231 @@ walk ends when the output buffer fills rather than visiting every process under
 the global lock with interrupts off. Once `/ctl` became reachable from userspace
 this stopped being a formatting nicety: it is what bounds an unprivileged
 tight-loop reader's lock hold to the size of the buffer instead of the size of
-the process table.
+the process table. The bound is in rows, not in time: a row whose `CPU_NS`
+the reader may see walks that Proc's threads (`proc_cpu_ns`). And it is for a
+reader that is shown rows. One behind the none wall is shown its own row
+only, never fills the buffer, and its walk visits every Proc: the cost of any
+`/proc/<pid>/status` read. Both are part of the Proc table's locking debt
+(#62).
 
 A row is committed whole or not at all, in `/ctl/procs` and `/ctl/kstack`
 alike: the callback formats at the buffer's tail and, if any field does not
-fit, rolls the offset back to the row's start before it stops. A row cut
-mid-number would hand `ps` and `prowl` a plausible smaller figure, which is
-worse than a list that ends early. `devctl.procs_rows_whole` formats the list
-into every buffer size from one byte up and requires each result to end on a
-whole row of nine columns.
+fit, rolls the offset back to the row's start. A row cut mid-number would
+hand a parser a plausible smaller figure, which is worse than a list that
+ends early. `/ctl/procs` stops its walk at that row; `/ctl/kstack` walks on
+without rows, for its peak (below).
+
+### A cut process table says so (2026-11-12; operator vote 85)
+
+`/ctl/procs` holds the rows that fit one snapshot (`PROCS_SNAP_CAP`, 4092
+bytes, about sixty rows), not every Proc. A table that left a row out ends with one
+fixed line, `PROCS_CUT_LINE`:
+
+    (cut: more processes than the table holds; /proc lists them all)
+
+A short table with no sign reads as "no other Proc", and a gate that
+concludes that from a cut table is wrong without knowing it. The line always
+fits, because its room is reserved. `format_procs` renders nothing into a
+buffer that cannot hold the header and the line. `format_procs_cb` lets only
+the table's last row end inside the reserve (`in_reserve`): when another
+visible row follows a row that did, that row is taken back (`s->off =
+s->last`) and the table is cut there. So a table that exactly fits the buffer
+is whole and carries no line, and a cut one always has room for it. A
+`_Static_assert` keeps `DEVCTL_READ_BUF` at least the header plus the line.
+Rows a none reader is walled from are skipped before the reserve check, so
+they never cut its one-row table.
+
+The line is not a row: it starts with `(`, where a row starts with a pid. A
+reader that needs every Proc does not read this file. It lists `/proc`, a
+directory with no such bound, and reads each `status`
+([[sub-kernel-devproc]]); `ps`, `prowl`, diorama, halcyon and `srvfull-probe`
+do that through libthyla-rs's `procs` module ([[sub-libthyla-rs]]).
+`/ctl/9p-sessions` ends a cut render the same way, with a line of its own.
+
+`devctl.procs_rows_whole` links two Procs of its own, formats the table into
+every buffer size from one byte up, and compares each result's shape with the
+whole table's: every line whole, every row nine columns, the rows the whole
+table's first rows by pid, the cut line present exactly when a row is
+missing, and at least one size that holds rows and the line together. It
+compares shape, not bytes, because `CPU_NS` moves between two renders.
+`tools/interactive/ps-many.exp` reads the file on a freshly booted guest and
+requires no cut line, then with seventy more Procs and requires it after a
+whole nine-column row, with nothing of a later rendering after it (below).
+
+### One rendering per open file (2026-11-13; operator votes 99 and 108)
+
+`/ctl/procs` is rendered once per open file. Its first read at offset 0
+renders the table into a `procs_snap` (a length and `PROCS_SNAP_CAP` = 4092
+bytes, exactly one page: `kmalloc` serves a request past
+`SLUB_MAX_OBJECT_SIZE` from `alloc_pages`) and publishes it in `Spoor.aux` by
+compare-and-swap. Every read of that open file, at any offset, is served from
+it, and a read at or past its end answers end of file. A whole read keeps it
+too, as Linux's `seq_file` keeps its buffer: then every reader of the open
+file, whatever its buffer and whichever thread it runs on, reads one
+rendering. `devctl_close` frees it at the open file's last reference.
+
+Every read used to render the table afresh, and a reader that read to end of
+file joined a second rendering's tail to the first: when the second was
+longer, `cat` printed its last bytes after the cut line (7 bytes, a cut line's
+end, in both of ps-many's boots before the rule). Rows are unpadded decimals
+and `CPU_NS` moves every tick, so the length moves between any two reads. Vote
+99 first answered with end of file past offset 0 and a table rendered to the
+caller's buffer. Audit round 28 F1 showed what that cost a reader that starts
+small: `hexdump` (16-byte reads) and Rust std's `read_to_string` (a 32-byte
+first probe; the file's size reads 0) were refused, and a 1 KiB reader
+(libthyla-rs's `read_to_end`, Pouch stdio) got about thirteen rows and the cut
+line. Vote 108 pulled vote 99's per-open snapshot forward for this one file.
+No read is refused for its size; were such a refusal to return, its code is
+`EINVAL` (vote 109). The other rendered files (devctl's other leaves, devproc,
+diorama's Linux view) still render per read, until vote 99's own snapshot
+chunk after the clipboard arc.
+
+Three things keep it one open file's and freed once:
+- **No clone inherits it.** `spoor_clone` copies `aux` shallowly, so
+  `devctl_walk` clears it on every Spoor it returns. The one route by which a
+  clone reaches an opened `/ctl/procs` is a mount whose source it is: a mount
+  crossing clones the source (`clone_walk_zero`) and opens the clone. The
+  O_PATH re-open of a descriptor is not one: a file descriptor answers ENOTDIR
+  there.
+- **Every open starts at offset 0.** `dev_simple_open` resets the cursor the
+  clone copied ([[sub-kernel-dev]]), so that crossing reads its own whole table
+  from byte 0 instead of answering end of file at the mounted reader's offset
+  (audit round 29 F1).
+- **A race publishes one.** Two threads sharing the open file can both read at
+  offset 0. Each renders; the first compare-and-swap publishes, and the other
+  frees its copy and serves the winner's. The snapshot is immutable once
+  published and freed only at the last reference, when no read runs, because
+  every read holds a reference. `spoor_read_on` reads the cursor with acquire
+  and advances it with release ([[sub-kernel-syscall-dispatch]]), so a read at
+  a cursor another thread advanced sees the snapshot that thread published.
+  Before that, the advanced cursor could be seen with `aux` still NULL, and a
+  read past 0 with nothing kept answers end of file (round 29 F2). That answer
+  now belongs to positioned readers alone (`mmap_eager_copy`, exec's header,
+  fault reads), which read offset 0 first with at least 4 KiB.
+
+A snapshot costs one page per open file that has been read, uncharged, like a
+pipe ring. It lives as long as a reference to the open file does. A descriptor
+is one (at most `PROC_HANDLE_MAX`, 1024, per Proc), a mount entry another (at
+most `PGRP_MOUNT_CAP`, 1024, per territory), and so is a Loom registration. A
+file mapping would be one too, kept in the Image cache past the mapper and past
+every close, one per mapping up to 65536 per address space: so devctl leaves
+`may_back_mapping` unset (opt-in, vote 113), and both mapping cores answer `ENODEV` (a `/ctl` leaf's size
+is 0, so no byte of one was ever mappable; audit round 30 F1). When no page is
+free, the read fails with `ENOMEM` and nothing is kept.
+
+The table is rendered for the open file's first reader, with that reader's
+gates: the none wall and the `CPU_NS` gate. A Proc handed the open file, or
+one that inherits it (a fork before a drop to none), reads that rendering
+([[sub-kernel-devproc]]'s none wall still holds: no Proc reaches the table
+another Proc rendered without that Proc's handing it over). This is Linux's
+`f_cred` shape for `seq_file`.
+
+`devctl.procs_snapshot` reads through `devctl_read` with two Procs of its own
+linked. A whole read keeps its rendering, and its next read is end of file. A
+pieced read in 16-byte reads, with a third Proc linked after its first piece,
+reads the table a whole read had just shown, row for row by pid, while a fresh
+open shows the third Proc, so the change it missed did happen. It is taken
+again until it matches, within four tries, because a Proc can come or go
+between the reference read and the pieced one. Both walk shapes, devctl's own
+clone and a caller's pre-clone, return a Spoor with no snapshot; a clone found
+carrying one is detached before its close, so that mutant fails at the
+assertion and not on a page freed twice. A clone of the read-into file opened
+the way a mount crossing opens it starts at 0 and reads a whole table of its
+own. The open file's last close is watched entering the large free for its
+snapshot's page (`kfree_large_watch`). The race is played by a test hook that
+runs inside a render, after it renders and before it publishes: a Proc joins,
+and a second read of the same open file publishes first. The first read must
+serve that table, the joined Proc in it, and leave one snapshot held, the
+loser's copy freed. One-byte reads read a whole table, and every last close
+frees its snapshot (a held count: allocated, not yet freed). A kernel without
+the snapshot fails it at once: vote 99's rule ends the pieced read after 16
+bytes, and a kernel that renders per read gives the pieced read the third
+Proc's row or a splice on every try.
+
+`devctl.backs_no_mapping` reads one byte of an open `/ctl/procs` (a snapshot
+is held), asks both mapping cores to map it through a Proc's handles, drains
+and frees that Proc, and closes the file: both cores answer `ENODEV`, and the
+held count returns to where it began, so no Image entry kept the open file.
+With the flag set a mapping succeeds and the cached entry keeps the snapshot
+past the close.
+
+`ps-many.exp`'s second leg is unchanged: `cat`'s first read (8 KiB) holds the
+table and its second read finds end of file, so a whole row or a cut line's end
+after the cut line fails the leg. Its leg 2b runs `hexdump /ctl/procs`
+(16-byte reads) on the same large system, rebuilds the bytes from the hex
+columns, and requires one table: the header, whole nine-column rows with no pid
+twice, the cut line last, rows at contiguous offsets, and a total of 3000 to
+4096 bytes. Vote 99's rule refused that read, and a rule that ended the file
+after the first read would leave 16 bytes. A file rendered per read tears only
+where a row's length changes between two reads, and nothing in the scenario
+makes one change, so the leg does not catch that kernel; `devctl.procs_snapshot`
+does, at every run (audit round 30 F2). The leg's own claim is the small
+reader's path: `spoor_read_on` and the open file's own cursor, which the kernel
+test calls around.
+
+### A cut kernel-stack table says so, and keeps its peak (2026-11-13)
+
+`/ctl/kstack` had the same silent end and a worse one beside it.
+`format_kstack` returned at the first row that did not fit, so past about a
+hundred Procs the file was a shorter table with no sign and without its
+`peak:` line, the one figure the file exists for. The table's end now has its
+room reserved before any row: `KSTACK_TAIL_MAX` is the cut line, the
+scan-budget line and the peak line with each number at its widest. Rows end
+where the end begins, so the end always fits, and a buffer too small for the
+header and the end renders nothing. A table that left a row out says, after
+its rows:
+
+    (cut: more processes than the table holds)
+
+Unlike `/ctl/procs`, the walk does not stop there. `format_kstack_cb` goes on
+without rendering, so the peak is taken over every Proc the walk reached, its
+row shown or not, and the rows shown stay the walk's first. The buffer was
+one of this walk's two bounds (a table of about 120 rows ended it), and a
+walk that goes on past the cut has lost it. The scan budget alone does not
+replace it: a scan is charged by the word, and a Proc that has reaped every
+thread -- a zombie -- has a recorded peak and nothing to scan, so a farm of
+them, which any program may leave behind, would be walked whole under the
+table lock with IRQs masked. So every Proc pays `KSTACK_VISIT_WORDS` (128, the
+scan of 1 KiB of stack) out of the same budget before it is looked at, and a
+Proc that cannot pay ends the walk like a scan that runs out: the table says
+its peak is a lower bound. One read visits at most 1024 Procs. A scan cut
+short by the budget stopped below the true frontier, so that Proc's number
+reads deeper than the truth and is dropped; the peak is over the Procs scanned
+whole. A `_Static_assert` keeps the read buffer at least the widest header
+plus the end.
+
+`devctl.kstack_ends_whole` links a Proc of its own whose recorded peak is the
+whole stack (`reaped_kstack_peak`), formats the table into every buffer size
+up to the whole table's and a little past, and requires of each: the peak line
+last, every row five columns, the rows the whole table's first, the cut line
+exactly when a row is missing, and the peak naming that Proc whether or not
+its row was cut, with at least one size where it was. A shallow Proc of the
+test's own is linked after it, so a row always comes before the deepest
+Proc's and a walk that stopped at its first cut row would lose the peak
+whatever kproc shows. `devctl.kstack_says_truncated` formats with a budget of
+its choosing (a test hook): no budget shows no row and the budget line; then
+it finds a budget that scans the system as it stands whole, links a farm of
+thread-less Procs one visit longer than that budget pays for, and requires
+the budget line at every buffer size, the peak line still last, with at least
+one size both cut and out of budget; without the farm the same budget scans
+the system whole.
 
 ### The STATE column shows job-stop, never debug-stop
 
 An ALIVE Proc carrying `job_stop_req` (a `/proc/<pid>/ctl` suspend, or a Ctrl-Z
 through the pts path) renders `STOPPED` — the Unix `ps` T-state, via
-`procs_state_name`. The DEBUG stop (`debug_stop_req`, the attach-gated debugger
+`proc_state_word` ([[sub-kernel-proc]]), the one function
+`/proc/<pid>/status` asks too, so the two files cannot disagree about a
+Proc. The DEBUG stop (`debug_stop_req`, the attach-gated debugger
 stop) is deliberately **not** surfaced: it is the debugger's private I-39 view,
 not a job-control state a monitor should expose, so the render reads
 `job_stop_req` alone. That flag is read atomically — a cross-Proc reader holds
 `g_proc_table_lock` via `proc_for_each` but takes no per-Proc lock. A dying
 Proc (`group_exit_msg` set) is never shown `STOPPED`, whatever flag a stop made
 before the kill left: its last thread runs its exit close regardless, and a
-dying Proc is not stopped to any reader (DEBUG-FS-DESIGN 5g). The test hook
-`devctl_procs_state_name_for_test` exposes the word to `proc.dying_takes_no_stop`.
+dying Proc is not stopped to any reader (DEBUG-FS-DESIGN 5g).
+`proc.dying_takes_no_stop` asks `proc_state_word` of a live and a dying Proc
+with the same flag set.
 
 ### Offline CPUs render as a short row, not as a busy one
 
@@ -401,6 +604,9 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   by a later edit.
 - **The process-list callback must keep stopping on overflow**, or an
   unprivileged reader re-acquires an unbounded global-lock hold.
+- **A cut process table ends with its cut line, and a whole one never carries
+  it.** The line's room stays reserved: only the table's last row may end
+  inside it.
 - **Sizes must stay 0** for generated leaves. Reporting a measured length invites
   the stat-then-read truncation the current shape exists to prevent.
 - **The offline-CPU row must stay short.** Emitting a numeric idle time for a

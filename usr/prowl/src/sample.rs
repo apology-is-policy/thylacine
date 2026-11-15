@@ -1,7 +1,8 @@
 // prowl::sample -- the pure telemetry layer (terminal-free).
 //
-// Reads the kernel /ctl/procs + /ctl/sched text (the prowl-1 substrate) and
-// derives the process table + per-proc %CPU the htop way: diff cumulative cpu_ns
+// Takes the process set (libthyla_rs::procs: /proc's directory, one status per
+// Proc) and the kernel's /ctl text (the prowl-1 substrate) and derives the
+// process table + per-proc %CPU the htop way: diff cumulative cpu_ns
 // across two polls, divide by the monotonic wall delta. 100% == one core fully
 // busy; a proc spanning two cores reads 200%. No float -- tenths-of-a-percent
 // integer math (delta_ns * 1000 / elapsed_ns). A buggy sampler mis-renders
@@ -9,14 +10,10 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use libthyla_rs::procs;
 
-/// One parsed /ctl/procs data line. The kernel format (kernel/devctl.c
-/// format_procs) is 9 whitespace-separated columns after a header line (PPID +
-/// STOPPED landed with prowl-4, TABLES with prowl-6):
-///   PID  PPID  NAME  STATE  THREADS  PAGES  TABLES  CHILDREN  CPU_NS
-/// NAME is a binary basename (no embedded spaces, <=31 bytes); STATE is one
-/// token (ALIVE/ZOMBIE/STOPPED/INVALID). So a 9-token whitespace split is exact.
-/// (CHILDREN is parsed for column alignment but not surfaced.)
+/// One Proc of the sampled set: a `procs::Row` plus the figure this sampler
+/// derives. (The row's CHILDREN count is not surfaced.)
 pub struct ProcRow {
     pub pid: i64,
     /// The parent pid (prowl-4, the tree view). 0 for kproc / a reparented root.
@@ -37,82 +34,30 @@ pub struct ProcRow {
     pub cpu_pct_x10: Option<u64>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Alive,
-    Zombie,
-    /// prowl-4: an ALIVE Proc with job_stop_req set (a monitor `suspend` / a
-    /// Ctrl-Z) -- the Unix `ps` T state, surfaced by the kernel so a suspend is
-    /// visible in the list.
-    Stopped,
-    Other,
-}
+pub use libthyla_rs::procs::State;
 
-impl State {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            State::Alive => "ALIVE",
-            State::Zombie => "ZOMBIE",
-            State::Stopped => "STOPPED",
-            State::Other => "?",
-        }
-    }
-    fn parse(tok: &str) -> State {
-        match tok {
-            "ALIVE" => State::Alive,
-            "ZOMBIE" => State::Zombie,
-            "STOPPED" => State::Stopped,
-            _ => State::Other,
-        }
-    }
-}
-
-/// Parse the `/ctl/procs` text into rows. The header line and any malformed
-/// (non-9-token, unparseable-pid) line are skipped -- a truncated last line (the
-/// kernel's DEVCTL_READ_BUF overflow early-return) drops cleanly rather than
-/// producing a bogus row.
-pub fn parse_procs(text: &str) -> Vec<ProcRow> {
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let (pid, ppid, name, state, threads, pages, tables, _children, cpu_ns) = match (
-            it.next(), it.next(), it.next(), it.next(), it.next(),
-            it.next(), it.next(), it.next(), it.next(),
-        ) {
-            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i)) => {
-                (a, b, c, d, e, f, g, h, i)
-            }
-            _ => continue, // header / blank / short line
-        };
-        // A trailing 10th token means a space in a field (a name with a space)
-        // would desync the columns -- reject the whole line rather than
-        // mis-attribute it.
-        if it.next().is_some() {
-            continue;
-        }
-        let pid: i64 = match pid.parse() {
-            Ok(v) => v,
-            Err(_) => continue, // the header line ("PID") lands here
-        };
-        rows.push(ProcRow {
-            pid,
-            ppid: ppid.parse().unwrap_or(0),
-            name: String::from(name),
-            state: State::parse(state),
-            threads: threads.parse().unwrap_or(0),
-            pages: pages.parse().unwrap_or(0),
-            tables: tables.parse().unwrap_or(0),
-            cpu_ns: cpu_ns.parse().ok(),
+/// The sampler's rows from the process set (`procs::list`): every Proc /proc
+/// lists, where the /ctl/procs table holds only the rows that fit it.
+pub fn rows_from(set: Vec<procs::Row>) -> Vec<ProcRow> {
+    set.into_iter()
+        .map(|r| ProcRow {
+            pid: i64::from(r.pid),
+            ppid: i64::from(r.ppid),
+            name: r.name,
+            state: r.state,
+            threads: r.threads,
+            pages: r.pages,
+            tables: r.tables,
+            cpu_ns: r.cpu_ns,
             cpu_pct_x10: None,
-        });
-    }
-    rows
+        })
+        .collect()
 }
 
 /// prowl-4 tree view: order `rows` parent-before-children and return each row's
 /// (index-into-rows, depth) in display order. A DFS from the roots (a row whose
-/// ppid names no row in the set -- kproc, or a parent truncated out of the
-/// /ctl/procs page) following the ppid edges. Cycle-safe + orphan-safe: a
+/// ppid names no row in the set -- kproc, or a parent that ended before its
+/// status was read) following the ppid edges. Cycle-safe + orphan-safe: a
 /// `visited` set bounds it to one visit per row, and any row not reached from a
 /// root (a cycle, or a stale ppid) is appended at depth 0 so nothing is dropped.
 /// Pure -- the caller renders; a bad tree mis-indents prowl's own screen only.
@@ -121,12 +66,17 @@ pub fn tree_order(rows: &[ProcRow]) -> Vec<(usize, usize)> {
     // children[i] = the row indices whose ppid == rows[i].pid, in list order.
     let mut children: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
     let mut is_root = alloc::vec![true; n];
+    // (pid, row), sorted: a parent is found by search, in any sort order of
+    // the rows and on a system of any size.
+    let mut by_pid: Vec<(i64, usize)> = rows.iter().enumerate().map(|(i, r)| (r.pid, i)).collect();
+    by_pid.sort_unstable();
     for (ci, r) in rows.iter().enumerate() {
         // The FIRST row whose pid == this row's ppid is the parent (pids are
         // unique among ALIVE procs; a stale ZOMBIE dup is vanishingly unlikely
         // and self-corrects next poll).
-        if let Some(pi) = rows.iter().position(|p| p.pid == r.ppid) {
-            if pi != ci {
+        let k = by_pid.partition_point(|&(pid, _)| pid < r.ppid);
+        if let Some(&(pid, pi)) = by_pid.get(k) {
+            if pid == r.ppid && pi != ci {
                 children[pi].push(ci);
                 is_root[ci] = false;
             }
@@ -251,7 +201,7 @@ pub fn parse_status_mem(text: &str) -> Option<MemDetail> {
 /// next poll can diff. The monotonic wall delta is supplied by the caller
 /// (time::Instant), keeping this layer terminal- AND clock-free.
 pub struct Sampler {
-    prev: Vec<(i64, u64)>, // (pid, cpu_ns) from the last poll
+    prev: Vec<(i64, u64)>, // (pid, cpu_ns) from the last poll, sorted by pid
 }
 
 impl Sampler {
@@ -267,12 +217,12 @@ impl Sampler {
     pub fn update(&mut self, rows: &mut [ProcRow], elapsed_ns: u64) {
         for r in rows.iter_mut() {
             r.cpu_pct_x10 = r.cpu_ns.map(|now| {
-                match self.prev.iter().find(|&&(pid, _)| pid == r.pid) {
+                match self.prev.binary_search_by_key(&r.pid, |&(pid, _)| pid) {
                     // (delta / elapsed) is the fraction of one core; * 1000 ->
                     // tenths of a percent. delta <= elapsed * ncpus, so
                     // delta * 1000 stays far within u64.
-                    Some(&(_, old)) if elapsed_ns > 0 => {
-                        now.saturating_sub(old).saturating_mul(1000) / elapsed_ns
+                    Ok(i) if elapsed_ns > 0 => {
+                        now.saturating_sub(self.prev[i].1).saturating_mul(1000) / elapsed_ns
                     }
                     _ => 0,
                 }
@@ -280,6 +230,7 @@ impl Sampler {
         }
         self.prev.clear();
         self.prev.extend(rows.iter().filter_map(|r| r.cpu_ns.map(|ns| (r.pid, ns))));
+        self.prev.sort_unstable_by_key(|&(pid, _)| pid);
     }
 
     /// Total %CPU across the rows whose CPU time is visible, in tenths of a

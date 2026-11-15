@@ -48,8 +48,9 @@
 // allocating nothing, when the cap is hit), and a take with a non-NULL `as`
 // uncharges the nodes it freed. The DATA page is the caller's charge in both
 // directions -- the pagemap never charges or uncharges a slot's page. FILE
-// Burrows pass NULL (their pages are the Image cache's, shared by every space
-// that maps the file, bounded by EXEC_FILE_MAX); ANON_LAZY Burrows pass the
+// Burrows pass NULL (their pages are the system cache's -- a cached image's
+// shared by every space that maps the file, a private image's held by its
+// mapping -- bounded by EXEC_FILE_MAX); ANON_LAZY Burrows pass the
 // mapping address space. So page_count reads as data pages plus the nodes
 // that index them (plus the page tables, since audit F1) -- dense, one node
 // per 512 pages plus the root; sparse, up to `depth` nodes per touched page
@@ -118,6 +119,21 @@ int  pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                      struct page *pg, struct AddrSpace *as, bool exempt,
                      struct page **out_winner);
 
+// Who pays the nodes an install allocates, when that is not an address space
+// (a Burrow's payer record). `charge` takes all `n` or none; `uncharge` returns
+// what a charge took. Both run with no lock held.
+struct pagemap_payer {
+    bool (*charge)(void *ctx, u32 n, bool exempt);
+    void (*uncharge)(void *ctx, u32 n);
+    void  *ctx;
+};
+
+// pagemap_install with the node charge routed through `payer` (NULL: the pool
+// alone). Same results and the same charge-before-allocate order.
+int  pagemap_install_paid(struct pagemap *pm, spin_lock_t *lock, size_t idx,
+                          struct page *pg, const struct pagemap_payer *payer,
+                          bool exempt, struct page **out_winner);
+
 // Take slot `idx`'s page out (*out_pg, or NULL if it was absent) and NULL the
 // slot. A node emptied by the take is unlinked and handed back in `freed[]`
 // (capacity PAGEMAP_MAX_DEPTH; *nfreed says how many), for the caller to
@@ -152,6 +168,10 @@ size_t pagemap_next_resident(const struct pagemap *pm, spin_lock_t *lock,
 // pagemap_next_resident since boot -- the witness of the bound above (the
 // vma_scan_steps shape).
 u64  pagemap_walk_steps(void);
+
+// Called by pagemap_install_paid in the window between allocating a path's
+// missing nodes and retaking the lock, where a rival may build the path.
+extern void (*g_pagemap_install_probe_for_test)(struct pagemap *pm, size_t idx);
 #endif // KERNEL_TESTS
 
 // Grow the map to `count` slots (more than it has), every resident page

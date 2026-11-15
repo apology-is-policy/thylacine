@@ -1787,8 +1787,14 @@ void proc_shared_map_uncharge(struct Proc *p, u32 npages);
 //   the name is set in the Proc's OWN exec path before it runs at EL0, so no
 //   concurrent reader observes a torn write in practice; a /proc reader that
 //   races the one-time stamp sees either the old ("") or the new bytes of a
-//   fixed 32-byte field (never out of bounds).
+//   fixed 32-byte field (never out of bounds). The stored name holds only
+//   printable ASCII graphics; any other byte of the basename is stored as '?'.
 void proc_set_name(struct Proc *p, const char *path, size_t len);
+
+// proc_state_word -- the state word of /ctl/procs and /proc/<pid>/status:
+//   ALIVE / ZOMBIE / INVALID, and STOPPED for an ALIVE Proc under a job stop
+//   that is not dying. The caller pins p (g_proc_table_lock, or a test's own).
+const char *proc_state_word(const struct Proc *p);
 
 // proc_cpu_ns -- sum run_ns over p->threads (the per-Proc cumulative on-CPU
 //   time, PROWL-DESIGN section 3.1). Takes p->threads_lock for the walk (the
@@ -3010,7 +3016,10 @@ void proc_seal(struct Proc *p, u32 bits);
 // holding it. The join is therefore exact at the instant of the access, which is
 // what makes it immune to a fork racing alongside -- a child published after the
 // check cannot widen what the check admitted, because its caps are bounded by
-// the parent the check already weighed.
+// the parent the check already weighed. Bounded twice: by the parent's caps as
+// its image was cloned and at the carve (audit round 37 P1-1), so a child whose
+// image is older than the parent's last unmap never holds what the parent
+// gained after it.
 struct ProcImageJoin {
     // The union over every OTHER Proc in the table mapping this address space,
     // ZOMBIES INCLUDED: a zombie holds its reference until it is reaped, so its
@@ -3025,16 +3034,49 @@ struct ProcImageJoin {
     // is reachable. Counted as "references, minus the zombies the traversal
     // saw", which leaves an unlinked-but-unfreed Proc counted (the traversal
     // cannot see it, so it falls in the difference) and fails safe.
+    // Also true while p's space is in a share family and maps shared anonymous
+    // memory (votes 120 + 122; ever shared, while mapping).
     bool   shared;
 };
 
 // Fill `out` with the join over `p`'s address space, EXCLUDING `p` itself (the
-// caller already holds p's own caps and flags and weighs them its own way).
-// Caller holds g_proc_table_lock.
+// caller already holds p's own caps and flags and weighs them its own way),
+// plus its space's share family record while the space maps shared anonymous
+// memory (votes 120 + 122; DEBUG-FS-DESIGN 3.4), read in O(1).
+// Caller holds g_proc_table_lock, and no address space's lock.
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out);
+
+// A fork's publication (rfork_internal's hold): link the parent's space to the
+// share family the clone gave the child's (moving the child onto the parent's
+// family if a rival fork gave the parent one first), and OR into it the
+// parent's whole join, the parent's own word and the child's. A no-op unless
+// the child's space is in a family. Returns the record the child no longer
+// needs, or NULL: the caller puts it AFTER releasing the lock. Caller holds
+// g_proc_table_lock, and no address space's lock.
+struct ShareFamily *proc_image_share_fork_locked(struct Proc *parent, struct Proc *child);
+
+// The fork's caps carve: the child's caps, the parent's legate scope (0 for
+// none) and the elevation-only set its scope lets cross.
+struct proc_fork_carve {
+    caps_t caps;
+    caps_t flow;
+    u32    scope;
+};
+#ifdef KERNEL_TESTS
+// `caps_at_clone` is the parent's caps read before its image was cloned.
+struct proc_fork_carve proc_fork_carve(const struct Proc *parent, caps_t caps_at_clone,
+                                       caps_t caps_mask);
+#endif
 
 // Stamp PROC_FLAG_DEBUG_TAINTED across the image. Caller holds g_proc_table_lock.
 void proc_mark_debug_tainted_locked(struct Proc *p);
+
+// Is `p` tainted -- its own word, or its IMAGE beyond its word: the space's
+// record of departed holders and of tainted shared memory it unmapped, and its
+// share family's record while it maps shared anonymous memory (votes 120 +
+// 122). Every reader of the taint asks this, not the word alone.
+// Caller holds g_proc_table_lock, and no address space's lock.
+bool proc_image_tainted_locked(const struct Proc *p);
 
 // May `p` gain authority right now? False if its image is tainted (anywhere in
 // the join) or still SHARED -- not because caps spread to other mappers (they do

@@ -33,6 +33,7 @@
 // always detached BEFORE the ref that frees is dropped).
 
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>           // Dev.content_versioned
 #include <thylacine/extinction.h>
 #include <thylacine/image.h>
 #include <thylacine/page.h>          // PAGE_SIZE
@@ -71,6 +72,7 @@ static u64 g_image_hits;          // returned an existing cached Burrow
 static u64 g_image_creates;       // registered a fresh Burrow
 static u64 g_image_evictions;     // dropped a victim to make room
 static u64 g_image_bypass;        // created un-cached (table full of live images)
+static u64 g_image_private;       // created un-cached (the file is not versioned content)
 static u64 g_image_reclaims;      // B-1a' audit F8: reclaim calls that freed a page
 static u64 g_image_reclaimed_pages;
 
@@ -91,7 +93,9 @@ static size_t page_round(size_t length) {
 
 // Key match against an input (spoor, file_offset, page-rounded size, exec). Read
 // under g_image_lock. `exec` (#45 audit F1) splits an R+X segment from an R-only
-// segment sharing a file window so one FILE Burrow is never dual-prot.
+// segment sharing a file window, and is each Burrow's exec class (file_exec):
+// the fault arm syncs every fill of an exec-class Burrow, and vma_args_ok
+// refuses an executable mapping of any other.
 _Static_assert(sizeof(((struct image_entry *)0)->devno) == sizeof(((struct Spoor *)0)->devno),
                "the Image cache key carries the whole devno");
 static bool key_match(const struct image_entry *e, const struct Spoor *s,
@@ -132,7 +136,8 @@ static int find_install_slot(void) {
 }
 
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
-                                      size_t length, bool exec, u64 file_limit) {
+                                      size_t length, bool exec, u64 file_limit,
+                                      struct AddrSpace *payer, bool payer_exempt) {
     if (!spoor)
         return NULL;
     if (spoor->magic != SPOOR_MAGIC)
@@ -145,6 +150,27 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
         return NULL;
 
     size_t size = page_round(length);
+
+    // Vote 114: only versioned content is shared and kept past its last unmap.
+    // Any other file maps privately: its own Burrow, never registered, so its
+    // Spoor -- and whatever state the server keeps for that open, a netd
+    // connection slot -- lives exactly as long as a mapping of it, and no
+    // later mapper is served this one's bytes. A private image is never
+    // registered, so it never answers a hit; asking before the search also
+    // keeps an unversioned open from taking a versioned entry's Burrow.
+    if (!spoor->dev || !spoor->dev->content_versioned ||
+        !spoor->dev->content_versioned(spoor)) {
+        struct Burrow *own = burrow_create_file(spoor, file_offset, length, exec);
+        if (!own)
+            return NULL;                     // no ref taken; caller still owns spoor
+        own->file_limit = file_limit;        // private here, as on the miss arm
+        // Vote 118: its pages are the mapper's, so it is born with a payer.
+        burrow_payer_set(own, payer, payer_exempt);
+        spin_lock(&g_image_lock);
+        g_image_private++;
+        spin_unlock(&g_image_lock);
+        return own;
+    }
 
     // --- pass 1: search the cache ---
     spin_lock(&g_image_lock);
@@ -164,7 +190,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     spin_unlock(&g_image_lock);
 
     // --- create OUTSIDE the lock (burrow_create_file may sleep; it ADOPTS spoor) ---
-    struct Burrow *fresh = burrow_create_file(spoor, file_offset, length);
+    struct Burrow *fresh = burrow_create_file(spoor, file_offset, length, exec);
     if (!fresh)
         return NULL;                         // no ref taken; caller still owns spoor
     // #194: stamp the caller-sampled backing size BEFORE publication (fresh is
@@ -198,6 +224,10 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
         // frees at unmap. Fail-safe degrade, never an exec failure.
         g_image_bypass++;
         spin_unlock(&g_image_lock);
+        // Vote 118 (round 34 F2): never registered, never served to another
+        // mapper, never idle-reclaimable -- a private image in all but how it
+        // got here, so its pages are its payer's like any private image's.
+        burrow_payer_set(fresh, payer, payer_exempt);
         return fresh;
     }
 
@@ -301,6 +331,7 @@ int image_cache_evict_idle_for_test(void) {
 u64 image_cache_hits_for_test(void)      { return g_image_hits; }
 u64 image_cache_creates_for_test(void)   { return g_image_creates; }
 u64 image_cache_evictions_for_test(void) { return g_image_evictions; }
+u64 image_cache_private_for_test(void)   { return g_image_private; }
 u64 image_cache_reclaims_for_test(void)        { return g_image_reclaims; }
 u64 image_cache_reclaimed_pages_for_test(void) { return g_image_reclaimed_pages; }
 #endif

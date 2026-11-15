@@ -262,8 +262,15 @@ which fails closed.
 ### The label is sanitized because an empty string is a sentinel elsewhere
 
 Session labels default to the attach name, truncated to a small fixed field,
-with every non-printable byte replaced — and **an empty result replaced by a
-placeholder**.
+with every byte that is not an ASCII graphic replaced by `?` — and **an empty
+result replaced by a placeholder**.
+
+The alphabet is the Proc name's, and for the same reason. A label is one column
+of its row in `/ctl/9p-sessions`, columns are split on spaces, and the attach
+name is the attacher's own bytes: a label that kept a space could write the
+row's other columns (`id=`, `rx=`) ahead of the real ones, and one that kept a
+newline could write a row. The `/srv` relabel passes a kernel literal, so the
+default label is the only one a program chooses.
 
 That last clause is not tidiness. The consumer that renders this registry treats
 *bytes written* as its overflow signal, so a zero-length field is

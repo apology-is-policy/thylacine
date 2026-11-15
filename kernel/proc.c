@@ -1498,6 +1498,12 @@ bool proc_child_cap_ok(struct Proc *p) {
 // prowl-1 (PROWL-DESIGN.md section 3.2): stamp p->name with the basename of
 // `path` (the last '/'-delimited component). See proc.h for the concurrency
 // note (set once in the Proc's own exec path before it runs at EL0).
+//
+// The name is printed raw into text that is read by line and by column
+// (/proc/<pid>/status, /ctl/procs, the console), and a file name may hold any
+// byte but '/' and NUL: a newline would forge a line there, a space a column,
+// ESC a terminal command. So the name has one alphabet, the printable ASCII
+// graphics, and every other byte is stored as '?'.
 void proc_set_name(struct Proc *p, const char *path, size_t len) {
     if (!p || !path || len == 0) return;
     size_t start = 0;
@@ -1505,9 +1511,30 @@ void proc_set_name(struct Proc *p, const char *path, size_t len) {
         if (path[i] == '/') start = i + 1u;
     if (start >= len) return;   // trailing-slash / empty basename -- keep prior
     size_t j = 0;
-    for (size_t i = start; i < len && path[i] != '\0' && j < PROC_NAME_MAX - 1u; i++)
-        p->name[j++] = path[i];
+    for (size_t i = start; i < len && path[i] != '\0' && j < PROC_NAME_MAX - 1u; i++) {
+        u8 c = (u8)path[i];
+        p->name[j++] = (c > 0x20u && c < 0x7fu) ? (char)c : '?';
+    }
     p->name[j] = '\0';
+}
+
+// The word /ctl/procs and /proc/<pid>/status show for p's state: its lifecycle
+// state, except that an ALIVE Proc under a job stop (a Ctrl-Z, a monitor's
+// suspend) reads STOPPED -- the Unix ps T state, Plan 9's Stopped. The debugger's
+// stop is not shown: it is the debugger's own view (I-39). A dying Proc is not
+// stopped (DEBUG-FS-DESIGN 5g): its last thread runs its exit whatever stop it
+// had. Both flags are read atomically; the caller pins p.
+const char *proc_state_word(const struct Proc *p) {
+    if (p->state == PROC_STATE_ALIVE &&
+        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL)
+        return "STOPPED";
+    switch (p->state) {
+    case PROC_STATE_INVALID: return "INVALID";
+    case PROC_STATE_ALIVE:   return "ALIVE";
+    case PROC_STATE_ZOMBIE:  return "ZOMBIE";
+    default:                 return "?";
+    }
 }
 
 // prowl-1 (PROWL-DESIGN.md section 3.1): the per-Proc cumulative on-CPU time =
@@ -1540,6 +1567,9 @@ u32 proc_kstack_peak(struct Proc *p, int *tid_out, u32 *budget_words) {
     u32 peak = p->reaped_kstack_peak;
     if (peak && tid_out) *tid_out = p->reaped_kstack_tid;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc) {
+        // A spent budget ends the walk here: the caller drops this Proc's
+        // number, and each thread left would cost a load for nothing.
+        if (budget_words && *budget_words == 0u) break;
         u32 used = thread_kstack_used(t, budget_words);
         if (used > peak) {
             peak = used;
@@ -1608,6 +1638,22 @@ static void rfork_rollback_unpublished(struct Proc *child, struct Thread *ct) {
     thread_free(ct);
     child->state = PROC_STATE_ZOMBIE;
     proc_free(child);
+}
+
+// The fork's caps carve (I-2; IM-2, imperium.tla Fork / Flow): the child holds
+// what the parent held both when its image was taken and now, under the
+// spawn mask, with elevation-only caps stripped unless the parent's scope
+// propagates them (rfork_internal says why each part).
+VISIBLE_IF_KERNEL_TESTS
+struct proc_fork_carve proc_fork_carve(const struct Proc *parent, caps_t caps_at_clone,
+                                       caps_t caps_mask) {
+    struct proc_fork_carve k;
+    caps_t now = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
+    k.scope = __atomic_load_n(&parent->legate_scope_id, __ATOMIC_ACQUIRE);
+    k.flow  = (k.scope != 0u && (parent->legate_flags & LEGATE_FLAG_PROPAGATING) != 0u)
+            ? parent->legate_caps : (caps_t)0;
+    k.caps  = ((now & caps_at_clone) & caps_mask) & ~(CAP_ELEVATION_ONLY & ~k.flow);
+    return k;
 }
 
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
@@ -1713,6 +1759,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // we drop ours below, leaving exactly the child's. That is also why the failure
     // paths need nothing bespoke -- proc_alloc_in's own rollback drops the child's
     // reference, and our unref then takes the last one.
+    // The caps the parent holds as its image is taken (audit round 37 P1-1),
+    // read BEFORE the clone: the carve below bounds the child by these as well
+    // as by the parent's caps then. A peer thread can unmap the parent's
+    // shared anonymous memory and elevate between the clone and the carve --
+    // vote 122 admits that elevation, the parent's image no longer reaching
+    // the family -- but this child's image still maps the memory, debugged
+    // by a member that never covered what the parent gained.
+    const caps_t caps_at_clone = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
     struct AddrSpace *cloned = NULL;
     if (fc && !(flags & RFMEM)) {
         // proc_resource_exempt(parent) is the CHILD's verdict: identity is
@@ -1764,12 +1818,10 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // reads nonzero; a parent mid-redeem reads 0 and its child is born
     // unscoped -- the fork linearizes before the redeem, the only consistent
     // answer. The tag inherit below keys on the same load.
-    caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
-    u32    pscope      = __atomic_load_n(&parent->legate_scope_id, __ATOMIC_ACQUIRE);
-    caps_t flow        = (pscope != 0u &&
-                          (parent->legate_flags & LEGATE_FLAG_PROPAGATING) != 0u)
-                       ? parent->legate_caps : (caps_t)0;
-    child->caps = (parent_caps & caps_mask) & ~(CAP_ELEVATION_ONLY & ~flow);
+    struct proc_fork_carve carve = proc_fork_carve(parent, caps_at_clone, caps_mask);
+    u32    pscope = carve.scope;
+    caps_t flow   = carve.flow;
+    child->caps = carve.caps;
 
     // A-1a: identity is INHERITED across rfork (the durable principal-id +
     // groups flow parent -> child unchanged). This is the opposite of caps
@@ -2148,12 +2200,21 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // COW child gets a private COPY, where whether a copy of a secret is itself
     // secret is decision A -- still the operator's open question, which
     // inheriting here would settle by accident.
-    u32 pflags = __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE);
-    if (pflags & PROC_FLAG_DEBUG_TAINTED)
+    // The parent's IMAGE taint, not only its word (vote 120): memory it shares
+    // with another space may have been under a debugger there, and the parent
+    // was never stamped for it (proc_image_tainted_locked).
+    if (proc_image_tainted_locked(parent))
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
                           __ATOMIC_RELAXED);
     if (note_table_crosses)
         __atomic_fetch_or(&child->proc_flags, PROC_FLAG_NOTE_TABLE, __ATOMIC_RELAXED);
+
+    // Shared anonymous memory the clone mapped into the child's new space
+    // (votes 120 + 122; DEBUG-FS-DESIGN 3.4): the share family links both
+    // spaces and takes the parent's whole join and both words in this hold,
+    // before any gate can see the child, so from here every guard on either
+    // image weighs the other side too. A spare record is put after the hold.
+    struct ShareFamily *spare_family = proc_image_share_fork_locked(parent, child);
 
     // The birth hold (DEBUG-FS-DESIGN 5f), in the same hold as the publication
     // and for the taint's reason: the orphan rule runs under this lock at the
@@ -2167,6 +2228,7 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
 
     proc_link_child(parent, child);
     proc_table_lock_release(s);
+    share_family_put(spare_family);
 
     // Capture the pid BEFORE the child can run, and do not dereference `child`
     // past this point. Once ready() has published the thread, a PEER THREAD of
@@ -2946,6 +3008,50 @@ static void proc_image_join_one(struct Proc *q, struct proc_image_walk *w) {
     if (q->state == PROC_STATE_ZOMBIE) w->zombies++;
 }
 
+// What `as`'s records add to its image: the space's own record of departed
+// holders, and -- while the space maps shared anonymous memory -- its share
+// family's (votes 120 + 122; DEBUG-FS-DESIGN 3.4). O(1): the family replaced a
+// walk of the space's mappings that had no practical bound (audit round 36
+// F1). Read without as->lock, which a clone of this space holds across the
+// whole copy, so a reader under g_proc_table_lock never waits on one (audit
+// round 37 P2-1). The family pointer is stable under g_proc_table_lock, which
+// the caller holds (the publication writes a published space's under it).
+// vma_remove_in folds the family's taint into guards_ever and THEN lowers the
+// count with a release store, so a count read here (acquire) that shows the
+// unmap is followed by a guards_ever read that shows the fold: the mapping
+// counted, or the fold, never neither. No VMA operation takes the count
+// through zero while the bytes stay mapped (a split inserts its pieces before
+// a merge removes one, the survivor still counted); a replace that unmaps
+// the last piece and maps a fresh one in its place is an unmap, then a map.
+struct proc_image_record {
+    caps_t caps;
+    u32    guards;
+    bool   shared;
+};
+
+static void proc_image_record_locked(struct AddrSpace *as, struct proc_image_record *r) {
+    r->caps = CAP_NONE;
+    r->guards = 0;
+    r->shared = false;
+    if (!as) return;
+    struct ShareFamily *f = __atomic_load_n(&as->family, __ATOMIC_ACQUIRE);
+    if (f && __atomic_load_n(&as->shared_maps, __ATOMIC_ACQUIRE)) {
+        r->caps   = __atomic_load_n(&f->caps, __ATOMIC_ACQUIRE);
+        r->guards = __atomic_load_n(&f->guards, __ATOMIC_ACQUIRE);
+        r->shared = true;
+    }
+    r->caps   |= __atomic_load_n(&as->caps_ever, __ATOMIC_ACQUIRE);
+    r->guards |= __atomic_load_n(&as->guards_ever, __ATOMIC_ACQUIRE);
+}
+
+bool proc_image_tainted_locked(const struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) extinction("proc_image_tainted_locked: NULL or corrupted Proc");
+    if (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) return true;
+    struct proc_image_record r;
+    proc_image_record_locked(p->as, &r);
+    return (r.guards & PROC_FLAG_DEBUG_TAINTED) != 0;
+}
+
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     if (!out) extinction("proc_image_join_locked: NULL out");
     out->caps   = CAP_NONE;
@@ -2953,14 +3059,22 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     out->shared = false;
     if (!p || !p->as) return;
 
-    // The holders that have LEFT the image, sole mapper or not: what they held is
-    // still in the bytes (a creator's code aliases, a driver's device windows, a
-    // sealed parent's secrets), and no live mapper's word names it any more. The
-    // record is written under this lock at the ZOMBIE transition and the exec
-    // swap, so a holder is in the record before a reap can take it out of the
-    // walk below.
-    out->caps  |= __atomic_load_n(&p->as->caps_ever, __ATOMIC_RELAXED);
-    out->flags |= __atomic_load_n(&p->as->guards_ever, __ATOMIC_RELAXED);
+    // The records: the holders that have LEFT the image, sole mapper or not --
+    // what they held is still in the bytes (a creator's code aliases, a
+    // driver's device windows, a sealed parent's secrets), and no live
+    // mapper's word names it any more; the record is written under this lock
+    // at the ZOMBIE transition and the exec swap, so a holder is in the record
+    // before a reap can take it out of the walk below. And the other address
+    // spaces this image reaches through shared anonymous memory: the share
+    // family's record holds every member's caps and guards, departed ones
+    // included, and while this space maps shared anonymous memory it makes
+    // the image shared. Asked before the sole-owner return below, which knows
+    // only this space.
+    struct proc_image_record r;
+    proc_image_record_locked(p->as, &r);
+    out->caps  |= r.caps;
+    out->flags |= r.guards;
+    if (r.shared) out->shared = true;
 
     // No other reference at all: nothing to join, and no traversal to pay for.
     // This is the overwhelmingly common case, which is what keeps a per-operation
@@ -2997,7 +3111,63 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     // true -- which is the direction that matters, since a missed sharer here is
     // a privilege question rather than a cosmetic one.
     u32 others = (u32)(refs - 1);
-    out->shared = others > w.zombies;
+    if (others > w.zombies) out->shared = true;
+}
+
+struct ShareFamily *proc_image_share_fork_locked(struct Proc *parent, struct Proc *child) {
+    if (!parent || parent->magic != PROC_MAGIC || !child || child->magic != PROC_MAGIC)
+        extinction("proc_image_share_fork_locked: NULL or corrupted Proc");
+    struct AddrSpace *cas = child->as, *pas = parent->as;
+    if (!cas || !pas || cas == pas) return NULL;
+    // The clone puts a child that maps shared anonymous memory in a family; the
+    // child is unpublished, so nothing has unmapped anything of it yet.
+    if (cas->shared_maps && !cas->family)
+        extinction("proc_image_share_fork_locked: a sharing child space outside any family");
+    if (!cas->family) return NULL;
+
+    // Link the parent's space to the child's family -- or, if a rival fork by
+    // a peer thread gave the parent one after this fork's clone read it, move
+    // the child onto the parent's: a space is in one family, and the parent's
+    // is published. A published space's pointer is written only here, under
+    // this lock, once (NULL to a family), and without the parent's as->lock,
+    // which a clone holds across its copy (audit round 37 P2-1). The two
+    // readers that do not hold this lock see it either way and are sound
+    // either way: a clone that reads NULL gives its child a new family, which
+    // its own publication moves onto this one (the arm below); an unmap fold
+    // that reads NULL folds nothing, and misses nothing, because the child's
+    // family is empty until the ORs below and what they add is the parent's
+    // own (its join and word, and a child that inherits from it). A stamp
+    // through the child comes after this hold, and the fold's fence orders
+    // the parent's reads of any bytes it covers before the fold (vma_remove_in).
+    struct ShareFamily *spare = NULL;
+    struct ShareFamily *pf = pas->family;
+    if (!pf) {
+        share_family_get(cas->family);
+        __atomic_store_n(&pas->family, cas->family, __ATOMIC_RELEASE);
+    } else if (pf != cas->family) {
+        share_family_get(pf);
+        spare = cas->family;
+        cas->family = pf;
+    }
+
+    // Everything that could drive these bytes from the parent's side: its
+    // whole join (the Procs on its space, the space's departed holders, and
+    // its family's record), its own word, and the child's. Read in the hold
+    // that publishes the child, the one every elevation path holds, so an
+    // elevation that raced ahead is weighed here and one that comes after
+    // finds the image shared and is refused.
+    struct ProcImageJoin j;
+    proc_image_join_locked(parent, &j);
+    caps_t caps = j.caps
+                | __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE)
+                | __atomic_load_n(&child->caps, __ATOMIC_ACQUIRE);
+    u32 guards = (j.flags
+                  | __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE)
+                  | __atomic_load_n(&child->proc_flags, __ATOMIC_ACQUIRE))
+               & PROC_IMAGE_GUARDS;
+    __atomic_fetch_or(&cas->family->caps, caps, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&cas->family->guards, guards, __ATOMIC_RELEASE);
+    return spare;
 }
 
 static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
@@ -3006,12 +3176,20 @@ static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
 }
 
 // OR `bits` into `p` AND into every other mapper of its address space (zombies
-// included) -- a restriction on the image binds every door to it. Caller holds
-// g_proc_table_lock.
+// included), and into its space's share family record -- a restriction on the
+// image binds every door to it. Caller holds g_proc_table_lock, and no address
+// space's lock.
+
 static void proc_image_stamp_locked(struct Proc *p, u32 bits) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_image_stamp_locked: NULL or corrupted Proc");
     __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
+    // And every other space this image reaches through shared anonymous
+    // memory (votes 120 + 122): the bits go on the share family's record,
+    // which every member's join reads. The pointer is stable under this lock.
+    u32 guards = bits & PROC_IMAGE_GUARDS;
+    if (p->as && p->as->family && guards)
+        __atomic_fetch_or(&p->as->family->guards, guards, __ATOMIC_RELEASE);
     if (!p->as || addrspace_owner_count(p->as) <= 1) return;
     struct proc_image_walk w = { .target = p, .out = NULL, .zombies = 0, .bits = bits };
     proc_image_visit(proc_image_stamp_one, &w);
@@ -5670,6 +5848,12 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         // be unwound.
         handle_private_exec_latch(p);
         old   = p->as;
+        // The image this Proc leaves may be tainted where its own word is not
+        // (votes 120 + 122: shared memory debugged through another member of
+        // its share family, or tainted memory it unmapped); the taint survives exec, so it goes on the
+        // word before the image does.
+        if (proc_image_tainted_locked(p))
+            __atomic_fetch_or(&p->proc_flags, PROC_FLAG_DEBUG_TAINTED, __ATOMIC_RELAXED);
         addrspace_record_holder(old, p);
         p->as = nas;
 

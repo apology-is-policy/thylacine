@@ -1758,20 +1758,25 @@ static s64 spoor_read_on(struct Spoor *c, u8 *kbuf, u64 len, bool positioned,
     if (len == 0)                                    return 0;
     if (!c->dev || !c->dev->read)                    return -T_E_INVAL;
     if (positioned && len > (u64)INT64_MAX - (u64)off) return -T_E_INVAL;
-    long n = c->dev->read(c, kbuf, (long)len, positioned ? off : c->offset);
+    // The cursor is read with acquire and advanced with release, so what a Dev
+    // published beside it before returning (devctl's /ctl/procs snapshot in
+    // Spoor.aux) is seen by the next read at the advanced cursor on any CPU.
+    long n = c->dev->read(c, kbuf, (long)len,
+                          positioned ? off : __atomic_load_n(&c->offset, __ATOMIC_ACQUIRE));
     // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
     // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
     // negative to keep pouch's [-4095,-1] error window safe (see the write twin).
     if (n < 0) return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
-    if (!positioned) c->offset += n;
+    if (!positioned) __atomic_add_fetch(&c->offset, (s64)n, __ATOMIC_RELEASE);
     return (s64)n;
 }
 
 // Shared body behind SYS_READ (cursor) and SYS_PREAD (positioned) -- #37.
 // The read twin of spoor_write_common; see its comment for the positioned
 // gates (off >= 0, off + len overflow, dev->seekable) and the cursor
-// contract. positioned=false is byte-identical to the pre-#37
-// sys_read_for_proc.
+// contract. positioned=false is the pre-#37 sys_read_for_proc, with the cursor
+// read by an acquire load and advanced by a release add (the ordering a Dev
+// publishing beside the cursor relies on; see the dossier).
 //
 // Only KOBJ_SPOOR is readable (sys_lookup_rw_handle filters): the read
 // routes through the Dev `.read` vtable. A byte-mode /srv connection
@@ -4667,13 +4672,13 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // reject bucket):
     //   (a) leaf Devs (cons/null/zero/full/random/pipe/notes/none) return NULL
     //       -> the walk-fail path below.
-    //   (b) Devs that REUSE nc on a clone (devcap/devsrv/devramfs return
-    //       w->spoor == nc, nqid==0) -> the create call proceeds but their
-    //       create stub returns NULL, and their clone carries aux==NULL (or a
-    //       no-op close), so the eventual spoor_clunk(nc) is harmless.
-    //   (c) self-cloning dir Devs (devproc/devctl IGNORE nc and clone
-    //       internally) return w->spoor != nc -> the reject path below (which
-    //       now clunks the leaked clone, F2).
+    //   (b) Devs that REUSE nc on a clone (devcap/devsrv/devramfs/devproc/
+    //       devctl return w->spoor == nc, nqid==0) -> the create call proceeds
+    //       but their create stub returns NULL, and their clone carries
+    //       aux==NULL (or a no-op close), so the eventual spoor_clunk(nc) is
+    //       harmless.
+    //   (c) a Dev that ignores nc and clones internally returns w->spoor != nc
+    //       -> the reject path below (which clunks the leaked clone, F2).
     // Only dev9p replaces nc->aux with a real fresh fid -- the only Dev whose
     // create actually creates at v1.0.
     struct Spoor *nc = spoor_clone(src);
@@ -4704,10 +4709,10 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
     // apply the nqid==1 partial-walk check here.
     if (w->spoor != nc) {
-        // F2 audit: a self-cloning Dev (devproc/devctl) returned its OWN fresh
-        // Spoor (ref=1) instead of reusing nc -- clunk it so it doesn't leak.
-        // (Unreachable at v1.0: no writable self-cloning Dev is user-exposed;
-        // correct for when one is.)
+        // F2 audit: a Dev that returned its OWN fresh Spoor (ref=1) instead of
+        // reusing nc -- clunk it so it doesn't leak. (Unreachable today: every
+        // Dev reuses nc, devproc and devctl included; correct for one that
+        // does not.)
         if (w->spoor) spoor_clunk(w->spoor);
         walkqid_free(w);
         nc->aux = NULL;
@@ -7009,10 +7014,15 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 // a fresh Burrow and VMA. The placement is the same either way; only the
 // representation differs. No page charge here -- a reservation commits and
 // charges per page at fault, so page_count tracks true RSS -- and the mapping's
-// ceiling is RW whatever `prot` it starts at (ARCH 6.5: the reserve-then-commit
-// idiom; an extended neighbour has that ceiling already, as part of what
-// qualified it). Returns the address, or -T_E_NOMEM.
-static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot) {
+// ceiling is `ceiling` whatever `prot` it starts at: RW for every reservation
+// (ARCH 6.5: the reserve-then-commit idiom; an extended neighbour has that
+// ceiling already, as part of what qualified it), READ for a shared /dev/zero
+// map through a descriptor not open for writing (VIVARIUM 6.21). `shared` mints
+// the anonymous memory a fork shares (votes 117 + 119), paid by this space; it
+// never extends a neighbour, and neither does a ceiling below RW (an extension
+// would take the neighbour's). Returns the address, or -T_E_NOMEM.
+static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot,
+                             u32 ceiling, bool shared) {
     spin_lock(&p->as->lock);
     u64 vaddr;
     if (vma_find_gap_aligned(p, length, align, EXEC_USER_BURROW_BASE,
@@ -7022,14 +7032,18 @@ static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot) {
     }
     // An extension adds no VMA; it may grow the neighbour's pagemap, whose
     // nodes are charged like a fault's.
-    if (vma_extend_anon_in(p->as, proc_resource_exempt(p), vaddr, length, prot,
+    if (!shared && ceiling == VMA_PROT_RW &&
+        vma_extend_anon_in(p->as, proc_resource_exempt(p), vaddr, length, prot,
                            EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP) == 0) {
         spin_unlock(&p->as->lock);
         return (s64)vaddr;
     }
     // A fresh mapping: the VMA-count cap inside burrow_map bounds the free
-    // reservation.
-    struct Burrow *b = burrow_create_anon_lazy(length);
+    // reservation. A shared one carries its payer record from birth, so the
+    // map below marks this space's mapping the payer's.
+    struct Burrow *b = shared
+        ? burrow_create_anon_shared(length, p->as, proc_resource_exempt(p))
+        : burrow_create_anon_lazy(length);
     if (!b) {
         spin_unlock(&p->as->lock);
         return -(s64)T_E_NOMEM;
@@ -7037,17 +7051,18 @@ static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot) {
     // burrow_map installs the VMA (mapping_count -> 1, the VMA charged); the
     // construction handle is dropped after. On a refusal (overlap / VMA cap /
     // OOM) that handle is the only ref, and freeing an EMPTY lazy Burrow never
-    // sleeps (no Spoor, no pages), so that drop may stay under the lock.
+    // sleeps (no Spoor, no pages; a shared one's empty record refunds nothing
+    // under a spinlock), so that drop may stay under the lock.
     if (burrow_map(p, b, vaddr, length, prot) != 0) {
         burrow_unref(b);
         spin_unlock(&p->as->lock);
         return -(s64)T_E_NOMEM;
     }
     // vma_alloc set the ceiling to the mint prot (the safe default for every
-    // OTHER mint); raise it under the same lock hold, before anything can
+    // OTHER mint); set it under the same lock hold, before anything can
     // observe the mapping.
     struct Vma *nv = vma_lookup(p, vaddr);
-    if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+    if (nv) vma_set_prot_max(nv, ceiling);
     // The construction handle goes in the same hold, so a reservation a sibling
     // thread places beside this one never finds the Burrow named by a handle and
     // mints where it would extend (ARCH 6.5): the mapping shape does not depend
@@ -7072,7 +7087,7 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (length_raw > BURROW_RESERVE_MAX)             return -1;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
-    s64 r = lazy_reserve_core(p, length, 0, VMA_PROT_RW);
+    s64 r = lazy_reserve_core(p, length, 0, VMA_PROT_RW, VMA_PROT_RW, false);
     return r < 0 ? -1 : r;
 }
 
@@ -7092,14 +7107,18 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 // (3) fail-close on I/O error is file_demand_page_single's FAULT_USER_BUS;
 // (4) W^X holds because PROT_WRITE cannot reach here (vivarium_mmap_file_decide
 // refuses it) and vma_alloc rejects W+X independently; (5) I-cache sync is the
-// fault arm's, keyed on the VMA's own X bit; (6) Image-cache eviction safety is
+// fault arm's, keyed on the Burrow's exec class (the Image key's `exec`), which
+// vma_args_ok requires of any executable mapping; (6) Image-cache eviction safety is
 // unchanged; (7) pin-at-map replaces pin-at-exec -- the Burrow adopts a Spoor ref
 // for its whole life, so the guest closing the fd cannot pull the backing file
 // out from under a resident mapping.
 //
-// I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (they
-// are shared, so charging them per-mapper would count one physical page N times);
-// the VMA-count axis IS charged inside vma_insert. The per-page slot table is
+// I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (a
+// cached image's are shared, so charging them per-mapper would count one physical
+// page N times; a private image's (vote 114) are shared with nobody, and ride the
+// same posture bounded by the mapping that holds them -- whether to charge those
+// per page is enqueued); each leaf a fault installs IS charged, and the VMA-count
+// axis is charged inside vma_insert. The per-page slot table is
 // the pagemap (B-1a'): a FILE Burrow's nodes are uncharged like its pages, but
 // they exist only as slots fill -- at most one per 512 resident pages plus a
 // root -- so the kernel memory a mapping costs follows what was paged in, never
@@ -7134,11 +7153,49 @@ static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
     return !mount_noexec_covers(p->territory, sp->dc, sp->devno);
 }
 
-// Returns the mapped VA, or a negated T_E_* the caller passes straight out.
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
-                           bool exec, u64 offset) {
-    if (!p)                                          return -(s64)T_E_INVAL;
+// A file mapping's descriptor, Linux's fget half: one naming nothing, or opened
+// O_PATH (#81: a navigation handle carries no byte-I/O authority, and a mapping
+// is byte I/O by another name), is NULL -- the caller's EBADF. Whether it is
+// open for reading, and for writing, is reported, not judged: Linux asks that
+// later (do_mmap's FMODE_READ and, for a shared map, FMODE_WRITE, after the
+// length and window checks), so the phenotype judges it where Linux does.
+// Returns a REF-HELD Spoor the caller spoor_clunks.
+static struct Spoor *sys_get_mapping_spoor(struct Proc *p, u64 fd_raw, bool *readable,
+                                           bool *writable) {
+    struct Handle hh;
+    if (handle_get(p, sys_hidx_arg(fd_raw), &hh) < 0)  return NULL;
+    struct Spoor *sp = (struct Spoor *)hh.obj;
+    if (hh.kind != KOBJ_SPOOR || (sp->flag & CWALKONLY)) {
+        handle_put(&hh);
+        return NULL;
+    }
+    *readable = (hh.rights & RIGHT_READ) != 0;
+    *writable = (hh.rights & RIGHT_WRITE) != 0;
+    return sp;                                       // ref TRANSFERRED to the caller
+}
+
+// Both halves at once, for the native door: EBADF as above; one not open for
+// reading is EACCES (ERRORS.md: a missing right is ACCES; vote 116). Returns a
+// REF-HELD Spoor the caller spoor_clunks, or NULL with *err set.
+static struct Spoor *sys_lookup_mapping_spoor(struct Proc *p, u64 fd_raw, s64 *err) {
+    bool readable = false, writable = false;
+    struct Spoor *sp = sys_get_mapping_spoor(p, fd_raw, &readable, &writable);
+    if (!sp) {
+        *err = -(s64)T_E_BADF;
+        return NULL;
+    }
+    if (!readable) {
+        spoor_clunk(sp);
+        *err = -(s64)T_E_ACCES;
+        return NULL;
+    }
+    return sp;
+}
+
+// The non-fixed file window: the length and the file range it names. Shared by
+// the native door (which asks it before the descriptor) and the phenotype
+// (which asks it after, in Linux's order). `*length_out` is written on success.
+static s64 mmap_file_window(u64 length_raw, u64 offset, u64 *length_out) {
     if (length_raw == 0)                             return -(s64)T_E_INVAL;
     if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
     if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
@@ -7147,6 +7204,21 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // A mapping whose file window would wrap past the end of the address space
     // cannot be described; refuse before it reaches the Burrow's own guards.
     if (offset + length < offset)                    return -(s64)T_E_INVAL;
+    *length_out = length;
+    return 0;
+}
+
+static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
+                          bool exec, u64 offset);
+
+// Returns the mapped VA, or a negated T_E_* the caller passes straight out.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+                           bool exec, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    u64 length = 0;
+    s64 werr = mmap_file_window(length_raw, offset, &length);
+    if (werr != 0)                                   return werr;
 
     // T_RIGHT_READ, not T_RIGHT_EXEC, and deliberately: there is no per-handle
     // execute right on a Spoor to demand, so requiring one would fail every
@@ -7162,10 +7234,19 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // MNOEXEC vouching below (#217, ARCH 6.5); the wording is corrected here
     // rather than left standing as the in-code twin of a premise the D-close
     // arc round already falsified in scripture.
-    // #844: the ref is TRANSFERRED to us -- spoor_clunk on every path below.
-    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
-    if (!sp)                                         return -(s64)T_E_BADF;
+    // #844: the ref is TRANSFERRED to us, and the body consumes it.
+    // An O_PATH handle (#81) is refused here too, as EBADF.
+    s64 derr;
+    struct Spoor *sp = sys_lookup_mapping_spoor(p, fd_raw, &derr);
+    if (!sp)                                         return derr;
+    return mmap_file_body(p, sp, length, exec, offset);
+}
 
+// The non-fixed arm past its descriptor and window: CONSUMES `sp` (spoor_clunk
+// on every path). Its callers have judged the window and the descriptor, each
+// in its own order.
+static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
+                          bool exec, u64 offset) {
     // A PLAIN FILE only. A directory has no byte stream to page from; a symlink
     // must be followed, not mapped (the #184 discipline, where the twin's
     // "a symlink fid is not byte-I/O-able" safety argument turned out FALSE
@@ -7173,13 +7254,6 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // an append-only file's byte positions are not stable under a concurrent
     // writer, which is precisely what a demand-paged mapping assumes.
     if (sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) {
-        spoor_clunk(sp);
-        return -(s64)T_E_INVAL;
-    }
-    // #81: an O_PATH handle is a NAVIGATION capability that deliberately carries
-    // no byte-I/O authority. Mapping through one would be byte I/O by another
-    // name -- the exact bypass CWALKONLY exists to prevent.
-    if (sp->flag & CWALKONLY) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
     }
@@ -7200,7 +7274,7 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
         return -(s64)T_E_INVAL;
     }
     // After the exec floor, as Linux checks noexec before a missing mmap.
-    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+    if (!sp->dev->may_back_mapping) {                // Dev.may_back_mapping
         spoor_clunk(sp);
         return -(s64)T_E_NODEV;
     }
@@ -7224,7 +7298,8 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // ours to drop, exactly as map_file_backed does.
     spoor_ref(sp);
     struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec,
-                                              file_limit);
+                                              file_limit, p->as,
+                                              proc_resource_exempt(p));
     if (!b) {
         spoor_clunk(sp);                 // the fresh ref it did not consume
         spoor_clunk(sp);                 // ours
@@ -7242,7 +7317,9 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
                      EXEC_USER_BURROW_TOP, &vaddr) != 0) {
         spin_unlock(&p->as->lock);
-        burrow_unref(b);                 // the cache's ref keeps it cached
+        // After the unlock: a private or bypass image's last ref frees it, and
+        // that may sleep in spoor_clunk (a cached one stays cached, idle).
+        burrow_unref(b);
         return -(s64)T_E_NOMEM;
     }
     if (burrow_map(p, b, vaddr, length, prot) != 0) {
@@ -7251,12 +7328,13 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
         return -(s64)T_E_NOMEM;
     }
     spin_unlock(&p->as->lock);
-    // Drop the construction handle OUTSIDE as->lock (#193): mapping_count + the
-    // cache's own ref keep the image alive (I-7 dual count), so this is never
-    // the last ref today -- but if it ever were, burrow_free_internal ->
-    // spoor_clunk may sleep, the same leaf-lock rule file_demand_page_slow
-    // states. Dropping after the unlock removes the need for that non-local
-    // argument entirely; the failure paths above already did.
+    // Drop the construction handle OUTSIDE as->lock (#193): the new mapping
+    // keeps the image alive (I-7 dual count), with the cache's own ref for a
+    // cached image. For a private or bypass image this unref leaves the
+    // mapping as the only holder, and on any path where it is the last ref
+    // burrow_free_internal -> spoor_clunk may sleep, the same leaf-lock rule
+    // file_demand_page_slow states; dropping after the unlock keeps that safe
+    // without a non-local argument, as the failure paths above do.
     burrow_unref(b);
 
     // A user VA is below 2^47, so this can never be mistaken for the [-4095,-1]
@@ -7388,26 +7466,48 @@ struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
 // windows ride the shared Image cache exactly as D-3a does; a writable one gets
 // the eager private copy above. Returns `addr` on success (MAP_FIXED's contract:
 // the requested address or nothing).
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
-                                 u64 length_raw, u32 pr, u64 offset) {
-    if (!p)                                          return -(s64)T_E_INVAL;
+// The fixed arm's window and file range, shared like mmap_file_window. Both
+// outputs are written only on success.
+static s64 mmap_fixed_file_window(u64 addr, u64 length_raw, u32 pr, u64 offset,
+                                  u64 *length_out, u32 *prot_out) {
     if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
-
     u64 length; u32 prot;
     s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
     if (werr != 0)                                   return werr;
     if (offset + length < offset)                    return -(s64)T_E_INVAL;
+    *length_out = length;
+    *prot_out   = prot;
+    return 0;
+}
+
+static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
+                                u64 length, u32 prot, u64 offset);
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+                                 u64 length_raw, u32 pr, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    u64 length = 0; u32 prot = 0;
+    s64 werr = mmap_fixed_file_window(addr, length_raw, pr, offset, &length, &prot);
+    if (werr != 0)                                   return werr;
 
     // The same gates as the D-3a arm, and for the same reasons: READ is the
     // authority a mapping consumes; a directory has no byte stream; a symlink
     // must be followed (#184); an append-only file has no stable byte positions;
-    // an O_PATH handle carries no byte-I/O authority (#81); a Dev with no read
-    // slot cannot serve a page-in.
-    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
-    if (!sp)                                         return -(s64)T_E_BADF;
+    // an O_PATH handle carries no byte-I/O authority (#81, EBADF in the lookup);
+    // a Dev with no read slot cannot serve a page-in.
+    s64 derr;
+    struct Spoor *sp = sys_lookup_mapping_spoor(p, fd_raw, &derr);
+    if (!sp)                                         return derr;
+    return mmap_fixed_file_body(p, sp, addr, length, prot, offset);
+}
+
+// The fixed arm past its descriptor and window: CONSUMES `sp`, as
+// mmap_file_body does.
+static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
+                                u64 length, u32 prot, u64 offset) {
     if ((sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) ||
-        (sp->flag & CWALKONLY) || !sp->dev || !sp->dev->read) {
+        !sp->dev || !sp->dev->read) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
     }
@@ -7422,7 +7522,7 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         return -(s64)T_E_PERM;
     }
     // After the exec floor, as in the non-fixed arm.
-    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+    if (!sp->dev->may_back_mapping) {                // Dev.may_back_mapping
         spoor_clunk(sp);
         return -(s64)T_E_NODEV;
     }
@@ -7450,7 +7550,8 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         // NULL, so hand it a fresh one and keep ours to drop.
         spoor_ref(sp);
         b = image_lookup_or_create(sp, offset, (size_t)length,
-                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit);
+                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit,
+                                   p->as, proc_resource_exempt(p));
         if (!b) {
             spoor_clunk(sp);             // the fresh ref it did not consume
             spoor_clunk(sp);             // ours
@@ -7460,7 +7561,8 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     }
 
     // D-3c re-audit F5 [P1]: a MAP_FIXED exact-cover REPLACES an existing VMA,
-    // whose Burrow may be a 9P-backed FILE image (a bypassed mmap at {h:0,m:1})
+    // whose Burrow may be a FILE image held only by that mapping, {h:0,m:1} (a
+    // private image, vote 114 -- every unlatched 9P file -- or a cache bypass)
     // whose free reaches a possibly-sleeping spoor_clunk. burrow_map_fixed hands
     // that dead Burrow back via `fx_free` instead of freeing it under as->lock;
     // we free it here, past the unlock (the F1 deferred-free pattern).
@@ -7488,17 +7590,22 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
 
 // DISTRO D-3b arm 3 (dynlink.c:851): the anonymous MAP_FIXED bss tail. Demand-
 // zero, so it charges per page at fault time exactly like every other lazy anon
-// mapping.
+// mapping. The phenotype also mints shared anonymous memory here (votes 117 +
+// 119) and a read-ceilinged private map for a shared /dev/zero descriptor not
+// open for writing (VIVARIUM 6.21); the native door mints private RW only.
 VISIBLE_IF_KERNEL_TESTS
-s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
-                                 u32 pr) {
+s64 sys_mmap_fixed_anon_core(struct Proc *p, u64 addr, u64 length_raw, u32 pr,
+                             u32 ceiling, bool shared) {
     if (!p)                                          return -(s64)T_E_INVAL;
 
     u64 length; u32 prot;
     s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
     if (werr != 0)                                   return werr;
+    if (prot & ~ceiling)                             return -(s64)T_E_ACCES;
 
-    struct Burrow *b = burrow_create_anon_lazy((size_t)length);
+    struct Burrow *b = shared
+        ? burrow_create_anon_shared((size_t)length, p->as, proc_resource_exempt(p))
+        : burrow_create_anon_lazy((size_t)length);
     if (!b)                                          return -(s64)T_E_NOMEM;
 
     // D-3c re-audit F5: even the anon arm can replace an existing FILE mapping
@@ -7510,9 +7617,10 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
     if (rc == 0) {
         // B-1a: an anonymous mint's ceiling is RW whatever prot it starts at --
         // a FIXED PROT_NONE window (a guard, or a reservation ldso will raise)
-        // is admitted now that the raise exists, and it must be raisable.
+        // is admitted now that the raise exists, and it must be raisable --
+        // unless the caller lowered it (the read-only /dev/zero rule).
         struct Vma *nv = vma_lookup(p, addr);
-        if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+        if (nv) vma_set_prot_max(nv, ceiling);
         // In the same hold, as lazy_reserve_core drops its own: the mapping
         // holds the Burrow, so this drop cannot free it.
         burrow_unref(b);
@@ -7523,6 +7631,12 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
     if (b) burrow_unref(b);                          // refused: the last ref
     if (rc != 0)                                     return (s64)rc;   // the surgery's -T_E_* (B-1a')
     return (s64)addr;
+}
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+                                 u32 pr) {
+    return sys_mmap_fixed_anon_core(p, addr, length_raw, pr, VMA_PROT_RW, false);
 }
 
 // CL-4: pick the length out of SYS_BURROW_ATTACH_LAZY's two accepted calling
@@ -7554,16 +7668,18 @@ static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
 // mappings WITHOUT removing them (the madvise(MADV_DONTNEED) analog). Confined
 // to the burrow-attach window (the SYS_BURROW_DETACH discipline -- a decommit
 // only makes sense on a lazy region, all of which live in the window). B-1a':
-// the range may span the pieces a protect cut (burrow_decommit_in walks it as a
+// the range may span the pieces a protect cut (burrow_decommit walks it as a
 // range); it still refuses, changing nothing, any mapping in it that is not a
 // plain ANON_LAZY one, and any hole.
 // B-1b: the decommit core with its errno, the sys_munmap_range_for_proc shape,
 // for the phenotype madvise row: INVAL for the shape, NOSYS below the window
 // (every ELF, stack, guard and vDSO mapping lives there -- not the phenotype's
-// to release), else burrow_decommit_in's own answer (NOMEM for a hole, INVAL
+// to release), else burrow_decommit's own answer (NOMEM for a hole, INVAL
 // for a mapping that is not plain lazy anonymous memory of this Proc).
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+// `shared_ok` is MADV_DONTNEED's (burrow_dontneed): a shared anonymous range
+// is admitted too and only unmapped (votes 117 + 119; VIVARIUM 6.21).
+static s64 advise_release_core(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                               bool shared_ok) {
     if (!p)                                          return -(s64)T_E_INVAL;
     if (length_raw == 0)                             return -(s64)T_E_INVAL;
     // BURROW_RESERVE_MAX is the window (B-1a'): a decommit range may span any
@@ -7579,11 +7695,22 @@ s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -(s64)T_E_NOSYS;
 
     spin_lock(&p->as->lock);
-    // burrow_decommit_in does the range's PTE clear (+ TLBI before any free),
+    // The release does the range's PTE clear (+ TLBI before any free),
     // the per-slot page + node free and the page_count uncharge for both.
-    int rc = burrow_decommit(p, vaddr_raw, length);
+    int rc = shared_ok ? burrow_dontneed(p, vaddr_raw, length)
+                       : burrow_decommit(p, vaddr_raw, length);
     spin_unlock(&p->as->lock);
     return (s64)rc;
+}
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    return advise_release_core(p, vaddr_raw, length_raw, false);
+}
+
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_burrow_dontneed_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    return advise_release_core(p, vaddr_raw, length_raw, true);
 }
 
 // The native SYS_BURROW_DECOMMIT (84) keeps its 0 / -1 ABI over the core.
@@ -7640,7 +7767,21 @@ s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
     u64 align  = align_log2 ? (1ull << align_log2) : 0;
     // The commit is a later SYS_BURROW_PROTECT (the reserve-then-commit idiom).
     // width: burrow_prot_word_check refused every high bit
-    return lazy_reserve_core(p, length, align, (u32)prot_raw);
+    return lazy_reserve_core(p, length, align, (u32)prot_raw, VMA_PROT_RW, false);
+}
+
+// The phenotype's anonymous mmap without MAP_FIXED: the reservation at the
+// Linux prot under `ceiling`, shared or private (VIVARIUM 6.21). The length
+// rules are the reserve's: 0 is EINVAL, past the window ENOMEM.
+VISIBLE_IF_KERNEL_TESTS
+s64 sys_mmap_anon_core(struct Proc *p, u64 length_raw, u32 prot, u32 ceiling,
+                       bool shared) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (prot & ~ceiling)                             return -(s64)T_E_ACCES;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (length_raw > BURROW_RESERVE_MAX)             return -(s64)T_E_NOMEM;
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    return lazy_reserve_core(p, length, 0, prot, ceiling, shared);
 }
 
 VISIBLE_IF_KERNEL_TESTS
@@ -15689,6 +15830,161 @@ static s64 viv_rt_sigtimedwait(struct Thread *t, u64 set, u64 info_va, u64 ts_va
     return (s64)signum;
 }
 
+// mmap(addr, len, prot, flags, fd, offset), x0..x5, judged in Linux's order
+// (arm64 sys_mmap, ksys_mmap_pgoff, do_mmap): an unaligned offset is EINVAL
+// before anything else; an anonymous call reads neither fd nor offset; any
+// other call looks its descriptor up ONCE (fget: EBADF for nothing or O_PATH)
+// and holds that Spoor through every arm, so whatever is decided about the file
+// is decided about the file that gets mapped -- no peer's dup2 can swap it
+// between a look and the map. A zero length is EINVAL next, then each arm's
+// window, and only then the access mode (EACCES), where do_mmap asks FMODE_READ.
+// Vote 115: a readable /dev/zero is anonymous memory -- the anonymous call,
+// served and declined exactly where MAP_ANONYMOUS is (PROT_EXEC). Votes 117 +
+// 119 (VIVARIUM 6.21): MAP_SHARED|MAP_ANONYMOUS, and a shared /dev/zero map
+// through a descriptor open for writing, mint shared anonymous memory; a
+// shared /dev/zero map through one that is not is a private map whose ceiling
+// is READ (Linux clears VM_MAYWRITE and VM_SHARED), or EACCES if it asks for
+// PROT_WRITE (do_mmap's FMODE_WRITE test, ahead of FMODE_READ).
+static s64 viv_mmap(struct Proc *p, const u64 *args) {
+    u64 a[6] = { args[0], args[1], args[2], args[3], args[4], args[5] };
+    if (a[5] & (u64)(PAGE_SIZE - 1))                 return -(s64)T_E_INVAL;
+
+    struct Spoor *sp = NULL;
+    bool readable = false, writable = false;
+    if ((u32)a[3] & (u32)VIV_MAP_ANONYMOUS) {
+        a[4] = (u64)(u32)-1;
+        a[5] = 0;
+    } else {
+        // Linux reads the fd through fget(unsigned int).
+        sp = sys_get_mapping_spoor(p, (u64)(u32)a[4], &readable, &writable);
+        if (!sp)                                     return -(s64)T_E_BADF;
+    }
+    if (a[1] == 0) {
+        if (sp) spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    // The ceiling an anonymous mint gets: RW, unless the /dev/zero rule lowers it.
+    u32 ceiling = VMA_PROT_RW;
+    if (sp && sp->dev == &devzero) {
+        spoor_clunk(sp);                             // an anonymous mapping holds no file
+        sp = NULL;
+        // get_unmapped_area's ENOMEM comes before do_mmap's file switch, as
+        // on the anonymous side below. Then the switch: the type first (round
+        // 34 F5's order), the shared types' FMODE_WRITE test, then FMODE_READ
+        // for every type.
+        if (a[1] > BURROW_RESERVE_MAX)               return -(s64)T_E_NOMEM;
+        u32 mtype  = (u32)a[3] & (u32)VIV_MAP_TYPE;
+        bool share = mtype == (u32)VIV_MAP_SHARED ||
+                     mtype == (u32)VIV_MAP_SHARED_VALIDATE;
+        if (!share && mtype != (u32)VIV_MAP_PRIVATE) return -(s64)T_E_INVAL;
+        if (share && ((u32)a[2] & VIV_PROT_WRITE) && !writable)
+            return -(s64)T_E_ACCES;
+        if (!readable)                               return -(s64)T_E_ACCES;
+        // A shared-validate call that got here carries only the flags the
+        // anonymous arms then judge exactly, so it is the shared call.
+        u32 fl = ((u32)a[3] & ~(u32)VIV_MAP_TYPE) | (u32)VIV_MAP_ANONYMOUS;
+        if (share && !writable) {
+            fl |= (u32)VIV_MAP_PRIVATE;
+            ceiling = VMA_PROT_READ;
+        } else {
+            fl |= share ? (u32)VIV_MAP_SHARED : (u32)VIV_MAP_PRIVATE;
+        }
+        a[3] = (u64)fl;
+        a[4] = (u64)(u32)-1;
+        a[5] = 0;
+    }
+
+    if (sp) {
+        // DISTRO D-3 and D-3b arm 2. The order of the two is free rather than
+        // load-bearing: vivarium_mmap_arms_disjoint pins that no tuple is
+        // admitted by both, so neither can shadow the other.
+        u64 length = 0;
+        u32 prot   = 0;
+        s64 err;
+        if (vivarium_mmap_file_decide(a[2], a[3], a[4], a[5]) == VIV_TRANSLATED) {
+            err = mmap_file_window(a[1], a[5], &length);
+            if (err == 0 && !readable) err = -(s64)T_E_ACCES;
+            if (err != 0) {
+                spoor_clunk(sp);
+                return err;
+            }
+            return mmap_file_body(p, sp, length, ((u32)a[2] & VIV_PROT_EXEC) != 0, a[5]);
+        }
+        if (vivarium_mmap_fixed_file_decide(a[0], a[2], a[3],
+                                            a[4], a[5]) == VIV_TRANSLATED) {
+            err = mmap_fixed_file_window(a[0], a[1], (u32)a[2], a[5], &length, &prot);
+            if (err == 0 && !readable) err = -(s64)T_E_ACCES;
+            if (err != 0) {
+                spoor_clunk(sp);
+                return err;
+            }
+            return mmap_fixed_file_body(p, sp, a[0], length, prot, a[5]);
+        }
+        // A shape no arm serves (read-write private without MAP_FIXED, shared).
+        // do_mmap's file branch switches on the map type before it asks
+        // FMODE_READ, and a type that is not shared, shared-validate or
+        // private is EINVAL whatever the descriptor (round 34 F5). Past that,
+        // an unreadable descriptor is EACCES in every served type, as Linux;
+        // a readable one is declined.
+        spoor_clunk(sp);
+        u32 mtype = (u32)a[3] & (u32)VIV_MAP_TYPE;
+        if (mtype != (u32)VIV_MAP_SHARED && mtype != (u32)VIV_MAP_PRIVATE &&
+            mtype != (u32)VIV_MAP_SHARED_VALIDATE)
+            return -(s64)T_E_INVAL;
+        return readable ? -(s64)T_E_NOSYS : -(s64)T_E_ACCES;
+    }
+
+    // Linux's anonymous switch knows MAP_SHARED, MAP_DROPPABLE and MAP_PRIVATE
+    // and answers EINVAL for every other type, MAP_SHARED_VALIDATE among them --
+    // after the length (round 34 F5's order, on the anonymous side). The
+    // window's ENOMEM comes first, as get_unmapped_area's does. MAP_DROPPABLE is
+    // a type Linux serves and the phenotype does not: it falls to the arms
+    // below, which decline it (round 35 F4).
+    u32 atype = (u32)a[3] & (u32)VIV_MAP_TYPE;
+    if (atype != (u32)VIV_MAP_SHARED && atype != (u32)VIV_MAP_PRIVATE &&
+        atype != (u32)VIV_MAP_DROPPABLE)
+        return a[1] > BURROW_RESERVE_MAX ? -(s64)T_E_NOMEM : -(s64)T_E_INVAL;
+
+    // DISTRO D-3b arm 3: the anonymous MAP_FIXED overlay, private or shared.
+    if (vivarium_mmap_fixed_anon_decide(a[0], a[2], a[3],
+                                        a[4], a[5]) == VIV_TRANSLATED)
+        return sys_mmap_fixed_anon_core(p, a[0], a[1], (u32)a[2], ceiling, false);
+    if (vivarium_mmap_fixed_shared_anon_decide(a[0], a[2], a[3],
+                                               a[4], a[5]) == VIV_TRANSLATED)
+        return sys_mmap_fixed_anon_core(p, a[0], a[1], (u32)a[2], ceiling, true);
+
+    bool shared;
+    if (vivarium_mmap_decide(a[0], a[2], a[3], a[4], a[5]) == VIV_TRANSLATED)
+        shared = false;
+    else if (vivarium_mmap_shared_anon_decide(a[0], a[2], a[3],
+                                              a[4], a[5]) == VIV_TRANSLATED)
+        shared = true;
+    else
+        return -(s64)T_E_NOSYS;                      // out of domain
+
+    // A length the reserve cannot satisfy is ENOMEM, precisely the set
+    // sys_burrow_reserve_for_proc refuses (over the lazy cap / no free gap /
+    // OOM). Translating its -1 rather than passing it through matters:
+    // Thylacine signals failure with a bare -1, and a Linux libc reads -1 as
+    // -EPERM.
+    // B-1a: the mint carries the Linux prot EXACTLY -- PROT_NONE, PROT_READ
+    // or PROT_READ|PROT_WRITE -- under an RW ceiling, through the same
+    // reservation SYS_BURROW_RESERVE mints. VIVARIUM 6.21's degradation
+    // ("PROT_NONE yields a writable mapping") ended with the ceiling: a guard
+    // page is protective and a read-only anonymous mapping is read-only.
+    // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP).
+    u32 lpr   = (u32)a[2];
+    u32 nprot = 0;
+    if (lpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
+    if (lpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
+    s64 rc = sys_mmap_anon_core(p, a[1], nprot, ceiling, shared);
+    if (rc < 0) return -(s64)T_E_NOMEM;
+
+    // A user VA is below 2^47, so a successful return is never mistaken for
+    // an errno -- the [-4095,-1] band a Linux caller checks is unreachable.
+    return rc;
+}
+
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
@@ -16246,69 +16542,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return viv_stat_copy_out(args[2], &ks);
     }
 
-    case VIV_LINUX_MMAP: {
-        // mmap(addr, len, prot, flags, fd, offset): x0..x5.
-        //
-        // DISTRO D-3: the FILE arm is tried FIRST, and the order is free rather
-        // than load-bearing -- vivarium_mmap_arms_disjoint pins that no tuple is
-        // admitted by both, so neither order can shadow the other. Tried first
-        // only because it is the narrower domain, which reads better.
-        if (vivarium_mmap_file_decide(args[2], args[3], args[4], args[5])
-                == VIV_TRANSLATED) {
-            // `len` is judged in the shell, not the decide, for the same reason
-            // the anon arm judges it here: Linux answers EINVAL for 0 and ENOMEM
-            // for too-large, and sys_mmap_file_for_proc reproduces both.
-            // Linux reads the fd through fget(unsigned int).
-            return sys_mmap_file_for_proc(p, (u64)(u32)args[4], args[1],
-                                          ((u32)args[2] & VIV_PROT_EXEC) != 0,
-                                          args[5]);
-        }
-
-        // DISTRO D-3b: the two MAP_FIXED overlays. Same disjointness argument --
-        // all four arms demand EXACT equality against distinct flags words, so
-        // the ordering here cannot shadow anything.
-        if (vivarium_mmap_fixed_file_decide(args[0], args[2], args[3],
-                                            args[4], args[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_file_for_proc(p, args[0], (u64)(u32)args[4], args[1],
-                                                (u32)args[2], args[5]);
-        }
-        if (vivarium_mmap_fixed_anon_decide(args[0], args[2], args[3],
-                                            args[4], args[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_anon_for_proc(p, args[0], args[1],
-                                                (u32)args[2]);
-        }
-
-        if (vivarium_mmap_decide(args[0], args[2], args[3], args[4], args[5])
-                != VIV_TRANSLATED)
-            return -(s64)T_E_NOSYS;             // out of domain
-
-        // `len` is judged HERE, not in the pure decide, so each side's error
-        // semantics are reproduced exactly rather than collapsed to ENOSYS:
-        // Linux answers EINVAL for 0 ...
-        if (args[1] == 0) return -(s64)T_E_INVAL;
-
-        // ... and ENOMEM for a length it cannot satisfy, which is precisely the
-        // set sys_burrow_attach_lazy_for_proc refuses (0 / over the lazy cap /
-        // no free gap / OOM). Translating its -1 rather than passing it through
-        // matters: Thylacine signals failure with a bare -1, and a Linux libc
-        // reads -1 as -EPERM.
-        // B-1a: the mint carries the Linux prot EXACTLY -- PROT_NONE, PROT_READ
-        // or PROT_READ|PROT_WRITE -- under an RW ceiling, through the same
-        // reservation SYS_BURROW_RESERVE mints. VIVARIUM 6.21's degradation
-        // ("PROT_NONE yields a writable mapping") ended with the ceiling: a guard
-        // page is protective and a read-only anonymous mapping is read-only.
-        // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP).
-        u32 lpr   = (u32)args[2];
-        u64 nprot = 0;
-        if (lpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
-        if (lpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
-        s64 rc = sys_burrow_reserve_for_proc(p, args[1], nprot, 0);
-        if (rc < 0) return -(s64)T_E_NOMEM;
-
-        // A user VA is below 2^47, so a successful return is never mistaken for
-        // an errno -- the [-4095,-1] band a Linux caller checks is unreachable.
-        return rc;
-    }
+    case VIV_LINUX_MMAP:
+        return viv_mmap(p, args);
 
     case VIV_LINUX_MUNMAP: {
         // munmap(addr, len): x0 addr, x1 len.
@@ -16388,8 +16623,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (args[1] == 0) return 0;
         u64 hlen = (args[1] + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
         if (hlen < args[1] || args[0] + hlen < args[0]) return -(s64)T_E_INVAL;
-        if (kind == VIV_MADVISE_RELEASE) {
-            s64 rc = sys_burrow_decommit_core(p, args[0], args[1]);
+        if (kind == VIV_MADVISE_RELEASE || kind == VIV_MADVISE_DONTNEED) {
+            s64 rc = kind == VIV_MADVISE_DONTNEED
+                   ? sys_burrow_dontneed_core(p, args[0], args[1])
+                   : sys_burrow_decommit_core(p, args[0], args[1]);
             if (rc != -(s64)T_E_NOSYS) return rc;
             spin_lock(&p->as->lock);
             bool held = vma_range_is_mapped_in(p->as, args[0], args[0] + hlen);

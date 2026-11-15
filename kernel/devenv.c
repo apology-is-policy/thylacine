@@ -398,11 +398,6 @@ struct Dev devenv = {
     // for the mount-table shed (ARCH 9.6.10).
     .devno_per_walker = true,
 
-    // A variable backs no file mapping (see Dev.no_file_mapping): it has no
-    // version, any holder may write it, and a cached mapping would keep its Env
-    // alive past every handle.
-    .no_file_mapping = true,
-
     .reset    = devenv_reset,
     .init     = devenv_init,
     .shutdown = devenv_shutdown,

@@ -69,6 +69,8 @@ struct Path;               // the session root's origin name (path.h)
 // The dev9p Dev struct (vtable). Registered in the bestiary by
 // dev9p_init (called from dev_init's startup sequence).
 extern struct Dev dev9p;
+// The wire qid type byte (P9_QT*) as the kernel's QT* bits.
+u8 qid_type_p9_to_kernel(u8 p9);
 #endif // KERNEL_TESTS
 
 // Per-Spoor private state. Allocated by dev9p_attach_client and by

@@ -29,11 +29,14 @@
 // contributes TWO entries: its text segment + its R-only rodata segment. The
 // key includes `exec` (#45 audit F1): two segments with an IDENTICAL file
 // window but different X-ness (a crafted ELF's aliased R+X + R-only PT_LOADs)
-// resolve to DISTINCT Burrows, so no single FILE Burrow is ever mapped at both
-// an executable and a non-executable prot -- the property that keeps the
-// fault arm's freq->exec-gated I-cache sync sound (a non-exec fill never
-// leaves an executable resident-hit unsynced). A legit binary is unaffected:
-// the same file's same segment always carries the same X bit -> the same key.
+// resolve to DISTINCT Burrows, each created with that `exec` as its exec class
+// (file_exec). The fault arm syncs the I-cache for every page filled into an
+// exec-class Burrow, from whichever mapping's fault filled it, and vma_args_ok
+// refuses an executable mapping of any other FILE Burrow. A Burrow CAN be
+// mapped R and RX at once (a protect cuts an RX mapping down to R), so the
+// sync follows the Burrow, never the faulting mapping's prot. A legit binary
+// is unaffected: the same file's same segment always carries the same X bit
+// -> the same key.
 //
 // LIFECYCLE: the cache holds ONE handle_count ref per cached Burrow (a STRONG
 // ref), so text persists after the last Proc unmaps (the Plan 9 temporal cache —
@@ -46,13 +49,18 @@
 // un-registered — it lives on its mapping, just not shared), never an exec
 // failure.
 //
+// Only a file whose Dev answers content_versioned is cached at all (vote 114):
+// any other is created un-registered, like a bypass, and frees with its last
+// mapping, so the cache never holds an open past its mappers for a file
+// whose open carries server state, nor serves one reader another's bytes.
+//
 // Resource accounting (I-32, condition 7) is the map/exec layer's job (R-4),
 // like ANON's attach-time charge — shared text is charged once via the I-7 dual
 // refcount. The cache itself charges nothing.
 //
-// At R-3 there is NO production caller: exec still slurps (R-4 wires
-// image_lookup_or_create in place of the eager whole-ELF read). The cache is
-// exercised in isolation by the kernel test suite (KERNEL_TESTS hooks below).
+// Callers: exec's file-backed segments (exec.c map_file_backed) and the two
+// file-mapping cores (syscall.c sys_mmap_file_for_proc and
+// sys_mmap_fixed_file_for_proc).
 
 #ifndef THYLACINE_IMAGE_H
 #define THYLACINE_IMAGE_H
@@ -109,11 +117,18 @@ void image_cache_init(void);
 // cache HIT the entry keeps its creation-time limit and the caller's value is
 // ignored (close-to-open: one sample per cached image).
 //
+// `payer` / `payer_exempt` (vote 118) name the address space the caller is
+// about to map the image into and its I-32 verdict. A PRIVATE image records it
+// as the payer of every page minted into it (burrow_payer_set); a cached
+// image ignores both. NULL is legal (the first minting faulter pays).
+//
 // SMP: serialized by the global cache lock; the blocking burrow_create_file runs
 // OUTSIDE the lock with a re-search-on-reacquire (the create race — two Procs
 // exec'ing the same binary concurrently; the loser frees its surplus Burrow).
+struct AddrSpace;
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
-                                      size_t length, bool exec, u64 file_limit);
+                                      size_t length, bool exec, u64 file_limit,
+                                      struct AddrSpace *payer, bool payer_exempt);
 
 #ifdef KERNEL_TESTS
 // Number of live (used) cache entries. Snapshot under the cache lock.
@@ -127,6 +142,7 @@ int image_cache_evict_idle_for_test(void);
 u64 image_cache_hits_for_test(void);
 u64 image_cache_creates_for_test(void);
 u64 image_cache_evictions_for_test(void);
+u64 image_cache_private_for_test(void);           // mapped privately (vote 114)
 u64 image_cache_reclaims_for_test(void);         // reclaim calls that freed a page
 u64 image_cache_reclaimed_pages_for_test(void);
 #endif

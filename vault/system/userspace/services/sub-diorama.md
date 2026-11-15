@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/VIVARIUM.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-11-11
+updated: 2026-11-13
 ---
 ## Purpose
 
@@ -412,38 +412,43 @@ Linux virtualizes this with a pid namespace.
   — saw nothing. The lesson is specific: a resolution test and an
   enumeration test are different tests.
 
-- **The `/ctl/procs` read window equals the kernel's buffer only because
-  two hand-kept constants agree, so the parse does not rely on it.** Both
-  consumers — enumeration, and the membership reader that also decides
-  per-pid existence — take the table with one read into `RENDER_MAX`
-  (4096), which is the kernel's `DEVCTL_READ_BUF` today. Nothing ties the
-  two. Until 2026-11-11 the window was 2048 under the comment *"matches
-  the kernel's DEVCTL_READ_BUF"*: true when written (the constant went
-  512 → 2048 at prowl-1 and the diorama landed against 2048), stale since
-  #210 lifted the kernel's to 4096 for an unrelated instrument.
+- **Membership and the pid list are read per Proc, not from `/ctl/procs`.**
+  The `/ctl/procs` table holds only the rows that fit one 4096-byte
+  page, and its iteration is a pre-order DFS from kproc, so on
+  a busy box the container's subtree could fall past the cut and the
+  member set came out empty (Task #182, behind a 64-entry table). The
+  root's enumeration now lists native `/proc` (`procs::pids`, whole at any
+  size, resumed by pid), and membership is decided from the parent links
+  in each `/proc/<pid>/status`. Resolving one pid walks its links up
+  (`viv_tree_member`): every step must lower the pid, so the walk needs no
+  depth bound, and a link the kernel would not make admits nothing; an
+  ancestor whose status cannot be read admits nothing below it. A pid at
+  or below the runner's is refused on its number, with no read. Listing
+  decides every pid in one ascending pass (`viv_tree_members`): a parent
+  is older than its child, so each pid is decided from its parent's
+  answer, at one status read a pid above the runner however deep the
+  container has made its tree. A walk per listed pid cost pids times
+  depth on every Treaddir. The selftest holds the two forms to one set
+  and counts the reads of each. What is left: resolving a pid above the
+  runner's costs one failed open when no Proc has it and a short walk
+  when a host Proc does, so a container can time which of those pids are
+  alive -- liveness seen, no authority taken. Closing it takes the whole
+  pass for every lookup, or a kernel answer to "is P under R".
 
-  A window smaller than the table ends in the middle of a row, and a cut
-  row is not a lost row. The parsers took every newline-separated piece,
-  the unterminated tail included, so `57    41    sh ...` cut to `57    4`
-  read as pid 57 with parent 4; with 4 the runner or a member, a host pid
-  joined the member set and resolved in the container's `/proc`. That is a
-  visibility breach, not an authority one — the kernel still gates every
-  native read. This dossier used to argue it could not happen ("a lost
-  row can only narrow the set"): the kernel does stop at a whole row, but
-  within its own buffer, not the reader's smaller one. The parsers now
-  take only rows that end in a newline (`whole_lines`), so a cut by either
-  buffer loses rows and never invents one, whatever the two constants
-  become; the selftest carries the cut-row vector (audit round 17 F2).
-
-  What remains is the correctness consequence of the kernel's own cut. Its
-  iteration is a **pre-order DFS from kproc**, not a pid scan: the
-  container's rows sit wherever the runner sits in the tree, so a table
-  that overflows 4096 bytes before that subtree empties the member set
-  entirely — the container's `/proc` shows nothing, including its own
-  siblings, while `/proc/self` keeps working. At 4096 the shortest row
-  (43 bytes) allows about 93 rows, so `VIV_PROCS_MAX = 64`, the declared
-  capacity of the pair table and the member set, is now a bound that can
-  be reached; it fails closed. Task #182.
+  **A cut text is no value.** A status is taken with one read into a
+  buffer sized to the kernel's `DEVPROC_READ_BUF` (2048), and nothing ties
+  the two constants. The table readers this replaced showed what a
+  mismatch costs. Until 2026-11-11 their window was 2048 under the comment
+  *"matches the kernel's DEVCTL_READ_BUF"*: true when written, stale since
+  #210 lifted the kernel's to 4096. A table over 2048 bytes ended mid-row,
+  and `57    41    sh ...` cut to `57    4` parsed as pid 57 with parent
+  4, so a host pid joined the member set and resolved in the container's
+  `/proc` (a visibility breach, not an authority one: the kernel still
+  gates every native read; audit round 17 F2). So `parse_kv_dec` reads
+  only lines whose newline arrived, and `deputy_check` refuses an imperium
+  line without its newline: a status cut at `ppid:    4` names no parent,
+  and a caps value cut short cannot read as zero. The selftest carries the
+  cut-status vector (`a cut line parsed as a parent`).
 
   **The stale comment came with its own control**, in the same file and in
   the identical idiom: `// matches the kernel's DEVPROC_READ_BUF`, which is

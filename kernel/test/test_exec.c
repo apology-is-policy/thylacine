@@ -166,10 +166,17 @@ static long blob_dev_read(struct Spoor *c, void *buf, long n, s64 off) {
     return (long)want;
 }
 
+// Models a content server: its images are shared and cached (vote 114).
+static bool fake_content_versioned(struct Spoor *c) {
+    (void)c;
+    return true;
+}
+
 static struct Dev g_blob_dev = {
     .dc   = '?',
     .name = "execblob",
     .read = blob_dev_read,
+    .content_versioned = fake_content_versioned,
 };
 
 

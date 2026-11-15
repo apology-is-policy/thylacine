@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-pty-interaction]
 design: ["docs/PTY-DESIGN.md section 3"]
 created: 2026-08-03
-updated: 2026-11-02
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -360,7 +360,13 @@ fields this file reads. [[inv-i20]] · [[spec-pty]] · [[spec-pty-stop]].
 
 A fixed 64-slot pool observes pts incarnations. BIND requires the real master
 at the syscall front, a live sealed and untainted binder, and a live exact
-observer service-poster incarnation. A live binding cannot be replaced. Positive
+observer service-poster incarnation. "Untainted" is the binder's IMAGE
+(`proc_image_tainted_locked`, operator vote 120): a taint taken through memory it
+shares with another space counts. It is asked before [[lock-pts]]; it reads the
+binder's share family in O(1) and without `as->lock` (votes 122, audit round 37
+P2-1), and the lifecycle lock held across both keeps the answer current. Witness:
+`pts.bind_weighs_shared_taint` (a sealed host whose shared memory was debugged
+from another space is refused; over a private fork it binds). A live binding cannot be replaced. Positive
 IDs never wrap into negative errno; pool/ID exhaustion is ENOSPC. Retired entries
 remain charged while a watcher or post-unlock wake reference exists.
 

@@ -21,7 +21,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-11-10
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -344,6 +344,15 @@ the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
   `format_status` takes the caller to ask `devproc_owner_or_hostowner`, the
   predicate the `CPU_NS` column of `/ctl/procs` uses too ([[sub-kernel-devctl]]
   has the reasoning and the system-wide counters).
+- **A `maps` row's perms end in `s` for memory another address space may map
+  too** (`maps_class`'s share flag): a `SHARED_IN` mapping (another Proc's
+  memory) and, since 2026-11-14 (operator votes 117 + 119), an
+  `ANON_SHARED` one, the memory a fork shares, whose type word is `shared`.
+  Every other row ends in `p`. A Linux reader tells `MAP_SHARED` from
+  `MAP_PRIVATE` by that letter, so a shared mapping printed `p` would read as
+  copy-on-write memory. Witness: `devproc.maps_shared_anon` (a shared and a
+  private mapping side by side: `rw-s 0x0 shared - -` and the control
+  `rw-p 0x0 lazy - -`).
 - **`name` is unforgeable.** It is the basename of the *resolved* binary path
   (from the Spoor's #66 namespace name via `exec_setup_from_spoor`), never the
   caller-controlled `argv[0]` — so a process cannot spoof its own name in
@@ -639,6 +648,45 @@ only image files served out of the address space rather than out of the Proc.
 The walk is skipped entirely when `addrspace_ref_count == 1`, which is almost
 always, so the ordinary debug operation pays nothing for it.
 
+Since operator vote 120 (2026-11-14; DEBUG-FS-DESIGN 3.4) the image also reaches
+across address spaces: a shared anonymous Burrow a fork mapped into a second
+space is part of both images, and since vote 122 the share family's record holds
+every member's caps and guards ([[sub-kernel-proc]]). So cover must cover every
+Proc in the family, `NOTRACE` or `NODUMP` on any of them refuses, and a debug
+write through one side taints the other side's image. The witnesses fork a real
+`addrspace_clone` and run the publication as `rfork_internal` does, each against
+the same fork over a private map: `devproc.share_join_cover` (a peer covering only
+the stripped child is refused it), `devproc.share_join_elevation` (neither side
+elevates while mapping the Burrow; unmapped, the parent does),
+`devproc.share_join_seals` (`NODUMP` taken after the fork reaches the child
+through the stamp, taken before it through the publication; `NOTRACE` after
+the fork refuses control) and `devproc.share_join_taint` (the child's taint
+reaches the parent's image but not its word, outlives the parent's unmap, and
+still refuses its elevation). `devproc.share_join_fork_and_exec` runs the
+fork's taint inheritance and the exec swap on a kernel-thread child's own
+thread: its grandchild is born tainted and its exec puts the taint on its word,
+and over a private map neither happens. `pts.bind_weighs_shared_taint`
+([[sub-kernel-pts]]) is the interaction gate's witness. Five cover the family
+itself: `devproc.share_family_rival_fork` (two clones before either publication;
+the second publication moves its child onto the parent's family and hands its
+spare back and records its child's caps in the parent's family -- the first
+publication's own record, read before the rival runs, holds none of them (audit
+round 38 F1: read after it, the control contradicted the claim) -- so a stamp
+through that child reaches the parent; one live record after), `devproc.share_family_counts_every_piece` (an `mprotect` split counts
+three pieces; with two left the parent does not elevate, with none it does) and
+`devproc.share_family_lifetime` (one record per sharing fork, kept by the parent
+after the child's space goes, freed with the parent's; none for a private fork),
+`devproc.share_family_second_fork_adopts` (a second fork's clone takes the
+parent's family and its reference; the publication hands nothing back) and
+`devproc.share_family_fork_in_flight` (audit round 37 P1-1: a clone, then the
+parent's unmap, a stamp through the first child and a propagating elevation;
+the carve with the caps read before the clone carries none of it, the carve of
+a fork begun after the elevation does). Only a fork from EL0 clones a space, so
+the publication's call site, the spare put after the hold and the caps read
+before the clone in `rfork_internal` are checked by review alone. The join reads the family in O(1);
+vote 120's walk of the space's mappings, unbounded under the global lock (audit
+round 36 F1), is gone.
+
 ### The register write has a privilege guard
 
 Applying an edited `regs` struct writes x0–x30, SP_EL0 and ELR_EL1 — and
@@ -732,6 +780,15 @@ keeps the pid in use (ARCH 7.3.4), so no cookie ever names two objects; an id
 created mid-listing appears if it lies past the cookie, and one that ends is not
 listed again. A directory whose Proc or thread has gone lists as `-1`.
 
+The cookie lives in the directory's cursor (`Spoor.offset`), and a walk from the
+directory clones it, cursor and all. So an `openat` from a `/proc` directory a
+readdir had read used to open `status` at the cookie's byte (the pid, ppid and
+name lines lost) and a child directory's listing empty; Rust std's
+`remove_dir_all`, Go's `os.RemoveAll` and gnulib's fts walk that way. Every
+open now starts at 0 (`dev_simple_open`, [[sub-kernel-dev]]; audit round 29
+F1), and `devproc.open_rewinds` holds it: a root whose cursor is a cookie, a
+clone shown to carry it, an open that starts at 0, a read from the first line.
+
 ## `status` gained `tables:` and `file:` (2026-09-23; B-1a' audits F1 and F8)
 
 `/proc/<pid>/status` reports, after `pages:` (the address space's holder
@@ -757,6 +814,28 @@ Read under `g_proc_table_lock`, as `exit:` is; `term_sig` is written before
 the ZOMBIE transition under the same lock ([[sub-kernel-death]]). Witness:
 `devproc.zombie_status_signal` (a `snare:abort` zombie shows `signal:  6`; an
 `exit(1)` zombie, one variable away, shows none).
+
+## `status` shows a job-stopped Proc STOPPED (2026-11-12)
+
+The `state:` line is `proc_state_word` ([[sub-kernel-proc]]), the word
+`/ctl/procs` prints in its STATE column: `ALIVE`, `ZOMBIE`, `INVALID`, and
+`STOPPED` for an ALIVE Proc under a job stop that is not dying (Plan 9's
+`Stopped`, the Unix `ps` T state). Before, `status` read `ALIVE` for a
+job-stopped Proc while `/ctl/procs` read `STOPPED`. The readers that moved
+from that table to `/proc` because one read of the table can be cut (`ps`,
+`prowl`; [[sub-kernel-devctl]], [[sub-libthyla-rs]]) need the same word from
+here. A debug stop still reads `ALIVE`: that stop is the debugger's own view
+(I-39), which `wait` reports. `dap-probe`, the one in-tree reader that
+compares the word with `ALIVE`, does so on a debug-held child. The flags are
+read atomically under `g_proc_table_lock`, which the read's table walk holds
+around `format_status`. Witness: `devproc.read_status_format` job-stops a
+linked Proc and reads `state:   STOPPED` through the real read path, then
+continues it and reads `state:   ALIVE`, one variable apart. Decided under
+the operator-away grant; ratification owed.
+
+The `name:` line prints `Proc.name`, which holds only printable ASCII
+graphics since the same day (`proc_set_name`, [[sub-kernel-proc]]): a file
+name with a newline in it cannot forge a second `state:` line here.
 
 ## `account` (2026-11-03; MM-1b)
 

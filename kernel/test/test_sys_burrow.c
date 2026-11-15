@@ -980,7 +980,7 @@ static u64 f1_map_file(struct Proc *p, u64 va) {
     struct Spoor *s = spoor_alloc(&g_f1_dev);
     if (!s) return 0;
     s->qid.type = QTFILE;
-    struct Burrow *v = burrow_create_file(s, 0, PAGE_SIZE);   // adopts s
+    struct Burrow *v = burrow_create_file(s, 0, PAGE_SIZE, false);   // adopts s
     if (!v) { spoor_clunk(s); return 0; }
     spin_lock(&p->as->lock);
     int rc = burrow_map(p, v, va, PAGE_SIZE, VMA_PROT_READ);

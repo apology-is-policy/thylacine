@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-11-10
+updated: 2026-11-14
 ---
 ## Session factory handoff
 
@@ -149,10 +149,10 @@ with no later connect (`REARM`: the server did not serve it once a slot
 freed), and a holder that ends any other way. The probe cannot see the pool's
 size; "one waiting at a full pool" is a connect that outlasts the quiet and
 the window after every earlier one returned inside the quiet, and that the
-probe's own free then serves at once. The server's pid comes from one read of
-`/ctl/procs`, which the kernel cuts to the rows that fit 4096 bytes without
-saying so: a table that ends within 512 bytes of that bound is refused as
-unreadable rather than searched. The waiting connect waits about 650 ms
+probe's own free then serves at once. The server's pid comes from the process
+set read from `/proc` (libthyla-rs's `procs::list`, whole at any number of
+Procs): no Proc of that name, or two, fails the probe. The waiting connect
+waits about 650 ms
 however long the holder took to start. The bar is a quarter of the window: a server
 that keeps asking about a listener it cannot accept from never sleeps and
 takes all of it ([[sub-corvus]], [[sub-netd-nic]]). It runs in joey's ladder
@@ -291,6 +291,20 @@ boot. If the drainer fails to spawn joey *closes* the read end instead, so
 later writes fail fast with EPIPE: the degraded mode is silenced
 diagnostics, never an FS wedge. Same failure shape as the LS-CI relay's
 back-pressure bug — see [[haz-unread-pipe-wedge]].
+
+**joey's exit waits for the drainer to catch up.** Every return of joey's
+`main` ends the boot, and joey's exit ends the drainer thread with it, so what
+stratumd wrote last -- why it refused the boot attach, say -- never reached the
+console: on 2026-11-12 a failed attach extincted with no cause, and finding it
+meant reading three trees. `main` now wraps `joey_main`. Once the drainer is up,
+`sd_drain_settle` parks 10 ms at a time until three parks in a row find the
+pipe empty (a zero-timeout poll, which takes nothing from the drainer), every
+chunk the drainer has woken for also handled, and the count handled unmoved; or
+until the drainer has read the end of the pipe. The drainer waits in a poll and
+counts a chunk as woken before the read that takes its bytes out of the pipe,
+so a chunk is always in one place the settle looks: still in the pipe, or woken
+and not yet handled. It gives up after 100 parks, so a daemon that keeps writing
+holds the end of the boot for about a second.
 
 **The attach opts into loose cache mode, and the premise is written down.**
 `T_ATTACH_9P_LOOSE` on the SYSTEM mount asserts: this pool's block device
@@ -451,13 +465,17 @@ line. dap-probe leaves one orphan on purpose, its abandoned debuggee
 ## Data structures
 
 The spawn is one `t_sys_spawn_args`: flat NUL-separated argv (14 strings,
-173 bytes) plus an fd list installing one pipe write-end as fds 0, 1 and 2.
+177 bytes) plus an fd list installing one pipe write-end as fds 0, 1 and 2.
 
 ## Concurrency
 
 Sequential until the drainer thread is spawned. The drainer then runs for
 the daemon's lifetime, forwarding to the console; it exits when stratumd
-does.
+does. It advances its two counts and sets its end flag with release atomics,
+with a full fence between the woken count and its read; joey's exit path reads
+them with acquire loads (`sd_drain_settle`), and only polls the pipe, never
+reads it. A poll of the drainer's that fails is only a wait cut short: it still
+reads, so the pipe is never left unread.
 
 ## Invariants enforced
 
@@ -478,8 +496,9 @@ surface is unswept).
 
 ## Error paths
 
-Every step returns 1 and fails the boot. The one deliberate non-fatality is
-the drainer spawn.
+Every step returns 1 and fails the boot, and every return first waits for
+the drainer to catch up (above). The one deliberate non-fatality is the
+drainer spawn.
 
 **The `/bin/system.key` metadata probe asserts each refusal's errno
 (2026-10-22, G12).** On the read-only boot FS it checks that SYS_WSTAT
@@ -528,6 +547,10 @@ event-driven; no timing constant appears in this path.
   it here.
 - The readiness read must keep draining, and the drainer must keep owning
   the pipe. A reader that stops reading wedges the FS.
+- joey's own code ends joey only by returning from `joey_main`. A fault, a
+  kill, or a stack-canary failure (libt's `__stack_chk_fail` calls SYS_EXITS
+  directly) skips `main`'s wrapper, and stratumd's last words are lost then;
+  an exit added that skips it loses them again.
 - A blocking reap (`wait_pid_for`) must not be reintroduced on the daemon path.
 
 ## Seams
