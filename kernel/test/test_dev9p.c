@@ -111,6 +111,7 @@ static u32  g_tlcreate_fail_ecode;   // #99: != 0: the NEXT Tlcreate answers Rle
 static u64  g_ga_valid = 0x7ffu;     // the Rgetattr valid mask (default BASIC)
 static u32  g_create_gid;            // the gid the last Tlcreate / Tmkdir carried
 static u32  g_create_mode;           // M8: the mode the last Tlcreate / Tmkdir carried
+static u32  g_create_flags;          // the open flags the last Tlcreate carried
 static u32  g_ga_mode = 0100644u;    // M8: the mode every attribute reply reports
 static u32  g_ga_gid = 0x5678u;      // F-5: the gid every Rgetattr reports
 static u32  g_ga_fail_ecode;         // != 0: every Tgetattr answers Rlerror(ecode)
@@ -460,6 +461,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
             size_t go = (size_t)P9_HDR_LEN + 6 + ((u32)req[11] | ((u32)req[12] << 8)) + 8;
             if (req_len >= go + 4) g_create_gid = le32_at(req + go);
             if (req_len >= go)     g_create_mode = le32_at(req + go - 4);
+            if (req_len >= go)     g_create_flags = le32_at(req + go - 8);
         }
         if (g_tlcreate_fail_ecode) {              // #99: inject an Rlerror (e.g. EEXIST)
             u32 ec = g_tlcreate_fail_ecode;
@@ -1149,7 +1151,9 @@ void test_dev9p_create_file(void) {
     TEST_ASSERT(w != NULL, "clone-walk gave nc its own fid");
     walkqid_free(w);
 
+    g_create_flags = 0xDEADBEEFu;
     struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    u32 flags = g_create_flags;
     TEST_ASSERT(opened == nc,                  "create(file) returns the Spoor");
     TEST_ASSERT((nc->flag & COPEN) != 0,       "COPEN set after Tlcreate");
     TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77,
@@ -1157,6 +1161,8 @@ void test_dev9p_create_file(void) {
 
     spoor_clunk(nc);
     teardown(root);
+    // Round 3 F11: every create the kernel asks is exclusive.
+    TEST_EXPECT_EQ((u64)flags, (u64)(01u | 0200u), "the Tlcreate asks O_WRONLY | O_EXCL");
 }
 
 // #99 (#102 errno-loss) regression: a Tlcreate the server rejects with
@@ -6986,8 +6992,9 @@ void test_dev9p_cached_open_loose_wstat(void) {
 }
 
 // A loose cached open owns no fid until it needs one: its fsync binds the one
-// its fstat and wstat would (vote M22), and a name that no longer reaches the
-// file answers ESTALE with nothing sent.
+// its fstat and wstat would (vote M22). A name that no longer reaches the file
+// leaves the file to sync all the same, as POSIX fsync does: the Tfsync goes on
+// the start the open kept (Stratum's Tfsync commits the whole pool).
 void test_dev9p_cached_open_loose_fsync(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
@@ -7002,7 +7009,7 @@ void test_dev9p_cached_open_loose_fsync(void) {
     g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
     g_wga_lerror_ecode = T_E_NOENT;
     s64 gone = (s64)dev9p.fsync(co, 0);
-    u32 gone_seen = g_tfsync_seen, unasked = g_wga_lerror_ecode;
+    u32 gone_seen = g_tfsync_seen, gone_fid = g_tfsync_fid, unasked = g_wga_lerror_ecode;
     g_wga_lerror_ecode = 0;
     s64 back = (s64)dev9p.fsync(co, 0);
     u32 kfid = cp->co_kfid, back_seen = g_tfsync_seen, back_fid = g_tfsync_fid;
@@ -7013,12 +7020,13 @@ void test_dev9p_cached_open_loose_fsync(void) {
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
 
-    TEST_EXPECT_EQ(gone, (s64)-T_E_STALE, "fsync when the name is gone: ESTALE");
+    TEST_EXPECT_EQ(gone, 0ll, "fsync when the name is gone");
     TEST_EXPECT_EQ((u64)unasked, 0ull, "the walk that found it gone was asked");
-    TEST_EXPECT_EQ((u64)gone_seen, 0ull, "and no Tfsync");
+    TEST_EXPECT_EQ((u64)gone_seen, 1ull, "and one Tfsync");
+    TEST_EXPECT_EQ((u64)gone_fid, 0ull, "on the start the open kept");
     TEST_EXPECT_EQ(back, 0ll, "fsync when it resolves");
     TEST_ASSERT(kfid != P9_NOFID, "binds");
-    TEST_EXPECT_EQ((u64)back_seen, 1ull, "and sends one Tfsync");
+    TEST_EXPECT_EQ((u64)back_seen, 2ull, "and sends a second Tfsync");
     TEST_EXPECT_EQ((u64)back_fid, (u64)kfid, "on that fid");
 }
 
@@ -7042,24 +7050,31 @@ void test_dev9p_fsync_rights(void) {
         TEST_ASSERT(fd[i] >= 0, "handle_alloc");
     }
     g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
-    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[0], 0), 0ll, "a read-only handle syncs");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 1ull, "with one Tfsync");
-    TEST_EXPECT_EQ((u64)g_tfsync_fid, 0ull, "on the root's fid");
-    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[1], 1), 0ll, "a write-only handle syncs");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 2ull, "with a second");
-    TEST_EXPECT_EQ(sys_fsync_for_proc(p, fd[2], 0), -(s64)T_E_BADF,
-                   "a handle with neither right: EBADF");
-    TEST_EXPECT_EQ((u64)g_tfsync_seen, 2ull, "and nothing sent");
+    s64 ro = sys_fsync_for_proc(p, fd[0], 0);
+    u32 ro_seen = g_tfsync_seen, ro_fid = g_tfsync_fid;
+    s64 wo = sys_fsync_for_proc(p, fd[1], 1);
+    u32 wo_seen = g_tfsync_seen;
+    s64 none = sys_fsync_for_proc(p, fd[2], 0);
+    u32 none_seen = g_tfsync_seen;
     root->flag |= CWALKONLY;
     s64 nav = sys_fsync_for_proc(p, fd[3], 0);
     u32 nav_seen = g_tfsync_seen, nav_fid = g_tfsync_fid;
     root->flag &= ~CWALKONLY;
-    TEST_EXPECT_EQ(nav, 0ll, "a navigation handle, born R|W, syncs");
-    TEST_EXPECT_EQ((u64)nav_seen, 3ull, "with a third Tfsync");
-    TEST_EXPECT_EQ((u64)nav_fid, 0ull, "on its walked fid");
+    // The fixtures go back before any assert: a red leg leaves none behind.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     teardown(root);
+
+    TEST_EXPECT_EQ(ro, 0ll, "a read-only handle syncs");
+    TEST_EXPECT_EQ((u64)ro_seen, 1ull, "with one Tfsync");
+    TEST_EXPECT_EQ((u64)ro_fid, 0ull, "on the root's fid");
+    TEST_EXPECT_EQ(wo, 0ll, "a write-only handle syncs");
+    TEST_EXPECT_EQ((u64)wo_seen, 2ull, "with a second");
+    TEST_EXPECT_EQ(none, -(s64)T_E_BADF, "a handle with neither right: EBADF");
+    TEST_EXPECT_EQ((u64)none_seen, 2ull, "and nothing sent");
+    TEST_EXPECT_EQ(nav, 0ll, "a navigation handle, born R|W, syncs");
+    TEST_EXPECT_EQ((u64)nav_seen, 3ull, "with a third Tfsync");
+    TEST_EXPECT_EQ((u64)nav_fid, 0ull, "on its walked fid");
 }
 
 // A dead file's fid shares its inode number with the next file created, so a

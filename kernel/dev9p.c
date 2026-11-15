@@ -1822,6 +1822,11 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         // dev9p_open's Tlopen. Stratum enforces the append server-side; no kernel
         // append mode. 02000 == Linux O_APPEND == Stratum STM_9P_O_APPEND.
         if (omode & SYS_WALK_OPEN_OAPPEND) flags |= 02000u;   // O_APPEND
+        // Exclusive always: both create paths (an exclusive create, and
+        // open-or-create's create after its open missed) count on EEXIST for a
+        // name that exists, which a server honouring the flags would otherwise
+        // open. 0200 == Linux O_EXCL.
+        flags |= 0200u;
         int rc = p9_client_lcreate(p->client, p->fid, (const u8 *)name, name_len,
                                     flags, mode, gid, &qid, &iounit);
         if (rc != 0) {                            // p->fid still parent; caller clunks
@@ -2437,9 +2442,15 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     // server may hold the file's content uncommitted, so the Tfsync goes on the
     // fid its fstat and wstat address: a strict open's kept fid, or the one a
     // loose open binds now. A cached open exists only on a server that walks
-    // with Twalkgetattr (Stratum), whose Tfsync takes an unopened fid.
+    // with Twalkgetattr (Stratum), whose Tfsync takes an unopened fid and
+    // commits the whole pool whichever fid carries it. So a loose open whose
+    // name no longer reaches the file (renamed or unlinked since) still syncs,
+    // as POSIX fsync on such a descriptor does: through the start it kept.
     if (p->cached_open) {
         int br = co_bind(p);
+        struct dev9p_priv *sp = p->co_start ? priv_of(p->co_start) : NULL;
+        if (br == -T_E_STALE && sp)
+            return p9_client_fsync(p->client, sp->fid, datasync);
         if (br != 0) return br;
         return p9_client_fsync(p->client, lock_fid(p), datasync);
     }

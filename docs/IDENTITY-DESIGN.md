@@ -1230,7 +1230,7 @@ SYS_WALK_CREATE(parent_fd, name_va, name_len, omode, perm) -> opened_fd / -1
 (corvus's identity DB at A-1b; any later durable writer).
 
 ```
-SYS_FSYNC(fd, datasync) -> 0 / -1
+SYS_FSYNC(fd, datasync) -> 0 / -errno
   x0 = fd          hidx_t; KOBJ_SPOOR with RIGHT_READ or RIGHT_WRITE.
   x1 = datasync    u32; 0 = full fsync (data + metadata), 1 = datasync.
 ```
@@ -1238,8 +1238,10 @@ SYS_FSYNC(fd, datasync) -> 0 / -1
 - **Mechanism:** new `Dev.fsync(struct Spoor *c, u32 datasync) -> int` vtable
   slot. `dev9p_fsync` -> `p9_client_fsync(fid, datasync)` -> Stratum `Tsync`.
   In-memory Devs (`devramfs`) implement `.fsync` as no-op success (nothing to
-  flush). A Dev with no `.fsync` slot -> -1. A cached read-only open
-  (FID-LIFECYCLE) sends its `Tfsync` on the fid its fstat and wstat address.
+  flush). A Dev with no `.fsync` slot answers `EOPNOTSUPP`. A cached
+  read-only open (FID-LIFECYCLE) sends its `Tfsync` on the fid its fstat and
+  wstat address, or, when its name no longer reaches the file, on the start the
+  open kept: Stratum's `Tfsync` commits the whole pool whichever fid carries it.
 - **Rights (vote M22, 2026-11-14):** either right, as POSIX `fsync` works on a
   descriptor opened only for reading -- a directory's included, which is how a
   rename becomes durable (`mv` across devices syncs the destination directory).

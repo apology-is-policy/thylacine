@@ -2028,15 +2028,17 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (!dr) return 0;
         u32 got = dr->readdir_count;
         if (got > op->op_count) got = op->op_count;
-        // SYS_READDIR's name walk: a name that is not one path component fails
-        // the op, and nothing reaches the buffer.
+        if (got == 0 || !dr->readdir_data) return loom_count_result(0);   // EOD
+        // SYS_READDIR's name walk: a name that is not one path component, or a
+        // run with no complete record, fails the op, and nothing reaches the
+        // buffer. Only complete records reach it and the count: a record the
+        // count or a short buffer cut off is unchecked, and a read from the
+        // last record's cookie brings it whole.
         u64 last = 0;
-        if (got != 0 && dr->readdir_data &&
-            p9_dirent_run_check(dr->readdir_data, (long)got, &last) < 0)
-            return -(s32)T_E_IO;
-        if (got != 0 && dr->readdir_data && op->buf_kva)
-            loom_bufcopy(op->buf_kva, dr->readdir_data, got);
-        return loom_count_result(got);
+        long whole = p9_dirent_run_check(dr->readdir_data, (long)got, &last);
+        if (whole <= 0) return -(s32)T_E_IO;
+        if (op->buf_kva) loom_bufcopy(op->buf_kva, dr->readdir_data, (u32)whole);
+        return loom_count_result((u32)whole);
     }
     case LOOM_OP_READLINK: {
         if (!dr) return 0;
@@ -2095,6 +2097,9 @@ static void loom_async_complete(struct p9_rpc *rpc, int status,
     // only). For a multishot stream this runs once per shot. Scalar ops (NOP /
     // FSYNC) fall through to the scalar mapping.
     s32 result = loom_payload_result(op, status, dr);
+    // A reply the completion refused (READDIR's name walk) fails the op as an
+    // error reply does: it ends a stream and fails a chain.
+    bool failed = status < 0 || result < 0;
 
     // MORE vs terminal (specs/loom_multishot.tla ReplyArrives). A single-shot op
     // (Loom-3) always terminates. A multishot op posts a LOOM_CQE_MORE shot and
@@ -2105,7 +2110,7 @@ static void loom_async_complete(struct p9_rpc *rpc, int status,
     // clears LOOM_CQE_MORE (TerminalEndsStream -- the Tapestry recycle gate).
     bool term;
     if (!op->multishot)                        term = true;
-    else if (status < 0)                       term = true;   // error ends the stream
+    else if (failed)                           term = true;   // error ends the stream
     else if (op->shots + 1u >= op->shot_limit) term = true;   // synthetic FSYNC bound
     else                                       term = false;  // a MORE shot -> re-arm
 
@@ -2134,8 +2139,7 @@ static void loom_async_complete(struct p9_rpc *rpc, int status,
         // admit pass's read under l->lock (no torn read; the successor sees the
         // result on the drive loop's next loom_admit_chain).
         if (op->chain) {
-            op->chain->state = (status < 0) ? LOOM_CHAIN_DONE_FAIL
-                                            : LOOM_CHAIN_DONE_OK;
+            op->chain->state = failed ? LOOM_CHAIN_DONE_FAIL : LOOM_CHAIN_DONE_OK;
         }
     }
     spin_unlock(&l->lock);

@@ -1662,25 +1662,31 @@ void test_9p_client_loom_fsync_read_only(void) {
 
     cl_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 0, 0xAAAA0001u);
     __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
-    int n = loom_enter(l, 1, 1, 0);
-    TEST_EXPECT_EQ(n, 1, "SQE consumed");
-    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE");
-    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "a read-only handle's fsync succeeds");
-    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "dispatched, completed, reaped");
+    int n1 = loom_enter(l, 1, 1, 0);
+    u64 tail1 = l->cq_tail, flight1 = l->async_inflight;
+    s64 res1 = (s64)cqes[0].result;
 
     sp->flag |= CWALKONLY;
     cl_stage_sqe(l, 1, LOOM_OP_FSYNC, 0, 0, 0xAAAA0002u);
     __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
-    n = loom_enter(l, 1, 1, 0);
+    int n2 = loom_enter(l, 1, 1, 0);
     sp->flag &= ~CWALKONLY;
-    TEST_EXPECT_EQ(n, 1, "second SQE consumed");
-    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "a second CQE");
-    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)0, "a navigation handle's fsync succeeds");
-    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "dispatched, completed, reaped");
+    u64 tail2 = l->cq_tail, flight2 = l->async_inflight;
+    s64 res2 = (s64)cqes[1].result;
 
+    // The fixtures go back before any assert: a red leg leaves none behind.
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+
+    TEST_EXPECT_EQ(n1, 1, "SQE consumed");
+    TEST_EXPECT_EQ(tail1, (u64)1, "one CQE");
+    TEST_EXPECT_EQ((u64)res1, (u64)0, "a read-only handle's fsync succeeds");
+    TEST_EXPECT_EQ(flight1, (u64)0, "dispatched, completed, reaped");
+    TEST_EXPECT_EQ(n2, 1, "second SQE consumed");
+    TEST_EXPECT_EQ(tail2, (u64)2, "a second CQE");
+    TEST_EXPECT_EQ((u64)res2, (u64)0, "a navigation handle's fsync succeeds");
+    TEST_EXPECT_EQ(flight2, (u64)0, "dispatched, completed, reaped");
 }
 
 // #898 quiesce: a Loom torn down with an async op in flight must abandon it --
@@ -2590,47 +2596,56 @@ void test_9p_client_loom_rw_rejects(void) {
 // GETATTR / STATFS copy a fixed parsed record. All single-fid, RIGHT_READ.
 // =============================================================================
 
-// Responder that returns a known 8-byte Rreaddir dirent stream (the canonical
-// responder returns count=0, which wouldn't exercise the completion copy).
-// Every other reply delegates to canonical_responder.
+// Responder that returns one well-formed Rreaddir dirent, named "dd" (the
+// canonical responder returns count=0, which wouldn't exercise the completion
+// copy). Every other reply delegates to canonical_responder.
 static int loom_readdir_responder(void *ctx, const u8 *req, size_t req_len,
                                   u8 *resp, size_t cap) {
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0 && type == P9_TREADDIR) {
-        const u8 blob[] = {0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8};
-        size_t total = P9_HDR_LEN + 4 + sizeof(blob);
+        const u8 ent[26] = {
+            [5]  = 0xD1,                          // qid.path
+            [13] = 1,                             // the entry's cookie
+            [22] = 2, [24] = 'd', [25] = 'd',     // the name "dd"
+        };
+        size_t total = P9_HDR_LEN + 4 + sizeof(ent);
         if (cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RREADDIR;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        resp[7] = (u8)sizeof(blob); resp[8] = 0; resp[9] = 0; resp[10] = 0;  // count = 8
-        for (size_t i = 0; i < sizeof(blob); i++) resp[11 + i] = blob[i];
+        resp[7] = (u8)sizeof(ent); resp[8] = 0; resp[9] = 0; resp[10] = 0;  // count = 26
+        for (size_t i = 0; i < sizeof(ent); i++) resp[11 + i] = ent[i];
         return (int)total;
     }
     return canonical_responder(ctx, req, req_len, resp, cap);
 }
 
 // One Rreaddir dirent named g_lrd_name (cookie 1); every other reply delegates
-// to canonical_responder.
+// to canonical_responder. The count can stop g_lrd_short bytes before the
+// record ends, and g_lrd_extra bytes of a record that never completes can
+// follow it.
 static const u8 *g_lrd_name;
 static size_t g_lrd_name_len;
+static size_t g_lrd_short;
+static size_t g_lrd_extra;
 static int loom_readdir_name_responder(void *ctx, const u8 *req, size_t req_len,
                                        u8 *resp, size_t cap) {
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0 && type == P9_TREADDIR) {
         size_t ent = 24 + g_lrd_name_len;
-        size_t total = P9_HDR_LEN + 4 + ent;
+        size_t count = ent - g_lrd_short + g_lrd_extra;
+        size_t total = P9_HDR_LEN + 4 + count;
         if (cap < total) return -1;
         for (size_t i = 0; i < total; i++) resp[i] = 0;
         resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
         resp[4] = P9_RREADDIR;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        resp[7] = (u8)ent;                       // count
+        resp[7] = (u8)count;                     // count
         u8 *d = resp + 11;
         d[5]  = 0x42;                            // qid.path
         d[13] = 1;                               // the entry's cookie
         d[22] = (u8)g_lrd_name_len;
-        for (size_t i = 0; i < g_lrd_name_len; i++) d[24 + i] = g_lrd_name[i];
+        for (size_t i = 0; i < g_lrd_name_len && 24 + i < count; i++) d[24 + i] = g_lrd_name[i];
         return (int)total;
     }
     return canonical_responder(ctx, req, req_len, resp, cap);
@@ -2639,6 +2654,8 @@ static int loom_readdir_name_responder(void *ctx, const u8 *req, size_t req_len,
 // F7 (M15 round 2): Loom's READDIR asks each complete dirent's name what
 // SYS_READDIR asks (p9_dirent_run_check): one path component. "ab" is copied
 // into the buffer; "a/b" fails the op with EIO and nothing reaches the buffer.
+// A run with no complete record fails it too, and of a record followed by part
+// of another only the record reaches the buffer and the count.
 void test_9p_client_loom_readdir_names(void) {
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                               loom_readdir_name_responder, NULL);
@@ -2659,7 +2676,8 @@ void test_9p_client_loom_readdir_names(void) {
 
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
-    for (int i = 0; i < 256; i++) bkva[i] = 0;
+    for (int i = 0; i < 384; i++) bkva[i] = 0;
+    for (int i = 384; i < 512; i++) bkva[i] = 0xEE;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
@@ -2668,29 +2686,118 @@ void test_9p_client_loom_readdir_names(void) {
     cl_stage_rw(l, 0, LOOM_OP_READDIR, /*handle=*/0, /*offset=*/0, /*count=*/64,
                 /*bidx=*/0, /*buf_off=*/0, 0xD11D000000000001ULL);
     __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
-    int n = loom_enter(l, 1, 1, 0);
-    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
-    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)26, "a one-component name: its 26 bytes");
-    TEST_ASSERT(bkva[22] == 2 && bkva[24] == 'a' && bkva[25] == 'b', "copied into the buffer");
+    int n1 = loom_enter(l, 1, 1, 0);
+    s64 r1 = (s64)cqes[0].result;
+    bool copied1 = bkva[22] == 2 && bkva[24] == 'a' && bkva[25] == 'b';
 
     static const u8 bad[] = {'a','/','b'};
     g_lrd_name = bad; g_lrd_name_len = sizeof(bad);
     cl_stage_rw(l, 1, LOOM_OP_READDIR, 0, 0, 64, 0, /*buf_off=*/128, 0xD11D000000000002ULL);
     __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
-    n = loom_enter(l, 1, 1, 0);
-    TEST_EXPECT_EQ(n, 1, "second SQE consumed");
-    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_IO),
-                   "a name holding '/' -> -EIO");
-    bool untouched = true;
+    int n2 = loom_enter(l, 1, 1, 0);
+    s64 r2 = (s64)cqes[1].result;
+    bool untouched2 = true;
     for (int i = 128; i < 128 + 27; i++)
-        if (bkva[i] != 0) { untouched = false; break; }
-    TEST_ASSERT(untouched, "and nothing reaches the buffer");
-    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "both ops reaped");
+        if (bkva[i] != 0) { untouched2 = false; break; }
 
+    g_lrd_name = good; g_lrd_name_len = sizeof(good);
+    g_lrd_short = 1;
+    cl_stage_rw(l, 2, LOOM_OP_READDIR, 0, 0, 64, 0, /*buf_off=*/256, 0xD11D000000000003ULL);
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+    int n3 = loom_enter(l, 1, 1, 0);
+    g_lrd_short = 0;
+    s64 r3 = (s64)cqes[2].result;
+    bool untouched3 = true;
+    for (int i = 256; i < 256 + 26; i++)
+        if (bkva[i] != 0) { untouched3 = false; break; }
+
+    g_lrd_extra = 5;
+    cl_stage_rw(l, 3, LOOM_OP_READDIR, 0, 0, 64, 0, /*buf_off=*/384, 0xD11D000000000004ULL);
+    __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
+    int n4 = loom_enter(l, 1, 1, 0);
+    g_lrd_extra = 0;
+    s64 r4 = (s64)cqes[3].result;
+    bool copied4 = bkva[384 + 22] == 2 && bkva[384 + 24] == 'a' && bkva[384 + 25] == 'b';
+    bool past4 = true;
+    for (int i = 384 + 26; i < 384 + 31; i++)
+        if (bkva[i] != 0xEE) { past4 = false; break; }
+    u64 flight = l->async_inflight;
+
+    // The fixtures go back before any assert: a red leg leaves none behind.
     burrow_unref(b);
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+
+    TEST_EXPECT_EQ(n1, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)r1, (u64)26, "a one-component name: its 26 bytes");
+    TEST_ASSERT(copied1, "copied into the buffer");
+    TEST_EXPECT_EQ(n2, 1, "second SQE consumed");
+    TEST_EXPECT_EQ((u64)r2, (u64)(s64)(-(s32)T_E_IO), "a name holding '/' -> -EIO");
+    TEST_ASSERT(untouched2, "and nothing reaches the buffer");
+    TEST_EXPECT_EQ(n3, 1, "third SQE consumed");
+    TEST_EXPECT_EQ((u64)r3, (u64)(s64)(-(s32)T_E_IO), "a run with no complete record -> -EIO");
+    TEST_ASSERT(untouched3, "and nothing of it reaches the buffer");
+    TEST_EXPECT_EQ(n4, 1, "fourth SQE consumed");
+    TEST_EXPECT_EQ((u64)r4, (u64)26, "a record and part of another: the record's 26 bytes");
+    TEST_ASSERT(copied4, "the record copied");
+    TEST_ASSERT(past4, "and nothing past it");
+    TEST_EXPECT_EQ(flight, (u64)0, "every op reaped");
+}
+
+// Round 3 F2: a READDIR its completion refuses (a name holding '/') fails its
+// chain as an error reply does, so the NOP linked after it is cancelled with
+// one -ECANCELED CQE, not run.
+void test_9p_client_loom_readdir_refusal_cancels_chain(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_readdir_name_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (named-dirent responder)");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'}; const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    static const u8 bad[] = {'a','/','b'};
+    g_lrd_name = bad; g_lrd_name_len = sizeof(bad);
+    cl_stage_rw(l, 0, LOOM_OP_READDIR, /*handle=*/0, /*offset=*/0, /*count=*/64,
+                /*bidx=*/0, /*buf_off=*/0, 0xF2C0000000000001ULL);
+    sqes[0].flags = LOOM_SQE_LINK;
+    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, 0, 0, 0xF2C0000000000002ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    int n = loom_enter(l, 2, /*min_complete=*/2, 0);
+    u64 tail = l->cq_tail, flight = l->async_inflight;
+    u64 ud0 = cqes[0].user_data, ud1 = cqes[1].user_data;
+    s64 r0 = (s64)cqes[0].result, r1 = (s64)cqes[1].result;
+
+    // The fixtures go back before any assert: a red leg leaves none behind.
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+
+    TEST_EXPECT_EQ(n, 2, "two SQEs consumed");
+    TEST_EXPECT_EQ(tail, (u64)2, "two CQEs");
+    TEST_EXPECT_EQ(ud0, 0xF2C0000000000001ULL, "CQE0 = the READDIR");
+    TEST_EXPECT_EQ((u64)r0, (u64)(s64)(-(s32)T_E_IO), "a name holding '/' -> -EIO");
+    TEST_EXPECT_EQ(ud1, 0xF2C0000000000002ULL, "CQE1 = the NOP linked after it");
+    TEST_EXPECT_EQ((u64)r1, (u64)(s64)(-(s32)T_E_CANCELED),
+                   "the refused READDIR cancels its chain (-ECANCELED)");
+    TEST_EXPECT_EQ(flight, (u64)0, "nothing in flight");
 }
 
 // READDIR end-to-end: an Rreaddir dirent stream is copied INTO the registered
@@ -2717,7 +2824,7 @@ void test_9p_client_loom_readdir_e2e(void) {
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
     int hc0 = burrow_handle_count(b);
-    for (int i = 0; i < 8; i++) bkva[i] = 0;
+    for (int i = 0; i < 32; i++) bkva[i] = 0;
 
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -2728,8 +2835,8 @@ void test_9p_client_loom_readdir_e2e(void) {
 
     int n = loom_enter(l, 1, 1, 0);
     TEST_EXPECT_EQ(n, 1, "one SQE consumed");
-    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)8, "READDIR result = 8 dirent bytes");
-    TEST_ASSERT(bkva[0]==0xD1 && bkva[3]==0xD4 && bkva[7]==0xD8,
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)26, "READDIR result = the dirent's 26 bytes");
+    TEST_ASSERT(bkva[5]==0xD1 && bkva[22]==2 && bkva[24]=='d' && bkva[25]=='d',
                 "Rreaddir stream copied into the registered buffer");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
