@@ -2,9 +2,10 @@
 # whether a build dir is its.
 #
 # Stratum's tree is at the root of its repository. A checkout from before it moved there
-# has it under v2/, with the old prototype's CMakeLists.txt at the root, which configures
-# without complaint; such a checkout is refused, with how to bring it up to date. Sourced
-# by build.sh; tools/test-stratum-src.sh runs it against made-up checkouts.
+# has it under v2/ and the old prototype's tree at the root, which configures but has no
+# stratumd target, failing with an error that names no fix; such a checkout is refused
+# first, with how to bring it up to date. Sourced by build.sh; tools/test-stratum-src.sh
+# runs it against made-up checkouts.
 #
 # bash 3.2 safe.
 
@@ -23,9 +24,15 @@ stratum_src_ok() {   # SOURCE_DIR WHO
     [[ -f "$src/src/btree_engine/engine.c" ]] && return 0
     if [[ -f "$src/v2/src/btree_engine/engine.c" ]]; then
         echo "==> $who: $src is a Stratum checkout from before its tree moved to the repository root (the tree is under v2/ there)" >&2
-        echo "    bring it up to date: git -C $src pull --ff-only" >&2
+        printf '    bring it up to date: git -C %q pull --ff-only (with its local changes committed or stashed first),\n' "$src" >&2
+        echo "    or set STRATUM_SRC to a checkout that is up to date" >&2
+    elif [[ -d "$src" && ( ! -r "$src" || ! -x "$src" ) ]]; then
+        echo "==> $who: $src cannot be read" >&2
     elif [[ -d "$src" ]]; then
         echo "==> $who: $src is not a Stratum source tree (no src/btree_engine/engine.c)" >&2
+        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
+    elif [[ -e "$src" ]]; then
+        echo "==> $who: $src is not a directory" >&2
         echo "    override with STRATUM_SRC=/path/to/stratum" >&2
     else
         echo "==> $who: source tree not found at $src" >&2
@@ -48,8 +55,10 @@ stratum_build_dir_fits() {   # BUILD_DIR SOURCE_DIR
     # for CMake to report.
     cached="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dir/CMakeCache.txt" 2>/dev/null)" || cached=""
     [[ -n "$cached" ]] || return 0
-    was="$(cd "$cached" 2>/dev/null && pwd -P)" || was=""
-    now="$(cd "$src" 2>/dev/null && pwd -P)" || now=""
+    # CDPATH would send a bare relative name elsewhere and print where; -- keeps a
+    # name that starts with a dash a name.
+    was="$(CDPATH='' cd -- "$cached" 2>/dev/null && pwd -P)" || was=""
+    now="$(CDPATH='' cd -- "$src" 2>/dev/null && pwd -P)" || now=""
     [[ -n "$now" && "$was" != "$now" ]] || return 0
     echo "==> stratum: $dir was configured from $cached, not $src -- dropping it for a fresh configure" >&2
     rm -rf "${dir:?}"

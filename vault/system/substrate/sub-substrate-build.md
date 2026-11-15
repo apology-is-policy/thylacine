@@ -163,26 +163,38 @@ Stratum's source is `$STRATUM_SRC` when it is set, else the checkout at
 `~/projects/stratum` (`stratum-src.sh`). Its tree is at the repository's root;
 a source is taken as Stratum's tree only when `src/btree_engine/engine.c` is
 there. A checkout from before the tree moved to the root (2026-11-14) has it
-under `v2/` and the old prototype's `CMakeLists.txt` at the root, which would
-configure without complaint and build the wrong thing; `build_stratumd` and
-`build_stratum_host_tools` refuse it instead, naming the
-`git -C <checkout> pull --ff-only` that brings it up to date, and refuse a
-source that is not Stratum's tree, or not there, with `STRATUM_SRC` as the way
-out. The host tools' stale check reads such a source as stale, so the pool
+under `v2/` and the old prototype's tree at the root, which configures but has
+no `stratumd` target: building it fails with a CMake error that names no fix.
+So it is refused first, with the `git -C <checkout> pull --ff-only` that brings
+it up to date (local changes put away first) or an up-to-date `STRATUM_SRC` as
+the way out; so is a source that is not Stratum's tree, cannot be read, is not a
+directory, or is not there, each said as such. `kernel`, `all` and `stratumd`
+refuse before any step runs, so no kernel, userspace or sysroot work (a sysroot
+rebuild empties `build/pouch`) is spent on a build that cannot finish;
+`build_stratumd` and `build_stratum_host_tools` refuse again on their own paths,
+and the host tools' stale check reads a refused source as stale, so the `pool`
 step reaches the refusal rather than taking tools built from the old tree as
-current. The same file drops a Stratum build directory (`build/host-stratum`,
+current. `THYLACINE_MKFS_PRESERVE=1` with both files present is decided before
+the stale check: it runs no host tool and needs no source. The stale check
+watches `third_party/` too, since BLAKE3 and xxHash are compiled into the
+tools. The same file drops a Stratum build directory (`build/host-stratum`,
 `build/pouch/stratumd-cmake`) whose `CMakeCache.txt` names another source tree,
 since CMake refuses to configure it and the directory is only a cache; trees
-are compared by their real paths, and nothing is dropped for a source that is
-refused, so a checkout that is only behind keeps its build for after the pull.
-A tree that is gone counts as another: build.sh runs under
-`set -euo pipefail`, so a failed `cd` into it is caught, never left to end the
-build without a word, and a cache that cannot be read is kept for CMake to
-report. `test-stratum-src.sh` runs these rules against made-up checkouts (each
-call of the build-dir rule as build.sh makes it, under errexit, seen to
-return) and build.sh's own stale check, sliced from build.sh, on a refused
-source. The manifest's probe for the checkout is the same file, so
-`forage.sh status` reports a checkout from before the move as absent.
+are compared by their real paths (`CDPATH` ignored, a name starting with a dash
+still a name), and nothing is dropped for a refused source, so a `STRATUM_SRC`
+that is briefly wrong costs no warm build. (A checkout pulled to the new layout
+drops its dirs once, since they were configured from its `v2/`.) A tree that is
+gone counts as another: build.sh runs under `set -euo pipefail`, so a failed
+`cd` into it is caught, never left to end the build without a word, and a cache
+that cannot be read is kept for CMake to report. `test-stratum-src.sh` runs
+these rules against made-up checkouts (each call of the build-dir rule as
+build.sh makes it, under errexit, seen to return), and build.sh's own functions,
+sliced from it with each one's single definition checked: the stale check, and
+the builders with `cmake` stubbed, which must refuse before they configure,
+drop or delete anything. The manifest's probe for the checkout is the same file,
+so `forage.sh status` reports a checkout from before the move as absent, and
+`forage.sh stratum` on a checkout behind its upstream names the pull rather than
+reporting it gathered (a checkout already there is fetched, never merged).
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a

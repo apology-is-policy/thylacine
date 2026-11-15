@@ -347,7 +347,8 @@ stratum_host_tools_stale() {
     # checks accept -- and with nothing newer in the source tree that
     # state is otherwise STUCK as "fresh" until someone hand-deletes it.
     [[ -f "$hb/.complete" ]] || return 0
-    if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" \
+    # third_party/ is compiled into the tools too (BLAKE3, xxHash, its CMakeLists).
+    if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" "$stratum_src/third_party" \
                      "$stratum_src/CMakeLists.txt" -newer "$sd" 2>/dev/null)" ]]; then
         return 0
     fi
@@ -3679,11 +3680,6 @@ build_stratum_pool_fixture() {
     # source file is newer than the built stratumd (stratum_host_tools_stale).
     local host_stratumd="$host_build/src/cmd/stratumd/stratumd"
     local host_stratum_fs="$host_build/src/cmd/stratum-fs/stratum-fs"
-    if stratum_host_tools_stale; then
-        build_stratum_host_tools
-    fi
-
-    mkdir -p "$fixtures"
 
     # PRESERVE mode: if THYLACINE_MKFS_PRESERVE=1 AND both files
     # already exist, skip regeneration entirely. The bytes from the
@@ -3692,13 +3688,21 @@ build_stratum_pool_fixture() {
     # pins UUIDs but not the libsodium-randomized keyfile + per-run
     # nonces). Use case: after a build that triggers a content-
     # sensitive bug, save pool.img + system.key and re-run with
-    # PRESERVE=1 to get byte-perfect reproduction.
+    # PRESERVE=1 to get byte-perfect reproduction. It runs no host
+    # tool, so it is decided before they are checked and needs no
+    # Stratum source.
     if [[ "${THYLACINE_MKFS_PRESERVE:-0}" == "1" ]] \
         && [[ -f "$pool_img" ]] && [[ -f "$keyfile" ]]; then
         echo "==> stratum pool fixture: PRESERVED (THYLACINE_MKFS_PRESERVE=1; $(wc -c < "$pool_img" | tr -d ' ') bytes pool.img, $(wc -c < "$keyfile" | tr -d ' ') bytes system.key from prior build)"
         ledger "pool.img + system.key: PRESERVED (THYLACINE_MKFS_PRESERVE=1; the existing key is kept -- rebuild the ramfs to re-bake it)"
         return 0
     fi
+
+    if stratum_host_tools_stale; then
+        build_stratum_host_tools
+    fi
+
+    mkdir -p "$fixtures"
 
     # SEED mode: if THYLACINE_MKFS_SEED is set, pass it through to
     # stratum-mkfs's --seed flag. Pins UUID derivation across runs
@@ -8749,6 +8753,14 @@ python3 "$REPO_ROOT/tools/check-flag-words.py" \
 
 # The free-space floor, before any target writes; `clean` frees space.
 [[ "$target" == clean ]] || disk_floor_check "target '$target'"
+
+# A target that always builds stratumd refuses a source that is not Stratum's tree
+# here, before the kernel and userspace steps run (and before a sysroot rebuild can
+# empty build/pouch) for a build that cannot finish. `pool` refuses on its own path,
+# which PRESERVE skips.
+case "$target" in
+    kernel|all|stratumd) stratum_src_ok "$(stratum_src_dir)" build.sh || exit 1 ;;
+esac
 
 # The memory-protection bits cross the syscall boundary as raw values, and each
 # userspace mirror pins its own literals rather than deriving them: a bit added
