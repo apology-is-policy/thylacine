@@ -1082,6 +1082,7 @@ void test_spawn_env_refusals(void);
 void test_spawn_env_account_tail(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
+void test_devproc_mem_waits_outside_the_hold(void);
 void test_devproc_debug_regs(void);
 void test_devproc_thread_files_name_their_thread(void);
 void test_devproc_thread_step_names_its_thread(void);

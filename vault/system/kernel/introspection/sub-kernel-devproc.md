@@ -177,9 +177,14 @@ the space's lock, so a pinned render sees the whole list or none. The render tak
 that lock with interrupts ON -- it runs under no other lock, and no handler takes a
 space's lock -- so a long clone costs the reader's CPU its wait, never its tick
 (audit round 39 F4). Before 2026-11-14
-maps took the space's lock under the table lock (OPEN-BUGS 2026-11-14T17:55:58Z); the
-mem copy still does, waiting there on any holder of a stopped target's space -- an
-RFMEM sibling's clone included. So a read
+maps took the space's lock under the table lock (OPEN-BUGS 2026-11-14T17:55:58Z), and
+until 2026-11-15 the mem copy did too, waiting there on any holder of a stopped
+target's space -- an RFMEM sibling's clone included. The copy still runs inside the
+hold that admitted it, but only TRIES the space's lock there (operator vote 132): a
+busy space is pinned, the hold drops with nothing copied, the reader waits for the
+lock outside with interrupts on and unpins, then resolves, gates and copies again from
+the start, so a resume, a death or a seal in the gap is judged afresh; after
+`DEBUG_MEM_TRIES` (8) walks it answers the not-stopped -1. So a read
 happens wholly before or wholly after a seal, whichever axis admitted the reader,
 including against a Proc that seals itself and then loads a secret, and
 `SPAWN_PERM_SEAL`'s two bits land in one critical section. That holds for the
@@ -218,7 +223,14 @@ exec-shaped swap of the space renders the new space on a second render; an unlin
 reads as gone; and a second hook AFTER the render, before the read is admitted
 again, where a seal must still refuse -- a read that asked before it rendered would
 hand the rows out (audit round 39 F1). The idle leg reads the pin in the window;
-every leg's pins are dropped, the swap's second one on the other space too). Every seal
+every leg's pins are dropped, the swap's second one on the other space too);
+`devproc.mem_waits_outside_the_hold` (the mem copy's busy space: a hook takes the real
+lock under the hold just before the copy tries it, and gives it back at the reader's
+wait point. Busy once copies on the second walk, the space pinned across the wait and
+interrupts unmasked there -- the same probe under the hold reads masked, the control;
+busy always gives up after eight walks; a stop lifted in the gap is refused by the
+second walk's gate; a retried write lands and taints; every leg's pins are dropped).
+Every seal
 test sets the bit through `proc_seal`, the
 production writer, and captures its verdicts before freeing its Procs.
 
@@ -901,7 +913,9 @@ slot recycled into a new thread of the same Proc never matches a stale focus.
 Lock order, all nested *under* `g_proc_table_lock` and all acyclic on the same
 ground (each is a leaf; nothing held under it takes the global lock):
 
-- `vma_lock` — the `maps` walk and the cross-Proc memory copy
+- the space's lock (`as->lock`; older prose says `vma_lock`) — the cross-Proc memory
+  copy, which only TRIES it under the global lock and waits for it outside (vote 132);
+  `maps` renders under it after the walk, nested under nothing
 - `dot_lock` — the cwd render
 - `env_lock` — the environ render
 - each peer's `wait_lock` — the parked-thread scan and the resume wake
@@ -972,7 +986,9 @@ truncated render, so there is no partial-disclosure path.
 The lock hold is the thing being managed throughout, since `g_proc_table_lock`
 is global and taken with IRQs off:
 
-- the cross-Proc memory copy is clamped to one page per call; the debugger loops
+- the cross-Proc memory copy is clamped to one page per call; the debugger loops. The
+  hold never waits for the target space's lock: a busy one is waited for outside it,
+  then the walk repeats, at most eight walks in all
 - the environ read is clamped to 8 KiB per call, and short reads are POSIX-legal
 - every row-formatting loop commits a row only once it wholly fits, so a walk is
   bounded by the **output buffer** rather than by the number of VMAs or threads.

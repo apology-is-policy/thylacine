@@ -539,14 +539,12 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //          diorama translates into Linux's [stack] / [vdso] tags -- so no
 //          consumer has to hardcode the layout.
 //
-// Lock: p->vma_lock, nested under the g_proc_table_lock proc_for_each already
-// holds. That order is ESTABLISHED and audited in this file -- devproc_mem_walk_-
-// cb (8a-1b-gamma-1) takes exactly this pair for the cross-Proc /proc/<pid>/mem
-// copy, on the recorded ground that vma_lock is a leaf below g_proc_table_lock
-// (nothing under vma_lock takes g_proc_table_lock). The walk is bounded CPU
-// under the leaf: no alloc, no block, no nested Burrow lock (every field read
-// is a plain scalar on the Burrow, and the VMA's mapping ref keeps that Burrow
-// alive for the whole walk).
+// Lock: the space's own lock (`as->lock`), taken by format_maps_in after the
+// table walk -- devproc_read pins the space under g_proc_table_lock and renders
+// under no other lock, interrupts on. The walk is bounded CPU under the leaf:
+// no alloc, no block, no nested Burrow lock (every field read is a plain scalar
+// on the Burrow, and the VMA's mapping ref keeps that Burrow alive for the
+// whole walk).
 //
 // Truncation: the format_sched row-commit idiom -- a row is built at a scratch
 // offset and committed only once it wholly fits, so an address space with more
@@ -557,7 +555,7 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 // That truncation is ALSO what bounds the lock hold: the first field that does
 // not fit breaks the loop, so the walk is bounded by the OUTPUT BUFFER (~30
 // rows), not by the VMA count. A Proc sitting at PROC_VMA_MAX (65536 VMAs)
-// therefore holds vma_lock -- and IRQs -- for tens of rows, not 65536. Do not
+// therefore holds the space's lock for tens of rows, not 65536. Do not
 // "fix" the truncation by continuing the walk past a full buffer without
 // re-deriving that bound.
 //
@@ -1611,10 +1609,36 @@ static inline void devproc_maps_test_rendered(void) {
     if (fn && __atomic_load_n(&g_maps_test_rendered_owner, __ATOMIC_RELAXED) == current_thread())
         fn();
 }
+
+static void (*g_mem_test_held)(struct AddrSpace *);
+static void (*g_mem_test_dropped)(struct AddrSpace *);
+static struct Thread *g_mem_test_owner;
+
+void devproc_mem_test_set_hooks(void (*held)(struct AddrSpace *),
+                                void (*dropped)(struct AddrSpace *)) {
+    __atomic_store_n(&g_mem_test_owner, (held || dropped) ? current_thread() : NULL,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&g_mem_test_held, held, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_mem_test_dropped, dropped, __ATOMIC_RELEASE);
+}
+
+static inline void devproc_mem_test_held(struct AddrSpace *as) {
+    void (*fn)(struct AddrSpace *) = __atomic_load_n(&g_mem_test_held, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_mem_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn(as);
+}
+
+static inline void devproc_mem_test_dropped(struct AddrSpace *as) {
+    void (*fn)(struct AddrSpace *) = __atomic_load_n(&g_mem_test_dropped, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_mem_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn(as);
+}
 #else
 static inline void devproc_ns_test_window(void) {}
 static inline void devproc_maps_test_window(void) {}
 static inline void devproc_maps_test_rendered(void) {}
+static inline void devproc_mem_test_held(struct AddrSpace *as) { (void)as; }
+static inline void devproc_mem_test_dropped(struct AddrSpace *as) { (void)as; }
 #endif
 
 // A maps read whose space an exec keeps replacing stops after this many renders.
@@ -2219,6 +2243,12 @@ static bool devproc_target_fully_stopped(struct Proc *target) {
 // path, not a hot one). One page keeps the global-lock hold to a page-copy.
 #define DEBUG_MEM_CHUNK  ((long)4096)
 
+// The hold never waits for the target space's lock, which a sharing (RFMEM)
+// sibling's fork holds across a whole clone (DEBUG-FS-DESIGN 3.2): a walk that
+// finds it busy pins the space, and the caller waits outside and walks again.
+// After this many walks the read answers as if the target were not stopped.
+#define DEBUG_MEM_TRIES  8u
+
 struct devproc_mem_ctx {
     int          target_pid;
     struct Proc *caller;
@@ -2227,14 +2257,15 @@ struct devproc_mem_ctx {
     long         len;        // clamped to <= DEBUG_MEM_CHUNK
     bool         is_write;
     long         result;     // >=0 bytes moved (short at a hole/RO), -T_E_ACCES refused, -1 not-found / not stopped
+    struct AddrSpace *busy;  // its lock was held: pinned here, waited for and unpinned by the caller
 };
 
-// Resolve + I-39 gate + stopped-only gate + the cross-Proc copy, all under
-// g_proc_table_lock (proc_for_each). mmu_cross_proc_read/write take no sleeping
-// lock (a direct-map memcpy), and target->vma_lock is a leaf below
-// g_proc_table_lock (acyclic: nothing under vma_lock takes g_proc_table_lock) --
-// so the copy is safe under the lock, which also pins the target ALIVE across it
-// (no reap-UAF of pgtable_root).
+// Resolve + I-39 gate + stopped-only gate + the cross-Proc copy, all in one
+// g_proc_table_lock hold (proc_for_each), which keeps the target stopped (a
+// resume and a death both need it) and alive (no reap-UAF of pgtable_root).
+// mmu_cross_proc_read/write take no sleeping lock (a direct-map memcpy). The
+// space's lock nests below the table lock but is only TRIED here: the hold
+// is global, and its holder may be doing a long walk.
 static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     struct devproc_mem_ctx *m = (struct devproc_mem_ctx *)arg;
     if (target->pid != m->target_pid) return 0;   // keep walking
@@ -2247,11 +2278,21 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
         && devproc_read_sealed(m->caller, target, PQS_MEM)) { m->result = -T_E_ACCES; return 1; }
     if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
 
-    irq_state_t vs = spin_lock_irqsave(&target->as->lock);
+    // Interrupts are already masked (proc_for_each), so the plain try serves.
+    // A busy space is pinned -- the target, a live owner, links it under this
+    // lock -- and nothing is copied: the caller waits, then judges it all again.
+    struct AddrSpace *as = target->as;
+    devproc_mem_test_held(as);
+    if (!spin_trylock(&as->lock)) {
+        addrspace_pin(as);
+        m->busy   = as;
+        m->result = -1;
+        return 1;
+    }
     m->result = m->is_write
-        ? mmu_cross_proc_write(target->as->pgtable_root, m->vaddr, m->kbuf, m->len)
-        : mmu_cross_proc_read(target->as->pgtable_root,  m->vaddr, m->kbuf, m->len);
-    spin_unlock_irqrestore(&target->as->lock, vs);
+        ? mmu_cross_proc_write(as->pgtable_root, m->vaddr, m->kbuf, m->len)
+        : mmu_cross_proc_read(as->pgtable_root,  m->vaddr, m->kbuf, m->len);
+    spin_unlock(&as->lock);
     // Its own stamp rather than the attach's: this path requires authority and a
     // stopped target, NOT the debug-owner slot, so a caller that never attached
     // can reach it while somebody else holds the target stopped.
@@ -2277,8 +2318,21 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
         .is_write   = is_write,
         .result     = -1,
     };
-    proc_for_each(devproc_mem_walk_cb, &m);
-    return m.result;   // -T_E_ACCES refused, -1 not-found / not stopped; else bytes moved (0 = a hole at off)
+    for (u32 tries = 1; ; tries++) {
+        m.busy = NULL;
+        proc_for_each(devproc_mem_walk_cb, &m);
+        struct AddrSpace *busy = m.busy;
+        if (!busy) return m.result;   // -T_E_ACCES refused, -1 not-found / not stopped; else bytes moved (0 = a hole at off)
+        // Under no lock, interrupts on: wait the holder out, then walk again
+        // from the resolve -- a resume, a death or a seal may land meanwhile.
+        devproc_mem_test_dropped(busy);
+        if (tries < DEBUG_MEM_TRIES) {
+            spin_lock(&busy->lock);
+            spin_unlock(&busy->lock);
+        }
+        addrspace_unpin(busy);        // past the walk: the last pin frees
+        if (tries == DEBUG_MEM_TRIES) return -1;
+    }
 }
 
 // =============================================================================

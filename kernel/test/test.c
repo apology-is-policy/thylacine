@@ -1762,6 +1762,7 @@ struct test_case g_tests[] = {
     { "devproc.debug_birth_hold_ctl",          test_devproc_debug_birth_hold_ctl,          false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
+    { "devproc.mem_waits_outside_the_hold",    test_devproc_mem_waits_outside_the_hold,    false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
     { "devproc.thread_files_name_their_thread", test_devproc_thread_files_name_their_thread, false, NULL },
     { "devproc.thread_step_names_its_thread",  test_devproc_thread_step_names_its_thread,  false, NULL },

@@ -2789,6 +2789,149 @@ void test_devproc_debug_mem(void) {
     TEST_ASSERT(mem_tainted_after, "a mem WRITE stamps the debug taint on the target");
 }
 
+// The mem copy never waits for the target space's lock inside the table-lock
+// hold (DEBUG-FS-DESIGN 3.2, vote 132). `held` takes the space's lock from under
+// the hold just before the copy tries it -- the real lock, so the try really
+// fails, as it would against a sibling's clone -- and `dropped` gives it back
+// from the caller's wait point. Each leg reads where the wait ran (interrupts
+// masked means a table-lock hold, which is always taken irqsave; the same probe
+// under the hold is the control), how many walks the read took, and the space's
+// references at the wait (the pin) and after (balanced).
+static struct Proc      *g_mb_target;
+static struct AddrSpace *g_mb_holding;
+static u32  g_mb_busy_left, g_mb_walks, g_mb_drops;
+static bool g_mb_held_masked, g_mb_drop_masked, g_mb_lift_stop;
+static int  g_mb_drop_refs;
+
+static void mb_held(struct AddrSpace *as) {
+    g_mb_walks++;
+    g_mb_held_masked = irqs_masked();
+    if (g_mb_busy_left == 0) return;
+    g_mb_busy_left--;
+    spin_lock(&as->lock);
+    g_mb_holding = as;
+}
+
+static void mb_dropped(struct AddrSpace *as) {
+    g_mb_drops++;
+    if (irqs_masked()) g_mb_drop_masked = true;
+    g_mb_drop_refs = addrspace_ref_count(as);
+    if (g_mb_lift_stop) g_mb_target->debug_stop_req = 0;   // a resume in the gap
+    if (g_mb_holding == as) { g_mb_holding = NULL; spin_unlock(&as->lock); }
+}
+
+void test_devproc_mem_waits_outside_the_hold(void) {
+    // control, busy once, busy always, stop lifted in the gap, busy once on a write
+    enum { LEGS = 5 };
+    static const u32  busy[LEGS] = { 0, 1, 100, 1, 1 };
+    static const bool lift[LEGS] = { false, false, false, true, false };
+    static const bool wr[LEGS]   = { false, false, false, false, true };
+    long got[LEGS];
+    u32  walks[LEGS], drops[LEGS];
+    bool held_masked[LEGS], drop_masked[LEGS], bytes_ok[LEGS], stranded[LEGS];
+    bool untainted_before_write = false;
+    int  refs_before[LEGS], drop_refs[LEGS], refs_after[LEGS];
+    u8   buf[64], wbuf[64];
+
+    // The premise of the wait's probe: this thread runs unmasked outside any hold.
+    bool outside_masked = irqs_masked();
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL && tgt->as, "alloc the mem target");
+    tgt->principal_id = tt->proc->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    const u64 VA = 0x20000000ull;
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    if (!pg) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
+    TEST_ASSERT(pg != NULL, "alloc the backing page");
+    u8 *kva = (u8 *)pa_to_kva(page_to_pa(pg));
+    for (int i = 0; i < 64; i++) kva[i] = (u8)(0xC0 + i);
+    int map_rc = mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), VA,
+                                      page_to_pa(pg), VMA_PROT_RW, false);
+    proc_test_link(tgt);
+    struct Spoor *mem = open_mem_for_pid(tgt->pid);
+
+    g_mb_target = tgt;
+    for (int l = 0; l < LEGS; l++) {
+        tgt->debug_stop_req = 1;
+        g_mb_busy_left   = busy[l];
+        g_mb_lift_stop   = lift[l];
+        g_mb_walks       = 0;
+        g_mb_drops       = 0;
+        g_mb_held_masked = false;
+        g_mb_drop_masked = false;
+        g_mb_drop_refs   = -1;
+        refs_before[l]   = addrspace_ref_count(tgt->as);
+        for (int i = 0; i < 64; i++) { buf[i] = 0; wbuf[i] = (u8)(0x10 * l + i); }
+        if (wr[l])
+            untainted_before_write =
+                (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) == 0;
+        devproc_mem_test_set_hooks(mb_held, mb_dropped);
+        if (!mem)       got[l] = -2;
+        else if (wr[l]) got[l] = devproc.write(mem, wbuf, 64, (s64)VA);
+        else            got[l] = devproc.read(mem, buf, 64, (s64)VA);
+        devproc_mem_test_set_hooks(NULL, NULL);
+        // A walk that took the lock and then did not report it busy would leave
+        // it held, and the next leg's take would never return.
+        stranded[l] = g_mb_holding != NULL;
+        if (g_mb_holding) { spin_unlock(&g_mb_holding->lock); g_mb_holding = NULL; }
+        walks[l]       = g_mb_walks;
+        drops[l]       = g_mb_drops;
+        held_masked[l] = g_mb_held_masked;
+        drop_masked[l] = g_mb_drop_masked;
+        drop_refs[l]   = g_mb_drop_refs;
+        refs_after[l]  = addrspace_ref_count(tgt->as);
+        bool ok = true;
+        for (int i = 0; i < 64; i++)
+            if (wr[l] ? kva[i] != (u8)(0x10 * l + i) : buf[i] != kva[i]) ok = false;
+        bytes_ok[l] = ok;
+    }
+    g_mb_target = NULL;
+    bool tainted = (__atomic_load_n(&tgt->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED) != 0;
+
+    if (mem) spoor_clunk(mem);
+    proc_test_unlink(tgt);
+    free_pages(pg, 0);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_ASSERT(!outside_masked, "premise: the test thread runs with interrupts unmasked");
+    TEST_EXPECT_EQ(map_rc, 0, "map the target's page");
+    TEST_ASSERT(mem != NULL, "open /proc/<pid>/mem");
+    for (int l = 0; l < LEGS; l++) {
+        TEST_ASSERT(!stranded[l], "no walk kept the space's lock it found held");
+        TEST_ASSERT(held_masked[l], "control: the probe reads masked under the table lock");
+        TEST_EXPECT_EQ(refs_after[l], refs_before[l], "the read's pins are all dropped");
+    }
+    TEST_EXPECT_EQ(got[0], 64L, "control: an uncontended read copies");
+    TEST_ASSERT(bytes_ok[0], "control: the bytes are the page's");
+    TEST_EXPECT_EQ((long)walks[0], 1L, "control: one walk");
+    TEST_EXPECT_EQ((long)drops[0], 0L, "control: no wait");
+
+    TEST_EXPECT_EQ((long)drops[1], 1L, "busy once: the walk dropped the hold to wait");
+    TEST_ASSERT(!drop_masked[1], "busy once: the wait runs outside the table lock");
+    TEST_EXPECT_EQ(drop_refs[1], refs_before[1] + 1, "busy once: the space is pinned across the wait");
+    TEST_EXPECT_EQ((long)walks[1], 2L, "busy once: a second walk");
+    TEST_EXPECT_EQ(got[1], 64L, "busy once: the second walk copies");
+    TEST_ASSERT(bytes_ok[1], "busy once: the bytes are the page's");
+
+    TEST_EXPECT_EQ(got[2], -1L, "busy always: the read gives up as not stopped");
+    TEST_EXPECT_EQ((long)walks[2], (long)8, "busy always: eight walks");
+    TEST_EXPECT_EQ((long)drops[2], (long)8, "busy always: each one dropped the hold");
+    TEST_ASSERT(!drop_masked[2], "busy always: no wait under the table lock");
+
+    TEST_EXPECT_EQ((long)walks[3], 2L, "stop lifted: the read walks again");
+    TEST_EXPECT_EQ(got[3], -1L, "stop lifted: the second walk's gate refuses");
+
+    TEST_EXPECT_EQ((long)walks[4], 2L, "write: a second walk");
+    TEST_EXPECT_EQ(got[4], 64L, "write: the second walk writes");
+    TEST_ASSERT(bytes_ok[4], "write: the bytes landed");
+    TEST_ASSERT(untainted_before_write, "premise: the target was untainted before the write");
+    TEST_ASSERT(tainted, "write: the target carries the debug taint");
+}
+
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a
 // STOPPED target's head thread (I-39; DEBUG-FS 4.5). Drives the full devproc
 // path on a SYNTHETIC parked thread with a real kstack buffer + a known

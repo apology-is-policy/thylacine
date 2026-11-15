@@ -7,6 +7,7 @@
 
 #include <thylacine/types.h>
 
+struct AddrSpace;
 struct Proc;
 struct Spoor;
 struct Thread;
@@ -48,6 +49,10 @@ void devproc_ns_test_set_window_hook(void (*fn)(void));
 void devproc_maps_test_set_window_hook(void (*fn)(void));
 // Run fn() after each maps render, before the walk that admits the read again.
 void devproc_maps_test_set_rendered_hook(void (*fn)(void));
+// The mem copy: held(as) runs under the table lock just before the copy tries the
+// space's lock; dropped(as) after a walk that found it busy, under no lock, before the wait.
+void devproc_mem_test_set_hooks(void (*held)(struct AddrSpace *),
+                                void (*dropped)(struct AddrSpace *));
 #endif // KERNEL_TESTS
 
 #endif // THYLACINE_DEVPROC_H
