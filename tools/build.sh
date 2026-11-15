@@ -332,6 +332,9 @@ sysroot_is_stale() {
 stratum_host_tools_stale() {
     local stratum_src; stratum_src="$(stratum_src_dir)"
     local hb="$BUILD_DIR/host-stratum"
+    # A source that is not Stratum's tree is refused by build_stratum_host_tools, before
+    # anything is dropped for it.
+    stratum_src_ok "$stratum_src" "stratum host tools" 2>/dev/null || return 0
     # Tools configured from a tree that has since moved are not this tree's: with the
     # build dir dropped, the checks below report them missing.
     stratum_build_dir_fits "$hb" "$stratum_src"
@@ -3482,11 +3485,7 @@ build_stratumd() {
     local toolchain="$REPO_ROOT/cmake/Toolchain-aarch64-pouch.cmake"
     local readelf="$LLVM_PREFIX/bin/llvm-readelf"
 
-    if [[ ! -d "$stratum_src" ]]; then
-        echo "==> stratumd: source tree not found at $stratum_src" >&2
-        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
-        exit 1
-    fi
+    stratum_src_ok "$stratum_src" stratumd || exit 1
     if [[ ! -f "$stratum_src/CMakeLists.txt" ]]; then
         echo "==> stratumd: $stratum_src/CMakeLists.txt missing" >&2
         exit 1
@@ -3590,11 +3589,7 @@ build_stratum_host_tools() {
     local stratumd_bin="$host_build/src/cmd/stratumd/stratumd"
     local stratum_fs_bin="$host_build/src/cmd/stratum-fs/stratum-fs"
 
-    if [[ ! -d "$stratum_src" ]]; then
-        echo "==> stratum host tools: source tree not found at $stratum_src" >&2
-        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
-        exit 1
-    fi
+    stratum_src_ok "$stratum_src" "stratum host tools" || exit 1
 
     echo "==> building stratum host tools (mkfs + stratumd + stratum-fs) from $stratum_src"
     stratum_build_dir_fits "$host_build" "$stratum_src"

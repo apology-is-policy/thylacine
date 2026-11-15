@@ -159,23 +159,30 @@ kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,
 `loom-bridge-probe`, therefore sits in the curated `usr_bins` list of every
 image. The kernel test holds it to the verdict its own lever implies.
 
-Stratum's source is the one input found by a rule and not a fixed path.
-`stratum-src.sh` gives `$STRATUM_SRC` when it is set, else the checkout at
-`~/projects/stratum`: its root when the tree is there
-(`src/btree_engine/engine.c`), its `v2/` when the checkout still has the layout
-from before Stratum's tree moved to the repository's root. The second arm exists
-so that the day the shared checkout moves, a worktree whose branch already
-carries this rule keeps building; it goes once no checkout needs it. The same
-file drops a Stratum build directory (`build/host-stratum`,
+Stratum's source is `$STRATUM_SRC` when it is set, else the checkout at
+`~/projects/stratum` (`stratum-src.sh`). Its tree is at the repository's root;
+a source is taken as Stratum's tree only when `src/btree_engine/engine.c` is
+there. A checkout from before the tree moved to the root (2026-11-14) has it
+under `v2/` and the old prototype's `CMakeLists.txt` at the root, which would
+configure without complaint and build the wrong thing; `build_stratumd` and
+`build_stratum_host_tools` refuse it instead, naming the
+`git -C <checkout> pull --ff-only` that brings it up to date, and refuse a
+source that is not Stratum's tree, or not there, with `STRATUM_SRC` as the way
+out. The host tools' stale check reads such a source as stale, so the pool
+step reaches the refusal rather than taking tools built from the old tree as
+current. The same file drops a Stratum build directory (`build/host-stratum`,
 `build/pouch/stratumd-cmake`) whose `CMakeCache.txt` names another source tree,
 since CMake refuses to configure it and the directory is only a cache; trees
 are compared by their real paths, and nothing is dropped for a source that is
-not there. A tree that is gone counts as another: build.sh runs under
+refused, so a checkout that is only behind keeps its build for after the pull.
+A tree that is gone counts as another: build.sh runs under
 `set -euo pipefail`, so a failed `cd` into it is caught, never left to end the
 build without a word, and a cache that cannot be read is kept for CMake to
-report. `test-stratum-src.sh` runs both rules against made-up checkouts, and
-each call of the build-dir rule as build.sh makes it, under errexit, seen to
-return.
+report. `test-stratum-src.sh` runs these rules against made-up checkouts (each
+call of the build-dir rule as build.sh makes it, under errexit, seen to
+return) and build.sh's own stale check, sliced from build.sh, on a refused
+source. The manifest's probe for the checkout is the same file, so
+`forage.sh status` reports a checkout from before the move as absent.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a

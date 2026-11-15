@@ -60,7 +60,7 @@ forageable = "clone"
 [fork.stratum]
 path       = "~/projects/stratum"
 env        = "STRATUM_SRC"
-probe      = "CMakeLists.txt"
+probe      = "src/btree_engine/engine.c"
 repo       = "https://github.com/apology-is-policy/stratum.git"
 branch     = "main"
 feeds      = "stratumd (the Stratum FS daemon; every image needs it)"
