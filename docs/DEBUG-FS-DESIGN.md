@@ -434,7 +434,14 @@ that tests them runs under that same lock (`proc_for_each`) and renders there to
 except `ns` and `maps`, which render after the lock drops (a namespace shed, or a
 fork's clone of the space, can hold the lock the render needs for a long walk) and then
 ask their admission again under the lock, refusing what they rendered if a seal landed
-meanwhile (`maps` holds its space by a lifetime pin taken under the lock). A
+meanwhile (`maps` holds its space by a lifetime pin taken under the lock). `mem`
+copies inside the hold that admitted it, but that hold never *waits* for the target
+space's lock, which a sharing sibling's fork can hold across a whole clone: when the
+lock is busy, `mem` pins the space, drops the hold without copying, waits for the
+space's lock outside with interrupts on, and then runs the resolve, the gates and the
+copy again from the start -- a resume, a death or a seal in the gap is judged afresh --
+up to eight tries before it answers the not-stopped -1 (operator vote 132,
+2026-11-15). A
 read therefore happens entirely before a seal or entirely after it, whichever axis
 admitted the reader — including against a Proc that seals *itself* and then loads a
 secret. `SPAWN_PERM_SEAL`'s two bits land in one critical section, so no reader ever
@@ -544,8 +551,10 @@ under `g_proc_table_lock`*, which is also the lock `proc_exec_replace` swaps `->
 under and the lock every debug gate already holds. So it is exact at the instant of
 the access, and a fork racing alongside cannot defeat it: a child published after
 the check is bounded by the parent the check already weighed (I-2). The fast path
-is `addrspace_ref_count == 1` — no sharing, no walk — which is the overwhelmingly
-common case, so a per-operation join costs nothing in the ordinary one.
+is a sole owner, `addrspace_owner_count <= 1`, asked after the space's record of the
+holders that have left it (below; the share family's part, 3.4) -- no other owner, no
+walk -- which is the overwhelmingly common case, so a
+per-operation join costs nothing in the ordinary one.
 
 **`shared` is "references, minus the zombies the traversal saw".** It asks whether
 another Proc could still *use* the image, and a ZOMBIE cannot: an attach refuses a
