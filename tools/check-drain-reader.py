@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""check-drain-reader.py -- joey's stratumd drain reader can reach no system call but its own four.
+"""check-drain-reader.py -- joey's stratumd drain reader can reach no system call outside its allowlist.
 
 joey's #370 drainer is two threads: a reader that copies stratumd's pipe into a
 ring, and a printer that writes the ring to the console. A console write parks
@@ -12,10 +12,12 @@ every function reachable from sd_reader_main by direct call or tail call, and
 every system call in them, against an allowlist by NAME whose numbers come from
 the kernel's syscall enum. Functions are keyed by start address and every
 direct branch is resolved by its target address, never a symbol name; a
-function whose last instruction can fall through runs on into the next one,
-which is followed too. A call's number is the constant moved into w8/x8 in
-the straight run of instructions before its svc: nothing in between may name
-x8 or w8, transfer control, or be a branch target. It fails closed: an indirect
+function whose last instruction can fall through (anything but an
+unconditional branch, a return, a trap, an exit call or a call that never
+returns) runs on into the next one, which is followed too. A call's number is
+the constant moved into w8/x8 (the zero register is 0) in the straight run of
+instructions before its svc: nothing in between may name x8 or w8, transfer
+control, or be a branch target. It fails closed: an indirect
 call, branch or return, a branch to an address that starts no function, a
 branch form past the ARMv8.0 floor, a fall-through into no function, a system
 call whose number is not such a constant, or a reader in which it does not find
@@ -44,7 +46,7 @@ INSN_RE = re.compile(r'^\s+([0-9a-f]+):\s+(\S+)\s*(.*?)\s*$')
 # A direct branch's target is its one bare hexadecimal operand (llvm-objdump may or may not
 # annotate it with <symbol+offset>; the annotation is never trusted).
 BR_TARGET = re.compile(r'(?:^|[\s,])0x([0-9a-f]+)(?=\s|$)')
-MOV_X8_RE = re.compile(r'^[wx]8,\s*#(-?0x[0-9a-f]+|-?\d+)')
+MOV_X8_RE = re.compile(r'^[wx]8,\s*(?:#(-?0x[0-9a-f]+|-?\d+)|[wx]zr\b)')
 NAMES_X8 = re.compile(r'\b[wx]8\b')
 DIRECT = re.compile(r'^(b|bl|b\.\w+|cbz|cbnz|tbz|tbnz)$')
 INDIRECT = re.compile(r'^(blr|br)(aa|ab|aaz|abz)?$')
@@ -106,14 +108,14 @@ def svc_number(insns, i, targets):
             m = MOV_X8_RE.match(ops) if mn in ('mov', 'movz') else None
             if not m:
                 return None, 'x8 last set by %s %s' % (mn, ops)
-            return int(m.group(1), 0), None
+            return (int(m.group(1), 0) if m.group(1) is not None else 0), None
         j -= 1
     return None, 'no constant number in the %d instructions before it' % RUN_MAX
 
 
 def never_returns(insns, nums):
-    """A callee no call returns from: no return, no indirect branch, no branch out of
-    itself, and it ends on a branch into itself or a call that does not return."""
+    """A callee no call returns from: no return, call, indirect branch or branch out of
+    itself, and its last instruction is a branch within itself, a trap or an exit call."""
     if not insns:
         return False
     lo, hi = insns[0][0], insns[-1][0]
@@ -222,7 +224,7 @@ def run_objdump(objdump, elf):
 
 
 def selftest():
-    nums = {'SYS_EXITS': 2, 'SYS_PUTS': 1, 'SYS_READ': 9, 'SYS_POLL': 29, 'SYS_TORPOR_WAIT': 39,
+    nums = {'SYS_EXITS': 0, 'SYS_PUTS': 1, 'SYS_READ': 9, 'SYS_POLL': 29, 'SYS_TORPOR_WAIT': 39,
             'SYS_TORPOR_WAKE': 40, 'SYS_THREAD_EXIT': 42}
 
     def fn(name, base, body):
@@ -264,8 +266,18 @@ def selftest():
          'system call SYS_PUTS'),
         ('a reader falling off into nothing', good.replace('\tret\n', '\tnop\n'), 'falls off its end'),
         ('a last call that never returns', good.replace('\tret\n', '\tbl\t0x400300 <die>\n')
-         + fn('die', 0x400300, ['mov\tx8, #0x2', 'svc\t#0', 'wfe', 'b\t0x400308 <die+0x8>']), 4),
+         + fn('die', 0x400300, ['mov\tx8, #0x0', 'svc\t#0', 'wfe', 'b\t0x400308 <die+0x8>']), 4),
+        ('an exit call numbered by the zero register', good.replace('\tret\n', '\tbl\t0x400300 <die>\n')
+         + fn('die', 0x400300, ['mov\tw8, wzr', 'svc\t#0', 'wfe', 'b\t0x400308 <die+0x8>']), 4),
         ('a last call that returns', good.replace('\tret\n', '\tbl\t0x400100 <helper>\n'), 'falls off its end'),
+        ('a last system call that returns, then a console write',
+         good.replace('mov\tw8, #0x2a', 'mov\tw8, #0x28')
+         + fn('next', 0x400208, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
+         'system call SYS_PUTS'),
+        ('a last conditional branch, then a console write',
+         good.replace('\tret\n', '\tcbz\tx0, 0x400000 <sd_reader_main>\n')
+         + fn('next', 0x400024, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
+         'system call SYS_PUTS'),
         ('a branch form past the floor', good.replace('b.le\t0x400000 <sd_reader_main>', 'bc.le\t0x400000 <sd_reader_main>'), 'unsupported branch form'),
         ('a branch into another function', good.replace('0x400200 <tail>', '0x400208 <tail+0x8>'), 'to 0x400208, which starts no function'),
         ('no reader at all', good.replace(ENTRY, 'other_main'), 'not in the disassembly'),

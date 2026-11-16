@@ -333,10 +333,13 @@ sink or not:
 
 1. Frozen while 64 KiB arrive, then the bytes stop: the reader's line must
    come after the quiet spell. That line takes the reserve and ends the ring
-   on a newline, so one line more, still frozen, opens a gap behind it and
-   puts nothing in the ring; that gap's line (the reader's after the thaw, or
-   the printer's at EOF) must not start with a newline. The settle must not
-   call the frozen ring caught up.
+   on a newline, so one line more, still frozen, joins a gap behind it (one
+   it opens, or one a quiet close mid-burst left open) and puts nothing in
+   the ring; that gap's line (the reader's after the thaw, or the printer's
+   at EOF) must not start with a newline. The settle must not call the frozen
+   ring caught up, both before that line, with no gap open (so only the ring's
+   unprinted bytes can say no; skipped when a quiet close mid-burst left a gap
+   open), and after it.
 2. Frozen with no quiet timer: thawed, the ring is printed with the gap still
    open, and the settle must not call that caught up; frozen again at EOF,
    with the gap's line not yet printed, it must not either. Exactly one line,
@@ -351,11 +354,16 @@ sink or not:
    the reserve, so the frozen phase's gap (16,512) and where its line stands
    are exact.
 4. No printer: the settle prints the ring while the reader still runs and
-   must not call the open gap caught up; with stratumd still writing (four
-   lines a millisecond) it must not call that caught up either, and must
-   print no more than a ring's worth and one write; at EOF, with a console
-   that takes nothing, it must not call the drain caught up and must still
-   end; then it prints the gap's line.
+   must not call the open gap caught up. Then stratumd writes all the time the
+   settle prints: the sink writes the stream's next line each time it is
+   called, from two lines put in the ring first, so until the settle's budget
+   is spent a line is always in the pipe, being read, in the ring or counted
+   in a gap, whatever the threads' timing; the settle must not call that
+   caught up and must print no more than a ring's worth and one write. Then
+   80 lines arrive with nothing printing them, more than the ring holds: the
+   settle prints the ring and must not call the open gap caught up. At EOF,
+   with a console that takes nothing, it must not call the drain caught up
+   and must still end; then it prints the gap's line.
 
 What each sink took is read back against the stream: runs of the stream's
 bytes, each starting exactly where the bytes before it and the losses counted
@@ -373,13 +381,14 @@ direct call and branch from `sd_reader_main` by its target address (never a
 symbol name: two static functions may share one), and fails unless each
 system call it reaches is poll, read, a futex wake, thread exit or exit (by
 name, the numbers from the kernel's enum). A function whose last
-instruction can fall through (anything but a branch, a return, a trap, an
-exit call, or a call to a function that never returns) runs on into the
-next, which is followed too. It fails closed on an indirect call, branch or
-return, a branch or a fall-through to an address that starts no function, a
-branch form past the ARMv8.0 floor, or a call number that is not a constant
-in the straight run of instructions before its `svc`. Its self-test runs
-first, and `tools/build.sh` stops on either failing.
+instruction can fall through (anything but an unconditional branch, a
+return, a trap, an exit call, or a call to a function that never returns)
+runs on into the next, which is followed too. It fails closed on an indirect
+call, branch or return, a branch or a fall-through to an address that starts
+no function, a branch form past the ARMv8.0 floor, or a call number that is
+not a constant (a move from the zero register is 0) in the straight run of
+instructions before its `svc`. Its self-test runs first, and
+`tools/build.sh` stops on either failing.
 
 **joey's exit waits for the drainer to catch up.** Every return of joey's
 `main` ends the boot, and joey's exit ends both drainer threads with it, so what
