@@ -5571,7 +5571,12 @@ void test_dev9p_m24_pin_refuses_a_holder(void) {
     struct dev9p_priv *p1 = f1 ? dev9p_priv_of(f1) : NULL;
     bool e1 = p1 && p1->wb_eligible;
     u32 holders1 = dev9p_wb_holders();
+    m24_probe_on();
     struct Spoor *t = m23_peer(root, 1 | 0x10 /*OWRITE|OTRUNC*/);
+    g_m24_probe = false;
+    u32 tn    = g_m24_log_n;
+    u8  tty   = g_m24_type[0];
+    u32 tpins = g_m24_pins[0];
     struct dev9p_priv *tp = t ? dev9p_priv_of(t) : NULL;
     bool et = tp && tp->wb_eligible;
     u32 pins1    = dev9p_wb_pins(&g_client, M23_PATH);
@@ -5592,6 +5597,9 @@ void test_dev9p_m24_pin_refuses_a_holder(void) {
     TEST_ASSERT(!e1, "does not hold while a pin stands");
     TEST_EXPECT_EQ((u64)holders1, (u64)hb, "nothing registered");
     TEST_ASSERT(t != NULL, "a truncating open");
+    TEST_EXPECT_EQ((u64)tn, 1ull, "one Tlopen, with the test's pin standing");
+    TEST_ASSERT(tty == P9_TLOPEN && tpins == 2,
+                "a truncating open with no holder pins over its Tlopen too (M24a)");
     TEST_ASSERT(!et, "does not hold either");
     TEST_EXPECT_EQ((u64)pins1, 1ull, "and released its own pin: the test's alone stands");
     TEST_EXPECT_EQ((u64)holders2, (u64)hb, "nothing registered");
