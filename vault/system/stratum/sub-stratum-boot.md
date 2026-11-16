@@ -338,8 +338,8 @@ sink or not:
    the ring; that gap's line (the reader's after the thaw, or the printer's
    at EOF) must not start with a newline. The settle must not call the frozen
    ring caught up, both before that line, with no gap open (so only the ring's
-   unprinted bytes can say no; skipped when a quiet close mid-burst left a gap
-   open), and after it.
+   unprinted bytes can say no; skipped, and the PASS line says so, when a quiet
+   close mid-burst left a gap open), and after it.
 2. Frozen with no quiet timer: thawed, the ring is printed with the gap still
    open, and the settle must not call that caught up; frozen again at EOF,
    with the gap's line not yet printed, it must not either. Exactly one line,
@@ -354,12 +354,15 @@ sink or not:
    the reserve, so the frozen phase's gap (16,512) and where its line stands
    are exact.
 4. No printer: the settle prints the ring while the reader still runs and
-   must not call the open gap caught up. Then stratumd writes all the time the
-   settle prints: the sink writes the stream's next line each time it is
-   called, from two lines put in the ring first, so until the settle's budget
-   is spent a line is always in the pipe, being read, in the ring or counted
-   in a gap, whatever the threads' timing; the settle must not call that
-   caught up and must print no more than a ring's worth and one write. Then
+   must not call the open gap caught up. Two lines put in the ring close that
+   gap; with no gap open, the pipe quiet and a console that takes nothing, it
+   must not call the ring caught up (only the unprinted bytes can say no,
+   whatever the timing). Then stratumd writes all the time the settle prints:
+   the sink writes the stream's next line each time it is called, so until the
+   settle's budget is spent a line is always in the pipe, being read, in the
+   ring or counted in a gap, whatever the threads' timing; the settle must not
+   call that caught up and must print no more than a ring's worth and one
+   write. Then
    80 lines arrive with nothing printing them, more than the ring holds: the
    settle prints the ring and must not call the open gap caught up. At EOF,
    with a console that takes nothing, it must not call the drain caught up

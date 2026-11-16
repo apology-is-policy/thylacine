@@ -6897,19 +6897,21 @@ static void sd_drain_settle(void) {
 // console-attached, so it cannot see a reader that writes to the real console; the
 // build checks that instead (tools/check-drain-reader.py). Four legs:
 //   1. frozen, the bytes stop: the reader's line after the quiet spell; one line more
-//      opens a gap behind that line's newline; the settle must not call a frozen ring
-//      caught up.
+//      joins a gap behind that line's newline (one it opens, or one a quiet close
+//      mid-burst left open); the settle must not call the frozen ring caught up, with no
+//      gap open before that line, or with the gap after it.
 //   2. frozen, no quiet timer: the ring printed with the gap still open, and EOF with
 //      the gap's line not yet printed, are both not caught up; exactly one line, the
 //      printer's, at EOF, written in pieces.
 //   3. 40 KiB through a running console (the ring wraps), then frozen while 32 KiB
 //      arrive, then thawed while 96 KiB more arrive; no quiet timer, so only bytes
 //      arriving behind the gap close it. The sink takes nothing now and then.
-//   4. no printer: the settle prints the ring while the reader still runs; while
-//      stratumd writes all the time it prints (a sink that writes a line each call), it
-//      is not caught up and prints no more than a ring's worth; with a gap open it is
-//      not caught up; at EOF, while the console takes nothing, it is not caught up and
-//      still ends; then it prints the gap's line.
+//   4. no printer: the settle prints the ring while the reader still runs; with no gap
+//      open and a console that takes nothing it is not caught up; while stratumd writes
+//      all the time it prints (a sink that writes a line each call), it is not caught up
+//      and prints no more than a ring's worth and one write; with a gap open it is not
+//      caught up; at EOF, while the console takes nothing, it is not caught up and still
+//      ends; then it prints the gap's line.
 #define SD_PROBE_LINE     256u
 #define SD_PROBE_WAIT_MS  30000   // a passing run never waits this long; the harness's timeout is the backstop
 #define SD_PROBE_SMALL    (SD_RING_SIZE + 4096u)
@@ -6951,6 +6953,7 @@ struct sd_probe_run {
     unsigned char stacks[3][8192] __attribute__((aligned(16)));
 };
 static struct sd_probe_run sd_probe_runs[4];
+static int sd_probe_l1_skipped;  // leg 1's look with no gap open did not run
 static unsigned char sd_probe_out_small[2][SD_PROBE_SMALL];
 static unsigned char sd_probe_out_big[SD_PROBE_BIG];
 static unsigned char sd_probe_out_l4[SD_PROBE_L4_CAP];
@@ -7238,7 +7241,8 @@ static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms
             return sd_probe_fail("the settle with no printer did not print the ring; it "
                                  "printed ", leg, r->out_len);
         // stratumd writes all the while the settle prints: the sink feeds the pipe a line a
-        // call, from two lines put in the ring first. It prints no more than its budget.
+        // call, from two lines put in the ring first. It prints no more than its budget
+        // and one write.
         r->next_line = r->lines[0];
         if (sd_probe_write_lines(r, r->next_line, SD_PROBE_L4_SEED, 0) != 0)
             return sd_probe_fail("the seed lines were not written; wrote ", leg,
@@ -7247,6 +7251,20 @@ static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms
         if (!sd_probe_until(sd_probe_pipe_drained, r, SD_PROBE_WAIT_MS))
             return sd_probe_fail("the reader did not take the seed lines; handled ", leg,
                                  r->d.handled);
+        // The seed closed the first burst's gap (the reader zeroes it before it counts the
+        // chunk handled): no gap open, the pipe quiet and a console that takes nothing, so
+        // only the ring's unprinted bytes can keep the settle from "caught up", whatever
+        // the timing -- unlike leg 1's look, which a quiet close mid-burst skips.
+        if (__atomic_load_n(&r->d.gap, __ATOMIC_ACQUIRE) != 0)
+            return sd_probe_fail("the seed lines did not close the first burst's gap; gap ",
+                                 leg, r->d.gap);
+        unsigned long held_out = r->out_len;
+        __atomic_store_n(&r->refuse, 1u, __ATOMIC_RELEASE);
+        int held = sd_drain_settle_on(&r->d, rd, 20);
+        __atomic_store_n(&r->refuse, 0u, __ATOMIC_RELEASE);
+        if (held != 0 || r->out_len != held_out)
+            return sd_probe_fail("the settle with no printer called a ring it could not print "
+                                 "caught up; printed ", leg, r->out_len - held_out);
         unsigned long seen0 = __atomic_load_n(&r->seen, __ATOMIC_ACQUIRE);
         __atomic_store_n(&r->feed, 1u, __ATOMIC_RELEASE);
         int caught = sd_drain_settle_on(&r->d, rd, 20);
@@ -7260,7 +7278,8 @@ static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms
                                  "caught up; it printed ", leg, took);
         if (took > SD_RING_SIZE + SD_PRINT_MAX)
             return sd_probe_fail("the settle with no printer printed more than a ring's worth "
-                                 "while stratumd kept writing; it printed ", leg, took);
+                                 "and one write while stratumd kept writing; it printed ", leg,
+                                 took);
         __atomic_store_n(&r->go, 1u, __ATOMIC_RELEASE);
     }
     if (leg == 3) {
@@ -7296,8 +7315,9 @@ static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms
         // keep the settle from "caught up". The quiet close zeroes the gap just after it
         // publishes head; a close mid-burst (the writer stalled past the quiet spell) leaves
         // a later gap open with no room for its line, and then this is skipped.
-        if (sd_probe_until(sd_probe_gap_closed, r, 1000)
-            && sd_drain_settle_on(&r->d, rd, 20) != 0)
+        if (!sd_probe_until(sd_probe_gap_closed, r, 1000))
+            sd_probe_l1_skipped = 1;
+        else if (sd_drain_settle_on(&r->d, rd, 20) != 0)
             return sd_probe_fail("the settle called a frozen ring with no gap open caught up; "
                                  "unprinted ", leg, r->d.head - r->d.tail);
         // The quiet close publishes head before it zeroes the gap, so the gap read here may
@@ -7337,7 +7357,7 @@ static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms
         // The tail came with nothing printing it: more than the ring holds.
         total = __atomic_load_n(&r->written, __ATOMIC_ACQUIRE);
         if (__atomic_load_n(&r->d.gap, __ATOMIC_ACQUIRE) == 0)
-            return sd_probe_fail("the lines after the stop opened no gap; head ", leg, r->d.head);
+            return sd_probe_fail("the 80-line tail opened no gap; head ", leg, r->d.head);
         if (sd_drain_settle_on(&r->d, rd, 20) != 0 || !sd_probe_ring_printed(r))
             return sd_probe_fail("the settle with no printer did not print the ring and stop "
                                  "short of the open gap; printed ", leg, r->out_len);
@@ -7428,7 +7448,10 @@ static int sd_drain_selftest(void) {
     t_putstr(" line(s) around a quiet spell, 1 at EOF in pieces, ");
     t_putstr(itoa_dec(got[2], nb, sizeof(nb)));
     t_putstr(" across a thaw mid-stream and a wrap; the settle waits for the ring, an open "
-             "gap and the last line, and with no printer prints them within its budget)\n");
+             "gap and the last line, and with no printer prints them within its budget");
+    if (sd_probe_l1_skipped)
+        t_putstr("; leg 1's look with no gap open was skipped: a quiet close came mid-burst");
+    t_putstr(")\n");
     return 0;
 }
 #endif

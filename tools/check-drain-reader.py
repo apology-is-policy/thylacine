@@ -270,19 +270,28 @@ def selftest():
         ('an exit call numbered by the zero register', good.replace('\tret\n', '\tbl\t0x400300 <die>\n')
          + fn('die', 0x400300, ['mov\tw8, wzr', 'svc\t#0', 'wfe', 'b\t0x400308 <die+0x8>']), 4),
         ('a last call that returns', good.replace('\tret\n', '\tbl\t0x400100 <helper>\n'), 'falls off its end'),
-        ('a last system call that returns, then a console write',
-         good.replace('mov\tw8, #0x2a', 'mov\tw8, #0x28')
-         + fn('next', 0x400208, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
-         'system call SYS_PUTS'),
-        ('a last conditional branch, then a console write',
-         good.replace('\tret\n', '\tcbz\tx0, 0x400000 <sd_reader_main>\n')
-         + fn('next', 0x400024, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
-         'system call SYS_PUTS'),
         ('a branch form past the floor', good.replace('b.le\t0x400000 <sd_reader_main>', 'bc.le\t0x400000 <sd_reader_main>'), 'unsupported branch form'),
         ('a branch into another function', good.replace('0x400200 <tail>', '0x400208 <tail+0x8>'), 'to 0x400208, which starts no function'),
         ('no reader at all', good.replace(ENTRY, 'other_main'), 'not in the disassembly'),
         ('a reader that reads nothing', good.replace('mov\tw8, #0x9 ', 'mov\tw8, #0x28 '), 'no SYS_READ reachable'),
     ]
+    # Each allowed call that returns, last in a function, falls into the next one; so does
+    # every conditional branch form and any ordinary instruction.
+    cases += [('a last %s, then a console write' % what,
+               good.replace('mov\tw8, #0x2a', 'mov\tw8, #%s' % num)
+               + fn('next', 0x400208, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
+               'system call SYS_PUTS')
+              for what, num in (('poll', '0x1d'), ('read', '0x9'), ('futex wake', '0x28'))]
+    cases += [('a last %s, then a console write' % ins.split('\t')[0],
+               good.replace('\tret\n', '\t%s\n' % ins)
+               + fn('next', 0x400024, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
+               'system call SYS_PUTS')
+              for ins in ('cbz\tx0, 0x400000 <sd_reader_main>',
+                          'cbnz\tx0, 0x400000 <sd_reader_main>',
+                          'b.ne\t0x400000 <sd_reader_main>',
+                          'tbz\tw0, #0x3, 0x400000 <sd_reader_main>',
+                          'tbnz\tw0, #0x3, 0x400000 <sd_reader_main>',
+                          'bic\tx0, x0, x1')]
     bad = 0
     for name, text, want in cases:
         problems, reached, _ = check(text, nums)
