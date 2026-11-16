@@ -253,8 +253,9 @@ make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 #       the session compositor with the Instrument bar: the ls-graphical-* scenarios and
 #       the ones that read the bar's log line
 #   THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument
-#       both renderers. ls-halcyon-session-route runs ONLY here: it needs the console
-#       renderer's place channel posted while a session pane asks for it.
+#       both renderers. ls-halcyon-session-route runs WHOLE only here: it needs the
+#       console renderer's place channel posted while a session pane asks for it. On the
+#       session image above it runs reduced, and its pass line says so.
 # Other scenarios name further levers in their own SKIP line (the clipboard and readiness
 # qualifications; the bare default image for ls-halcyon-manual).
 tools/test-interactive.sh               # full set (or: make test-interactive)

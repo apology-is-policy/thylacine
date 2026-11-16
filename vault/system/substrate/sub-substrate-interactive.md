@@ -61,7 +61,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-11-12
+updated: 2026-11-16
 ---
 ## Purpose
 
@@ -613,8 +613,10 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
      every image, until a halcyond pushes the bundle. One image therefore does
      not run the fleet: docs/agent/GATES.md lists the lever sets a whole-fleet
-     run bakes, and `ls-halcyon-session-route` runs on one of them only, the
-     image with both the console renderer and the session compositor.
+     run bakes, and `ls-halcyon-session-route` runs whole on one of them only,
+     the image with both the console renderer and the session compositor; on a
+     session image whose console is aurora's it runs reduced, and its pass line
+     says so.
 - **Two more (2026-11-12, the whole-fleet run before the async landing).**
 
   6. **A catch-all failure arm ends on the line's terminator.** An expect that
@@ -657,6 +659,23 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      line; `pts-probe` already did the same for a line joey prints late. Of
      the 121 scenarios that boot, no other has its first wait under the
      command budget.
+  9. **A transcript is looked at once and then waited on, never polled
+     between sleeps.** expect reads the serial only inside a wait, and
+     `log_file` holds only what a wait has read, so a loop that re-reads
+     the transcript file around `after` sees the same bytes every time: it
+     succeeds on its first look or never. `ls-gfx-jpeg`,
+     `ls-gfx-inline-view` and `ls-gfx-age` polled that way for a line that
+     can come after the scenario first looks (halcyond's posting and
+     injection lines, aurora's bring-up line). Their gates passed only
+     because each awaited line happened to be read before the loop started.
+     A scripted serial that prints the line 2.5 s late showed each old form
+     red and the new one green (work/nov03-mm1/fake-gfxpoll, 2026-11-12 and
+     2026-11-16). `lc_logged path re seconds what` (lib.exp) looks in what
+     has been read and otherwise waits for the line with an expect arm. An
+     extinction or EOF in that wait is its own failure. It returns the
+     `regexp -inline` list, or an empty list on a timeout. The four scenarios
+     use it, `ls-halcyon-session-route` included, which already waited after
+     its one look.
 - `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
   halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
   showed as a 60 s timeout that blamed the routing. It matches the refusal line
