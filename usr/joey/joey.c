@@ -6615,14 +6615,19 @@ static long walk_open_in_bin(const char *name, size_t name_len, unsigned long om
 // hold is dropped and counted, and a line says how much, standing where it
 // was lost: the reader holds SD_RING_RESERVE bytes back from data for that
 // line, and writes it once the bytes stop coming (the count is final then) or
-// room returns. Both wait in t_poll, t_read or t_torpor_wait, all of them
-// death-interruptible (#811). EOF means stratumd exited; the printer ends
-// once it has printed everything.
+// room returns; a line written while the console is frozen may take the
+// reserve, and the next gap's line then waits for room. Both wait in t_poll,
+// t_read or t_torpor_wait, all of them death-interruptible (#811). EOF means
+// stratumd exited; the printer ends once it has printed everything, a gap
+// still open at EOF on its line last. The build reads the built reader's
+// reachable system calls (tools/check-drain-reader.py): a console write there
+// would bring the freeze back, and the boot selftest cannot see one.
 #define SD_RING_SIZE    16384u   // a power of two
 #define SD_RING_RESERVE 128u     // one gap line (sd_gap_line asserts it fits)
 #define SD_GAP_QUIET_MS 50       // no bytes for this long: the gap's count is final
 #define SD_PRINT_MAX    256u
-#define SD_RETRY_US     10000L   // a console write that took nothing goes again after this
+#define SD_RETRY_US     10000L   // a console write that took nothing goes again after this,
+#define SD_RETRY_MAX_US 1000000L // doubling to this while the console keeps taking nothing
 
 struct sd_drain {
     long fd;                                              // the pipe's read end
@@ -6643,6 +6648,7 @@ struct sd_drain {
     unsigned long woken;
     unsigned long handled;
     int           done;       // the reader has ended and the printer printed all it put
+    int           printer_up; // set once the printer runs; without it the settle prints
 };
 
 static struct sd_drain sd_drain;
@@ -6721,6 +6727,37 @@ static void sd_ring_put(struct sd_drain *d, const unsigned char *b, unsigned lon
     if (fit < n) __atomic_store_n(&d->gap, n - fit, __ATOMIC_RELEASE);
 }
 
+// One console write from the ring's tail; the tail advances by what the sink took. The
+// consumer's alone: the printer, or the settle when there is no printer.
+static long sd_print_chunk(struct sd_drain *d, unsigned long head) {
+    unsigned long tail = d->tail;
+    unsigned long off = tail & (SD_RING_SIZE - 1u);
+    unsigned long len = head - tail;
+    if (len > SD_RING_SIZE - off) len = SD_RING_SIZE - off;
+    if (len > SD_PRINT_MAX) len = SD_PRINT_MAX;
+    long w = d->sink(d->sink_ctx, (const char *)&d->ring[off], (size_t)len);
+    if (w > 0)
+        __atomic_store_n(&d->tail, tail + ((unsigned long)w < len ? (unsigned long)w : len),
+                         __ATOMIC_RELEASE);
+    return w;
+}
+
+// The gap still open at EOF, on its line after everything else. Returns 1 once written.
+static int sd_print_final_gap(struct sd_drain *d, unsigned long *done_bytes) {
+    unsigned long g = __atomic_load_n(&d->final_gap, __ATOMIC_RELAXED);
+    if (!g) return 1;
+    char line[SD_RING_RESERVE];
+    unsigned long tail = d->tail;
+    unsigned char last = tail ? d->ring[(tail - 1u) & (SD_RING_SIZE - 1u)] : (unsigned char)'\n';
+    unsigned long len = sd_gap_line(line, g, last);
+    while (*done_bytes < len) {
+        long w = d->sink(d->sink_ctx, line + *done_bytes, (size_t)(len - *done_bytes));
+        if (w <= 0) return 0;
+        *done_bytes += (unsigned long)w < len - *done_bytes ? (unsigned long)w : len - *done_bytes;
+    }
+    return 1;
+}
+
 static void sd_reader_main(void *arg) {
     struct sd_drain *d = (struct sd_drain *)arg;
     for (;;) {
@@ -6752,107 +6789,137 @@ static void sd_reader_main(void *arg) {
     t_thread_exit();
 }
 
+// A short count is a write an episode (or the #67 deadline) cut off: the rest goes
+// again, and the episode parks it. A write that took nothing waits and goes again,
+// the wait doubling to SD_RETRY_MAX_US while nothing is taken: each try may hold the
+// console's writer role for the #67 deadline, and every other writer queues behind
+// it. Meanwhile the reader drops what the ring cannot hold.
 static void sd_printer_main(void *arg) {
     struct sd_drain *d = (struct sd_drain *)arg;
-    unsigned long tail = d->tail;
     unsigned int pacer = 0;
+    long backoff = SD_RETRY_US;
+    unsigned long line_done = 0;
     for (;;) {
         unsigned int s = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
         unsigned long head = __atomic_load_n(&d->head, __ATOMIC_ACQUIRE);
-        if (head == tail) {
-            if (__atomic_load_n(&d->reader_done, __ATOMIC_ACQUIRE)) {
-                if (__atomic_load_n(&d->head, __ATOMIC_ACQUIRE) == tail) break;
-                continue;
-            }
+        long w;
+        if (head != d->tail) {
+            w = sd_print_chunk(d, head);
+        } else if (!__atomic_load_n(&d->reader_done, __ATOMIC_ACQUIRE)) {
             (void)t_torpor_wait(&d->seq, s, -1);
             continue;
-        }
-        unsigned long off = tail & (SD_RING_SIZE - 1u);
-        unsigned long len = head - tail;
-        if (len > SD_RING_SIZE - off) len = SD_RING_SIZE - off;
-        if (len > SD_PRINT_MAX) len = SD_PRINT_MAX;
-        // A short count is a write an episode (or the #67 deadline) cut off:
-        // the rest goes again, and the episode parks it. A write that took
-        // nothing waits a moment and goes again; meanwhile the reader drops
-        // what the ring cannot hold, so the wait holds up no one.
-        long w = d->sink(d->sink_ctx, (const char *)&d->ring[off], (size_t)len);
-        if (w > 0) {
-            tail += (unsigned long)w < len ? (unsigned long)w : len;
-            __atomic_store_n(&d->tail, tail, __ATOMIC_RELEASE);
+        } else if (__atomic_load_n(&d->head, __ATOMIC_ACQUIRE) != d->tail) {
+            continue;
+        } else if (sd_print_final_gap(d, &line_done)) {
+            break;
         } else {
-            (void)t_torpor_wait(&pacer, 0u, SD_RETRY_US);
+            w = 0;
         }
-    }
-    unsigned long g = __atomic_load_n(&d->final_gap, __ATOMIC_RELAXED);
-    if (g) {
-        char line[SD_RING_RESERVE];
-        unsigned char last = tail ? d->ring[(tail - 1u) & (SD_RING_SIZE - 1u)]
-                                  : (unsigned char)'\n';
-        unsigned long len = sd_gap_line(line, g, last), off = 0;
-        while (off < len) {
-            long w = d->sink(d->sink_ctx, line + off, (size_t)(len - off));
-            if (w > 0) off += (unsigned long)w < len - off ? (unsigned long)w : len - off;
-            else (void)t_torpor_wait(&pacer, 0u, SD_RETRY_US);
+        if (w > 0) {
+            backoff = SD_RETRY_US;
+        } else {
+            (void)t_torpor_wait(&pacer, 0u, backoff);
+            backoff = backoff * 2 > SD_RETRY_MAX_US ? SD_RETRY_MAX_US : backoff * 2;
         }
     }
     __atomic_store_n(&d->done, 1, __ATOMIC_RELEASE);
     t_thread_exit();
 }
 
-// joey's exit ends the drainer with it, so what stratumd wrote last -- why it refused
-// the boot attach, say -- would never reach the console. Before joey returns, wait
-// until the drainer has caught up: the pipe empty (a poll, which takes nothing from
-// it), every chunk woken also handled, the ring printed with no gap open, and the
-// count handled unchanged, for SD_SETTLE_QUIET parks in a row. Bounded, so a daemon
-// that keeps writing, or a console an episode holds, cannot hold the end of the boot.
+// joey's exit ends both drainer threads with it, so what stratumd wrote last -- why it
+// refused the boot attach, say -- would never reach the console. Before joey returns,
+// wait until the drainer has caught up: the pipe empty (a poll, which takes nothing
+// from it), every chunk woken also handled, the ring printed with no gap open (after
+// the pipe's end, the last gap's line printed too), and the count handled unchanged,
+// for SD_SETTLE_QUIET parks in a row. A chunk is always somewhere this looks: in the
+// pipe, woken and not yet handled, in the ring not yet printed, or counted in an open
+// gap. Bounded, so a daemon that keeps writing, or a console an episode holds, cannot
+// hold the end of the boot.
 #define SD_SETTLE_PARK_MS 10
 #define SD_SETTLE_QUIET 3
 #define SD_SETTLE_PARKS 100
-static void sd_drain_settle(void) {
-    if (!sd_drain_up) return;
-    struct sd_drain *d = &sd_drain;
+// Returns 1 once caught up, 0 after `parks` parks without. With no printer, joey's main
+// thread is the ring's consumer here and prints what the ring holds, the open gap at EOF
+// included; it can, because joey returns only before it gives the console up (after,
+// session_getty_loop never returns), so no episode can park it. The pipe at EOF stays
+// readable (POLLHUP), so once the reader has seen EOF the pipe no longer counts.
+static int sd_drain_settle_on(struct sd_drain *d, long fd, int parks) {
     unsigned pacer = 0;
     unsigned long seen = __atomic_load_n(&d->handled, __ATOMIC_ACQUIRE);
-    int quiet = 0;
-    for (int i = 0; i < SD_SETTLE_PARKS && quiet < SD_SETTLE_QUIET; i++) {
-        if (__atomic_load_n(&d->done, __ATOMIC_ACQUIRE)) return;
+    unsigned long line_done = 0;
+    int quiet = 0, final_printed = 0;
+    for (int i = 0; i < parks; i++) {
+        if (__atomic_load_n(&d->done, __ATOMIC_ACQUIRE)) return 1;
+        if (!__atomic_load_n(&d->printer_up, __ATOMIC_ACQUIRE)) {
+            unsigned long head;
+            while ((head = __atomic_load_n(&d->head, __ATOMIC_ACQUIRE)) != d->tail
+                   && sd_print_chunk(d, head) > 0) {}
+            if (!final_printed && __atomic_load_n(&d->reader_done, __ATOMIC_ACQUIRE)
+                && __atomic_load_n(&d->head, __ATOMIC_ACQUIRE) == d->tail)
+                final_printed = sd_print_final_gap(d, &line_done);
+        }
         (void)t_torpor_wait(&pacer, 0u, (long)SD_SETTLE_PARK_MS * 1000L);
-        struct pollfd pfd = { .fd = (int)sd_drain_fd, .events = POLLIN, .revents = 0 };
-        int pending = t_poll(&pfd, 1, 0) > 0;
+        int ended = __atomic_load_n(&d->reader_done, __ATOMIC_ACQUIRE);
+        struct pollfd pfd = { .fd = (int)fd, .events = POLLIN, .revents = 0 };
+        int pending = !ended && t_poll(&pfd, 1, 0) > 0;
         unsigned long handled = __atomic_load_n(&d->handled, __ATOMIC_ACQUIRE);
         unsigned long woken = __atomic_load_n(&d->woken, __ATOMIC_ACQUIRE);
         int printed = __atomic_load_n(&d->head, __ATOMIC_ACQUIRE)
                           == __atomic_load_n(&d->tail, __ATOMIC_ACQUIRE)
-                      && __atomic_load_n(&d->gap, __ATOMIC_ACQUIRE) == 0;
+                      && (ended ? (__atomic_load_n(&d->printer_up, __ATOMIC_ACQUIRE)
+                                       ? 0 : final_printed)
+                                : __atomic_load_n(&d->gap, __ATOMIC_ACQUIRE) == 0);
         quiet = (!pending && woken == handled && printed && handled == seen) ? quiet + 1 : 0;
         seen = handled;
+        if (quiet >= SD_SETTLE_QUIET) return 1;
     }
+    return 0;
+}
+
+static void sd_drain_settle(void) {
+    if (sd_drain_up) (void)sd_drain_settle_on(&sd_drain, sd_drain_fd, SD_SETTLE_PARKS);
 }
 
 #if THYLA_BOOT_PROBES
-// The drainer's promise, without stratumd or an episode: while the console takes
-// nothing, the pipe's writer is never held up, what fits is kept in order, and the
-// rest is counted on lines that stand where it was lost. A sink that parks until it
-// is thawed stands in for the frozen console, and it takes at most SD_PROBE_SINK_MAX
-// bytes a call, as an episode's boundary cuts a write short. Two legs: in the first
-// the bytes stop and the gap's line comes from the quiet spell; in the second the
-// writer closes its end and the line comes at EOF.
-#define SD_PROBE_LINES    256u
+// The drainer's promise, without stratumd or an episode, as far as a stand-in can show
+// it: a sink that parks until thawed plays the frozen console. While it takes nothing,
+// the pipe's writer is never held up; what is printed is the stream in order, every
+// loss counted on a line where it happened. The selftest runs while joey is still
+// console-attached, so it cannot see a reader that writes to the real console; the
+// build checks that instead (tools/check-drain-reader.py). Four legs:
+//   1. frozen, the bytes stop: the reader's line after the quiet spell; the settle
+//      must not call a frozen ring caught up.
+//   2. frozen, the writer closes: exactly one line, the printer's, at EOF.
+//   3. 40 KiB through a running console (the ring wraps), then frozen while 32 KiB
+//      arrive, then thawed while 96 KiB more arrive; no quiet timer, so only bytes
+//      arriving behind the gap close it. The sink takes nothing on every fifth call.
+//   4. no printer: the settle prints what the reader put.
 #define SD_PROBE_LINE     256u
 #define SD_PROBE_SINK_MAX 100u
+#define SD_PROBE_WAIT_MS  30000   // a passing run never waits this long; the harness's timeout is the backstop
+#define SD_PROBE_SMALL    (SD_RING_SIZE + 4096u)
+#define SD_PROBE_BIG      (180u * 1024u)
 struct sd_probe_run {
     struct sd_drain d;
     long          wr;
     int           close_after;   // the writer closes its end once it has written all
+    unsigned long lines[3];      // leg 3's phases; legs 1, 2 and 4 use lines[0] alone
+    unsigned int  zero_every;    // the sink takes nothing on every n-th call (0: never)
     unsigned int  frozen;
     unsigned int  wrote;
+    unsigned int  phase1_done;   // leg 3: the frozen phase is written
+    unsigned int  go;            // leg 3: main has thawed the sink
+    int           writer_failed;
     unsigned long written;
-    unsigned char out[SD_RING_SIZE + 512u];
-    unsigned long out_len;
+    unsigned long sink_calls, sink_zeros;
+    unsigned char *out;
+    unsigned long out_cap, out_len;
     unsigned long seen;          // every byte the sink took, kept or not
     unsigned char stacks[3][8192] __attribute__((aligned(16)));
 };
-static struct sd_probe_run sd_probe_runs[2];
+static struct sd_probe_run sd_probe_runs[4];
+static unsigned char sd_probe_out_small[3][SD_PROBE_SMALL];
+static unsigned char sd_probe_out_big[SD_PROBE_BIG];
 
 static unsigned char sd_probe_byte(unsigned long at) {
     unsigned long line = at / SD_PROBE_LINE, col = at % SD_PROBE_LINE;
@@ -6869,28 +6936,65 @@ static long sd_probe_sink(void *ctx, const char *buf, size_t len) {
     struct sd_probe_run *r = (struct sd_probe_run *)ctx;
     while (__atomic_load_n(&r->frozen, __ATOMIC_ACQUIRE))
         (void)t_torpor_wait(&r->frozen, 1u, -1);
+    r->sink_calls++;
+    if (r->zero_every && r->sink_calls % r->zero_every == 0) {
+        r->sink_zeros++;
+        return 0;
+    }
     size_t take = len < SD_PROBE_SINK_MAX ? len : SD_PROBE_SINK_MAX;
-    for (size_t i = 0; i < take && r->out_len < sizeof(r->out); i++)
+    for (size_t i = 0; i < take && r->out_len < r->out_cap; i++)
         r->out[r->out_len++] = (unsigned char)buf[i];
-    r->seen += take;
+    __atomic_store_n(&r->seen, r->seen + take, __ATOMIC_RELEASE);
     return (long)take;
 }
 
-static void sd_probe_write_main(void *arg) {
-    struct sd_probe_run *r = (struct sd_probe_run *)arg;
+static int sd_probe_write_lines(struct sd_probe_run *r, unsigned long from, unsigned long n,
+                                int paced) {
     unsigned char line[SD_PROBE_LINE];
-    for (unsigned long l = 0; l < SD_PROBE_LINES; l++) {
+    unsigned int pacer = 0;
+    for (unsigned long l = from; l < from + n; l++) {
         for (unsigned long c = 0; c < SD_PROBE_LINE; c++)
             line[c] = sd_probe_byte(l * SD_PROBE_LINE + c);
         unsigned long off = 0;
         while (off < SD_PROBE_LINE) {
             long w = t_write(r->wr, line + off, SD_PROBE_LINE - off);
-            if (w <= 0) goto out;
+            if (w <= 0) return -1;
             off += (unsigned long)w;
             __atomic_store_n(&r->written, l * SD_PROBE_LINE + off, __ATOMIC_RELEASE);
         }
+        // Paced: the next line only once the sink has taken this one, so nothing is
+        // dropped and every byte goes through the ring.
+        for (int t = 0; paced && t < SD_PROBE_WAIT_MS
+                        && __atomic_load_n(&r->seen, __ATOMIC_ACQUIRE) < (l + 1) * SD_PROBE_LINE;
+             t++)
+            (void)t_torpor_wait(&pacer, 0u, 1000L);
+        if (paced && __atomic_load_n(&r->seen, __ATOMIC_ACQUIRE) < (l + 1) * SD_PROBE_LINE)
+            return -1;
     }
-out:
+    return 0;
+}
+
+static void sd_probe_write_main(void *arg) {
+    struct sd_probe_run *r = (struct sd_probe_run *)arg;
+    unsigned int pacer = 0;
+    if (r->lines[1] == 0) {
+        if (sd_probe_write_lines(r, 0, r->lines[0], 0) != 0) r->writer_failed = 1;
+    } else if (sd_probe_write_lines(r, 0, r->lines[0], 1) != 0) {
+        r->writer_failed = 1;
+    } else {
+        __atomic_store_n(&r->frozen, 1u, __ATOMIC_RELEASE);
+        if (sd_probe_write_lines(r, r->lines[0], r->lines[1], 0) != 0) r->writer_failed = 1;
+        __atomic_store_n(&r->phase1_done, 1u, __ATOMIC_RELEASE);
+        for (int t = 0; t < SD_PROBE_WAIT_MS && !__atomic_load_n(&r->go, __ATOMIC_ACQUIRE); t++)
+            (void)t_torpor_wait(&pacer, 0u, 1000L);
+        // One line a millisecond: faster than nothing, slower than the reader, so
+        // bytes keep arriving while the thawed printer makes room.
+        for (unsigned long l = r->lines[0] + r->lines[1];
+             !r->writer_failed && l < r->lines[0] + r->lines[1] + r->lines[2]; l++) {
+            if (sd_probe_write_lines(r, l, 1, 0) != 0) r->writer_failed = 1;
+            (void)t_torpor_wait(&pacer, 0u, 1000L);
+        }
+    }
     if (r->close_after) (void)t_close(r->wr);
     __atomic_store_n(&r->wrote, 1u, __ATOMIC_RELEASE);
     t_thread_exit();
@@ -6905,11 +7009,17 @@ static int sd_probe_until(int (*cond)(struct sd_probe_run *), struct sd_probe_ru
 static int sd_probe_wrote_all(struct sd_probe_run *r) {
     return __atomic_load_n(&r->wrote, __ATOMIC_ACQUIRE) != 0;
 }
-static int sd_probe_line_while_frozen(struct sd_probe_run *r) {
+static int sd_probe_phase1(struct sd_probe_run *r) {
+    return __atomic_load_n(&r->phase1_done, __ATOMIC_ACQUIRE) != 0;
+}
+static int sd_probe_pipe_drained(struct sd_probe_run *r) {
     struct pollfd pfd = { .fd = (int)r->d.fd, .events = POLLIN, .revents = 0 };
     return t_poll(&pfd, 1, 0) == 0
         && __atomic_load_n(&r->d.woken, __ATOMIC_ACQUIRE)
-               == __atomic_load_n(&r->d.handled, __ATOMIC_ACQUIRE)
+               == __atomic_load_n(&r->d.handled, __ATOMIC_ACQUIRE);
+}
+static int sd_probe_line_while_frozen(struct sd_probe_run *r) {
+    return sd_probe_pipe_drained(r)
         && __atomic_load_n(&r->d.head, __ATOMIC_ACQUIRE) > SD_RING_SIZE - SD_RING_RESERVE;
 }
 static int sd_probe_reader_ended(struct sd_probe_run *r) {
@@ -6919,103 +7029,202 @@ static int sd_probe_printed_all(struct sd_probe_run *r) {
     return __atomic_load_n(&r->d.done, __ATOMIC_ACQUIRE) != 0;
 }
 
-static int sd_probe_fail(const char *what, unsigned long n) {
+static int sd_probe_fail(const char *what, unsigned long leg, unsigned long n) {
     char nb[24];
-    t_putstr("joey: #370 drainer selftest FAILED: ");
+    t_putstr("joey: #370 drainer selftest FAILED: leg ");
+    t_putstr(itoa_dec((long)leg, nb, sizeof(nb)));
+    t_putstr(": ");
     t_putstr(what);
     t_putstr(itoa_dec((long)n, nb, sizeof(nb)));
     t_putstr("\n");
     return -1;
 }
 
-// The sink's take: the kept bytes exactly, then gap lines whose counts add up to
-// what was not kept, and nothing else. Returns the number of gap lines, or -1.
-static long sd_probe_check(struct sd_probe_run *r) {
+// What the sink took, read back against the stream: runs of the stream's bytes, each
+// starting exactly where the bytes before it and the losses counted between them end,
+// and gap lines. A gap line's count is above 0, and it starts with a newline exactly
+// when the byte before it is not one. A run that ends on the stream's own newline and
+// a line that begins with one look alike, so both readings are tried.
+struct sd_probe_shape {
+    unsigned long lines;         // gap lines
+    unsigned long first_run;     // stream bytes before the first gap line
+    unsigned long first_gap_at;  // the stream offset the first gap line stands at
+    unsigned long runs_after;    // stream bytes after the first gap line
+};
+
+static unsigned long sd_probe_gap_line_at(const struct sd_probe_run *r, unsigned long p,
+                                          unsigned long *count) {
     static const char pre[] = "joey: ";
     static const char post[] = " bytes of stratumd output dropped here: "
                                "the console was not taking output\n";
-    const unsigned long kept = SD_RING_SIZE - SD_RING_RESERVE;
-    const unsigned long total = (unsigned long)SD_PROBE_LINES * SD_PROBE_LINE;
-    if (r->seen != r->out_len) return sd_probe_fail("the sink overflowed its capture: took ", r->seen);
-    if (r->out_len < kept) return sd_probe_fail("fewer bytes printed than the ring keeps: ", r->out_len);
-    for (unsigned long i = 0; i < kept; i++)
-        if (r->out[i] != sd_probe_byte(i)) return sd_probe_fail("a kept byte differs at offset ", i);
-    unsigned long p = kept, sum = 0;
-    long lines = 0;
-    while (p < r->out_len) {
-        if (r->out[p] == '\n') p++;
-        for (unsigned long i = 0; i < sizeof(pre) - 1; i++, p++)
-            if (p >= r->out_len || r->out[p] != (unsigned char)pre[i])
-                return sd_probe_fail("not a gap line at offset ", p);
-        unsigned long v = 0, digits = 0;
-        while (p < r->out_len && r->out[p] >= '0' && r->out[p] <= '9') {
-            v = v * 10u + (unsigned long)(r->out[p++] - '0');
-            digits++;
-        }
-        if (digits == 0) return sd_probe_fail("a gap line without a count at offset ", p);
-        for (unsigned long i = 0; i < sizeof(post) - 1; i++, p++)
-            if (p >= r->out_len || r->out[p] != (unsigned char)post[i])
-                return sd_probe_fail("a gap line's words differ at offset ", p);
-        sum += v;
-        lines++;
+    unsigned long q = p;
+    unsigned char prev = p ? r->out[p - 1] : (unsigned char)'\n';
+    if (prev != '\n') {
+        if (q >= r->out_len || r->out[q] != '\n') return 0;
+        q++;
     }
-    if (lines == 0) return sd_probe_fail("no gap line after the kept bytes; printed ", r->out_len);
-    if (sum != total - kept) return sd_probe_fail("the gap lines count ", sum);
-    return lines;
+    for (unsigned long i = 0; i < sizeof(pre) - 1; i++, q++)
+        if (q >= r->out_len || r->out[q] != (unsigned char)pre[i]) return 0;
+    unsigned long v = 0, digits = 0;
+    while (q < r->out_len && r->out[q] >= '0' && r->out[q] <= '9' && digits < 20) {
+        v = v * 10u + (unsigned long)(r->out[q++] - '0');
+        digits++;
+    }
+    if (digits == 0 || v == 0) return 0;
+    for (unsigned long i = 0; i < sizeof(post) - 1; i++, q++)
+        if (q >= r->out_len || r->out[q] != (unsigned char)post[i]) return 0;
+    *count = v;
+    return q - p;
 }
 
-static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms, int close_after) {
+// Recurses only where both readings fit (rare: a run that ends one byte short of a
+// stream newline), so its depth is the number of such places, not of gap lines.
+static int sd_probe_read_back(const struct sd_probe_run *r, unsigned long p, unsigned long c,
+                              unsigned long total, struct sd_probe_shape *sh, int depth) {
+    while (p < r->out_len) {
+        unsigned long n = 0, len = sd_probe_gap_line_at(r, p, &n);
+        int byte_fits = c < total && r->out[p] == sd_probe_byte(c);
+        if (len && c + n <= total) {
+            if (!byte_fits) {
+                if (sh->lines++ == 0) sh->first_gap_at = c;
+                p += len;
+                c += n;
+                continue;
+            }
+            if (depth >= 32) return 0;
+            struct sd_probe_shape t = *sh;
+            if (t.lines++ == 0) t.first_gap_at = c;
+            if (sd_probe_read_back(r, p + len, c + n, total, &t, depth + 1)) {
+                *sh = t;
+                return 1;
+            }
+        }
+        if (!byte_fits) return 0;
+        if (sh->lines == 0) sh->first_run++;
+        else sh->runs_after++;
+        p++;
+        c++;
+    }
+    return c == total;
+}
+
+static long sd_probe_leg(struct sd_probe_run *r, unsigned long leg, int quiet_ms,
+                         int close_after, int printer) {
     long rd = -1, wr = -1;
-    if (t_pipe(&rd, &wr) < 0) return sd_probe_fail("t_pipe returned ", 0);
+    const unsigned long total = (r->lines[0] + r->lines[1] + r->lines[2]) * SD_PROBE_LINE;
+    const unsigned long kept = SD_RING_SIZE - SD_RING_RESERVE;
+    if (t_pipe(&rd, &wr) < 0) return sd_probe_fail("t_pipe returned ", leg, 0);
     r->d.fd = rd;
     r->d.sink = sd_probe_sink;
     r->d.sink_ctx = r;
     r->d.quiet_ms = quiet_ms;
     r->wr = wr;
     r->close_after = close_after;
-    r->frozen = 1u;
+    r->frozen = (leg == 1 || leg == 2) ? 1u : 0u;
     if (t_thread_spawn(sd_reader_main, (void *)(r->stacks[0] + sizeof(r->stacks[0])),
-                       (void *)&r->d, (void *)0) < 0
-        || t_thread_spawn(sd_printer_main, (void *)(r->stacks[1] + sizeof(r->stacks[1])),
-                          (void *)&r->d, (void *)0) < 0
-        || t_thread_spawn(sd_probe_write_main, (void *)(r->stacks[2] + sizeof(r->stacks[2])),
-                          (void *)r, (void *)0) < 0)
-        return sd_probe_fail("a thread did not spawn in leg ", leg);
-    if (!sd_probe_until(sd_probe_wrote_all, r, 3000))
-        return sd_probe_fail("the pipe's writer was held up while the console took nothing; it wrote ",
-                             __atomic_load_n(&r->written, __ATOMIC_ACQUIRE));
-    if (__atomic_load_n(&r->written, __ATOMIC_ACQUIRE) != (unsigned long)SD_PROBE_LINES * SD_PROBE_LINE)
-        return sd_probe_fail("the pipe's writer failed after ", __atomic_load_n(&r->written, __ATOMIC_ACQUIRE));
-    if (close_after) {
-        if (!sd_probe_until(sd_probe_reader_ended, r, 1000))
-            return sd_probe_fail("the reader did not see EOF; handled ", r->d.handled);
-        if (__atomic_load_n(&r->d.final_gap, __ATOMIC_ACQUIRE)
-                != (unsigned long)SD_PROBE_LINES * SD_PROBE_LINE - (SD_RING_SIZE - SD_RING_RESERVE))
-            return sd_probe_fail("the gap open at EOF counts ", r->d.final_gap);
-    } else if (!sd_probe_until(sd_probe_line_while_frozen, r, 1000)) {
-        return sd_probe_fail("no gap line once the bytes stopped; the ring holds ",
-                             __atomic_load_n(&r->d.head, __ATOMIC_ACQUIRE));
+                       (void *)&r->d, (void *)0) < 0)
+        return sd_probe_fail("the reader did not spawn ", leg, 0);
+    if (printer) {
+        if (t_thread_spawn(sd_printer_main, (void *)(r->stacks[1] + sizeof(r->stacks[1])),
+                           (void *)&r->d, (void *)0) < 0)
+            return sd_probe_fail("the printer did not spawn ", leg, 0);
+        __atomic_store_n(&r->d.printer_up, 1, __ATOMIC_RELEASE);
     }
-    __atomic_store_n(&r->frozen, 0u, __ATOMIC_RELEASE);
-    (void)t_torpor_wake(&r->frozen, 0xffffffffu);
+    if (t_thread_spawn(sd_probe_write_main, (void *)(r->stacks[2] + sizeof(r->stacks[2])),
+                       (void *)r, (void *)0) < 0)
+        return sd_probe_fail("the writer did not spawn ", leg, 0);
+
+    if (leg == 3) {
+        if (!sd_probe_until(sd_probe_phase1, r, SD_PROBE_WAIT_MS) || r->writer_failed)
+            return sd_probe_fail("the paced or frozen phase did not finish; it wrote ", leg,
+                                 __atomic_load_n(&r->written, __ATOMIC_ACQUIRE));
+        if (!sd_probe_until(sd_probe_pipe_drained, r, SD_PROBE_WAIT_MS))
+            return sd_probe_fail("the reader did not drain the frozen phase; handled ", leg,
+                                 r->d.handled);
+        if (__atomic_load_n(&r->d.gap, __ATOMIC_ACQUIRE) != r->lines[1] * SD_PROBE_LINE - kept)
+            return sd_probe_fail("the gap of the frozen phase counts ", leg, r->d.gap);
+        __atomic_store_n(&r->frozen, 0u, __ATOMIC_RELEASE);
+        (void)t_torpor_wake(&r->frozen, 0xffffffffu);
+        __atomic_store_n(&r->go, 1u, __ATOMIC_RELEASE);
+    }
+    if (!sd_probe_until(sd_probe_wrote_all, r, SD_PROBE_WAIT_MS) || r->writer_failed)
+        return sd_probe_fail("the pipe's writer was held up; it wrote ", leg,
+                             __atomic_load_n(&r->written, __ATOMIC_ACQUIRE));
+    if (leg == 2) {
+        if (!sd_probe_until(sd_probe_reader_ended, r, SD_PROBE_WAIT_MS))
+            return sd_probe_fail("the reader did not see EOF; handled ", leg, r->d.handled);
+        if (__atomic_load_n(&r->d.final_gap, __ATOMIC_ACQUIRE) != total - kept)
+            return sd_probe_fail("the gap open at EOF counts ", leg, r->d.final_gap);
+    }
+    if (leg == 1) {
+        if (!sd_probe_until(sd_probe_line_while_frozen, r, SD_PROBE_WAIT_MS))
+            return sd_probe_fail("no gap line once the bytes stopped; the ring holds ", leg,
+                                 __atomic_load_n(&r->d.head, __ATOMIC_ACQUIRE));
+        if (sd_drain_settle_on(&r->d, rd, 20) != 0)
+            return sd_probe_fail("the settle called a frozen ring caught up; unprinted ", leg,
+                                 r->d.head - r->d.tail);
+    }
+    if (leg == 1 || leg == 2) {
+        __atomic_store_n(&r->frozen, 0u, __ATOMIC_RELEASE);
+        (void)t_torpor_wake(&r->frozen, 0xffffffffu);
+    }
     if (!close_after) (void)t_close(wr);
-    if (!sd_probe_until(sd_probe_printed_all, r, 3000))
-        return sd_probe_fail("the printer did not finish after the console thawed; printed ", r->out_len);
+    if (printer && !sd_probe_until(sd_probe_printed_all, r, SD_PROBE_WAIT_MS))
+        return sd_probe_fail("the printer did not finish; printed ", leg, r->out_len);
+    if (leg == 4 && !sd_probe_until(sd_probe_reader_ended, r, SD_PROBE_WAIT_MS))
+        return sd_probe_fail("the reader did not see EOF; handled ", leg, r->d.handled);
+    if (sd_drain_settle_on(&r->d, rd, 100) != 1)
+        return sd_probe_fail("the settle did not see a drained ring caught up; printed ", leg,
+                             r->out_len);
     (void)t_close(rd);
-    return sd_probe_check(r);
+
+    struct sd_probe_shape sh = { 0, 0, 0, 0 };
+    if (r->seen != r->out_len)
+        return sd_probe_fail("the sink overflowed its capture: took ", leg, r->seen);
+    if (!sd_probe_read_back(r, 0, 0, total, &sh, 0))
+        return sd_probe_fail("what was printed is not the stream with its losses counted; printed ",
+                             leg, r->out_len);
+    if ((leg == 1 || leg == 2) && sh.first_run != kept)
+        return sd_probe_fail("the bytes kept before the first loss are ", leg, sh.first_run);
+    if (leg == 2 && sh.lines != 1)
+        return sd_probe_fail("gap lines at EOF: ", leg, sh.lines);
+    if (leg == 3) {
+        if (sh.first_gap_at != (r->lines[0] * SD_PROBE_LINE) + kept)
+            return sd_probe_fail("the first gap line stands at stream offset ", leg, sh.first_gap_at);
+        if (sh.runs_after == 0)
+            return sd_probe_fail("no bytes after the first gap line; printed ", leg, r->out_len);
+        if (r->sink_zeros == 0)
+            return sd_probe_fail("the sink never took nothing; calls ", leg, r->sink_calls);
+        if (__atomic_load_n(&r->d.head, __ATOMIC_ACQUIRE) <= 2u * SD_RING_SIZE)
+            return sd_probe_fail("the ring did not wrap twice; put ", leg, r->d.head);
+    }
+    if (leg == 4 && (sh.lines != 0 || r->out_len != total))
+        return sd_probe_fail("the settle printed ", leg, r->out_len);
+    return (long)sh.lines;
 }
 
 static int sd_drain_selftest(void) {
-    long a = sd_probe_leg(&sd_probe_runs[0], 1, SD_GAP_QUIET_MS, 0);
-    if (a < 0) return -1;
-    long b = sd_probe_leg(&sd_probe_runs[1], 2, -1, 1);
-    if (b < 0) return -1;
-    if (b != 1) return sd_probe_fail("the EOF leg printed gap lines: ", (unsigned long)b);
+    static const unsigned long lines[4][3] = { { 256, 0, 0 }, { 256, 0, 0 },
+                                               { 160, 128, 384 }, { 4, 0, 0 } };
+    static const int quiet[4] = { SD_GAP_QUIET_MS, -1, -1, SD_GAP_QUIET_MS };
+    static const int close_after[4] = { 0, 1, 1, 1 };
+    long got[4];
+    for (unsigned long i = 0; i < 4; i++) {
+        struct sd_probe_run *r = &sd_probe_runs[i];
+        for (int k = 0; k < 3; k++) r->lines[k] = lines[i][k];
+        r->out = i == 2 ? sd_probe_out_big : sd_probe_out_small[i == 3 ? 2 : i];
+        r->out_cap = i == 2 ? sizeof(sd_probe_out_big) : sizeof(sd_probe_out_small[0]);
+        r->zero_every = i == 2 ? 5u : 0u;
+        got[i] = sd_probe_leg(r, i + 1, quiet[i], close_after[i], i != 3);
+        if (got[i] < 0) return -1;
+    }
     char nb[24];
-    t_putstr("joey: #370 drainer selftest PASS (the writer never held up by a frozen console; "
-             "the kept bytes in order, the rest counted where lost: ");
-    t_putstr(itoa_dec(a, nb, sizeof(nb)));
-    t_putstr(" gap line(s) after a quiet spell, 1 at EOF)\n");
+    t_putstr("joey: #370 drainer selftest PASS (a stand-in frozen console never held the pipe's "
+             "writer; the stream printed in order, every loss counted where it happened: ");
+    t_putstr(itoa_dec(got[0], nb, sizeof(nb)));
+    t_putstr(" line(s) after a quiet spell, 1 at EOF, ");
+    t_putstr(itoa_dec(got[2], nb, sizeof(nb)));
+    t_putstr(" across a thaw mid-stream and a wrap; the settle waits for the ring)\n");
     return 0;
 }
 #endif
@@ -8799,16 +9008,20 @@ static int joey_main(void) {
                     sd_drain_fd = sd_rd;
                     sd_drain_up = 1;
                     // Without the printer the reader still drains, so stratumd
-                    // never blocks; its output is counted, never shown.
+                    // never blocks; its output stays in the ring or is counted,
+                    // and reaches the console only if the boot ends here (the
+                    // settle prints it then).
                     long sd_print_tid = t_thread_spawn(
                         sd_printer_main,
                         (void *)(sd_print_stack + sizeof(sd_print_stack)),
                         (void *)&sd_drain, (void *)0);
-                    if (sd_print_tid < 0)
+                    if (sd_print_tid < 0) {
                         t_putstr("joey: stratumd output printer spawn FAILED "
                                  "(#370: stratumd is drained, its output unseen)\n");
-                    else
+                    } else {
+                        __atomic_store_n(&sd_drain.printer_up, 1, __ATOMIC_RELEASE);
                         t_putstr("joey: stratumd stderr drainer up (#370)\n");
+                    }
                 }
             }
         }

@@ -5,7 +5,7 @@ title: "A reader that stops reading wedges a writer that must not block"
 applies-to: [sub-stratum-boot, sub-substrate-interactive]
 instances: []
 created: 2026-08-02
-updated: 2026-11-15
+updated: 2026-11-16
 ---
 ## The failure shape
 
@@ -60,6 +60,10 @@ something else which can park is an owner for a while too. Fix: split it --
 a reader that only fills a bounded ring, a printer that empties it to the
 console and is the one an episode parks; what the ring cannot hold is
 dropped and counted on a line where it was lost ([[sub-stratum-boot]]).
+Dropping a log line beats stalling the emitter, with no episode too
+(operator vote 133). A reader that can park is invisible to a selftest
+that runs while the owner still holds the console, so the build reads the
+built reader's reachable system calls instead (`tools/check-drain-reader.py`).
 
 **The LS-CI serial relay, #78.** The relay wrote QEMU's serial stream to
 stdout *blocking*, on the stated theory that a full pipe back-pressures the

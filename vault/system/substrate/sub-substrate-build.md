@@ -32,7 +32,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-11-14
+updated: 2026-11-16
 ---
 ## Purpose
 
@@ -999,6 +999,20 @@ the invariant registry check: fatal, no skip switch, self-testing (it refuses to
 run if its own planted cases do not read as expected). It fails a build that
 casts a raw syscall argument to a narrower type with no full-width check first
 (ERRORS.md principle 6; [[sub-kernel-syscall-dispatch]]).
+
+## The drain reader check (2026-11-16)
+
+`build_ramfs` runs `tools/check-drain-reader.py` on the built joey right after
+the expect form check: fatal, no skip switch, its self-test first. joey's
+stratumd drain reader must never write to the console, or an IM-1 episode parks
+it and stratumd blocks on its full pipe; joey's boot selftest runs while joey
+still owns the console and cannot see that ([[sub-stratum-boot]]). The check
+disassembles joey with `$LLVM_PREFIX/bin/llvm-objdump`, follows every direct
+call and branch from `sd_reader_main`, and fails unless each system call it
+reaches is on an allowlist by name, the numbers read from the kernel's enum. It
+fails closed on an indirect call, a branch into the middle of a function, a
+call number that is not a constant in the straight run before its `svc`, a
+missing symbol, or a reader in which it finds no poll and no read.
 
 ## The audit-trigger row check (2026-10-28)
 

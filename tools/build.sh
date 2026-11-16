@@ -967,6 +967,17 @@ DOSBOXCONF
         || { echo "==> expect form check FAILED -- see tools/check-expect-forms.py" >&2
              exit 1; }
 
+    # joey's stratumd drain reader must never write to the console: an IM-1
+    # episode would park it, and stratumd would block on its full pipe. joey's
+    # boot selftest runs while joey still owns the console, so it cannot see
+    # that; this reads the built joey. Fatal, self-testing, about a second.
+    echo "==> drain reader check (joey's reader cannot reach a console write)"
+    python3 "$REPO_ROOT/tools/check-drain-reader.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-drain-reader.py" --root "$REPO_ROOT" \
+               --elf "$USR_BUILD/joey/joey" --objdump "$LLVM_PREFIX/bin/llvm-objdump" \
+        || { echo "==> drain reader check FAILED -- see tools/check-drain-reader.py" >&2
+             exit 1; }
+
     # ERRORS.md principle 6: a syscall argument that does not fit is refused,
     # never cast down. Fatal, self-testing, sub-second.
     echo "==> argument width check (ERRORS.md principle 6)"
