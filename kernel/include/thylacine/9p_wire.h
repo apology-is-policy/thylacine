@@ -1,7 +1,7 @@
 // 9P2000.L wire codec (P5-wire bring-up subset).
 //
 // Per ARCH §10.2 (9P dialect) + `specs/9p_client.tla` (the spec this codec
-// will eventually service) + `stratum/v2/docs/reference/20-9p.md` (the
+// will eventually service) + `stratum/docs/reference/20-9p.md` (the
 // canonical server's wire-format reference). 9P2000.L is the Linux-extended
 // 9P dialect that v9fs speaks; the diod project's protocol description
 // (https://github.com/chaos/diod/blob/master/protocol.md) defines the
@@ -143,7 +143,7 @@
 #define P9_RREAD       117u
 #define P9_TWRITE      118u
 #define P9_RWRITE      119u
-// Stratum extensions (per stratum/v2/include/stratum/9p.h):
+// Stratum extensions (per stratum/include/stratum/9p.h):
 #define P9_TBIND       124u
 #define P9_RBIND       125u
 #define P9_TUNBIND     126u
@@ -358,7 +358,7 @@ int p9_parse_rattach(const u8 *in, size_t len,
 // the actual count returned; *nwqid <= qid_cap is enforced by the parser.
 // Per the protocol, *nwqid <= nwname from the matching Twalk; the parser
 // doesn't see Twalk, so the caller-cap-bound (R111 doctrine from
-// stratum/v2/docs/reference/23-9p_client.md §"Five trust boundaries")
+// stratum/docs/reference/23-9p_client.md §"Five trust boundaries")
 // is the load-bearing check here.
 int p9_parse_rwalk(const u8 *in, size_t len,
                    u16 *tag, u16 *nwqid,

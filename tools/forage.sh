@@ -96,6 +96,16 @@ do_clone() {
     if [[ -n "$commit" ]]; then git -C "$dest" checkout "$commit" 2>/dev/null || git -C "$dest" checkout "${branch:-HEAD}" || true
     elif [[ -n "$branch" ]]; then git -C "$dest" checkout "$branch" || true; fi
     echo "    $sec now at $(git -C "$dest" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    # A checkout already there is fetched, never merged: it may be shared, and may hold
+    # local work. One left behind its upstream and still without the probe is not
+    # gathered; say how to bring it up. (A probe that only a build makes, like the Go
+    # fork's bin/go, is absent after any clone; that alone is not a failure.)
+    local behind
+    behind="$(git -C "$dest" rev-list --count 'HEAD..@{u}' 2>/dev/null)" || behind=0
+    if [[ -n "$behind" && "$behind" != 0 ]] && ! present "$sec"; then
+        echo "forage: $sec: $dest is $behind commit(s) behind its upstream and lacks $(manifest_get "$sec" probe) -- bring it up to date: git -C $dest pull --ff-only (with its local changes committed or stashed first)" >&2
+        return 1
+    fi
 }
 
 # The tree the pin plus the given patches builds, applied in order in a scratch

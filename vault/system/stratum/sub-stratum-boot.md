@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-11-14
+updated: 2026-11-16
 ---
 ## Session factory handoff
 
@@ -283,28 +283,137 @@ the token is found even when it straddles two chunks. The harness's 180 s
 boot timeout is the only outer backstop — for a stratumd that hangs *alive*
 without signalling, which is a stratumd bug and not a host-speed race.
 
-**After readiness, a dedicated thread owns the pipe for the daemon's
-lifetime.** joey stops reading at handoff. Without the drainer, a full pipe
+**After readiness, two threads own the pipe for the daemon's lifetime.**
+joey stops reading at handoff. Without a standing reader, a full pipe
 blocks a stratumd thread mid-write — and under the FS that wedges the
 **whole system**, proven live when an instrumented stratumd deadlocked a
-boot. If the drainer fails to spawn joey *closes* the read end instead, so
-later writes fail fast with EPIPE: the degraded mode is silenced
-diagnostics, never an FS wedge. Same failure shape as the LS-CI relay's
-back-pressure bug — see [[haz-unread-pipe-wedge]].
+boot. Same failure shape as the LS-CI relay's back-pressure bug -- see
+[[haz-unread-pipe-wedge]].
+
+One thread cannot both keep reading and print. joey gives up the console
+after the boot, so its console writes park for as long as an IM-1 episode
+(a SAK's trusted prompt) is open: the freeze of every writer that is not
+console-attached is the anti-spoof property. Until 2026-11-15 one drainer
+did both, and an episode parked it mid-forward: measured with a probe
+stratumd and a held 20 s episode, nothing was read, and stratumd's writing
+thread sat blocked for 15 s once 4 KiB was waiting (operator vote 131 chose
+the split). Now the **reader** never touches the console: it copies the
+pipe into a 16 KiB ring (`struct sd_drain`). The **printer** writes the ring
+to the console, and an episode parks it and nothing else; a short count is
+written again, never skipped. A write that took nothing goes again after
+10 ms, the wait doubling to a second while nothing is taken: each try may
+hold the console's writer role for the #67 deadline, and every other writer
+queues behind it. A full ring drops what does not fit and counts it -- with
+no episode too, when a burst outruns the console: measured, a 65,600-byte
+burst with no episode dropped 49,342 bytes, where the single drainer printed
+all of it by slowing stratumd to console speed (247 ms); operator vote 133 kept the
+drop, so stratumd is never slowed. The count is printed on a line of its
+own -- `joey: N bytes of stratumd output dropped here: the console was not
+taking output` -- standing where the bytes were lost: the reader holds 128
+bytes back from data for that line and writes it once no bytes have come
+for 50 ms (the count is final then), or when room returns; a line written
+while the console is frozen may take the reserve, and the next gap's line
+then waits for room. Bytes that arrive behind an open gap wait for its
+line. A gap still open at EOF is reported by the printer after the rest.
+
+If the reader fails to spawn joey *closes* the read end, so later writes
+fail fast with EPIPE: the degraded mode is silenced diagnostics, never an
+FS wedge. If only the printer fails, the reader still drains: stratumd never
+blocks, and its output stays in the ring or is counted. It reaches the
+console only if the boot ends while joey still owns the console: the settle
+(below) prints it then.
+
+**A boot selftest proves the split without stratumd or an episode**
+(`sd_drain_selftest`, BOOT_PROBES, boot-fatal). A sink that parks until
+thawed stands in for the frozen console and takes at most 100 bytes a call
+(40 in legs 2 and 4, less than a gap line, so the line goes in pieces), as an
+episode's boundary cuts a write short. Four legs, each through a pipe of
+joey's own; in every leg the pipe's writer must never be held up, frozen
+sink or not:
+
+1. Frozen while 64 KiB arrive, then the bytes stop: the reader's line must
+   come after the quiet spell. That line takes the reserve and ends the ring
+   on a newline, so one extra line, still frozen, joins a gap behind it (one
+   it opens, or one a quiet close mid-burst left open) and puts nothing in
+   the ring; that gap's line (the reader's after the thaw, or the printer's
+   at EOF) must not start with a newline. The settle must not call the frozen
+   ring caught up, both before the extra line, with no gap open (so only the
+   ring's unprinted bytes can say no; skipped, and the PASS line says so, when
+   a quiet close mid-burst left a gap open), and after it, with its gap open.
+2. Frozen with no quiet timer: thawed, the ring is printed with the gap still
+   open, and the settle must not call that caught up; frozen again at EOF,
+   with the gap's line not yet printed, it must not either. Exactly one line,
+   the printer's.
+3. 40 KiB through a running console (the ring wraps), then frozen while
+   32 KiB arrive, then thawed while 96 KiB more arrive at a line a
+   millisecond. There is no quiet timer, so only bytes arriving behind the
+   gap close it, and the sink takes nothing on every 25th call. The writer
+   moves from the paced phase to the frozen one only once the printer's
+   index has passed the last paced byte, and writes the first thawed line
+   only once the printer has freed room for the gap's line, that line and
+   the reserve, so the frozen phase's gap (16,512) and where its line stands
+   are exact.
+4. No printer: the settle prints the ring while the reader still runs and
+   must not call the open gap caught up. Two lines put in the ring close that
+   gap; with no gap open, the pipe quiet and a console that takes nothing, it
+   must not call the ring caught up (only the unprinted bytes can say no,
+   whatever the timing). Then stratumd writes all the time the settle prints:
+   the sink writes the stream's next line each time it is called, so until the
+   settle's budget is spent a line is always in the pipe, being read, in the
+   ring or counted in a gap, whatever the threads' timing; the settle must not
+   call that caught up and must print no more than a ring's worth and one
+   write. Then
+   80 lines arrive with nothing printing them, more than the ring holds: the
+   settle prints the ring and must not call the open gap caught up. At EOF,
+   with a console that takes nothing, it must not call the drain caught up
+   and must still end; then it prints the gap's line.
+
+What each sink took is read back against the stream: runs of the stream's
+bytes, each starting exactly where the bytes before it and the losses counted
+between them end, and gap lines whose counts are above 0 and which start
+with a newline exactly when the byte before is not one. Legs 1 and 2 must
+keep exactly the first 16,256 bytes (the ring less the reserve), as must
+leg 4, and leg 3's
+first line must stand at stream offset 57,216 (its 40 KiB plus 16,256)
+and count exactly 16,512.
+
+The selftest runs while joey still owns the console, so it cannot see a
+reader that writes to the real console. **The build checks that instead**:
+`tools/check-drain-reader.py` disassembles the built joey, follows every
+direct call and branch from `sd_reader_main` by its target address (never a
+symbol name: two static functions may share one), and fails unless each
+system call it reaches is poll, read, a futex wake, thread exit or exit (by
+name, the numbers from the kernel's enum). A function whose last
+instruction can fall through (anything but an unconditional branch, a
+return, a trap, an exit call, or a call to a function that never returns)
+runs on into the next, which is followed too. It fails closed on an indirect
+call, branch or return, a branch or a fall-through to an address that starts
+no function, a branch form past the ARMv8.0 floor, or a call number that is
+not a constant (a move from the zero register is 0) in the straight run of
+instructions before its `svc`. Its self-test runs first, and
+`tools/build.sh` stops on either failing.
 
 **joey's exit waits for the drainer to catch up.** Every return of joey's
-`main` ends the boot, and joey's exit ends the drainer thread with it, so what
+`main` ends the boot, and joey's exit ends both drainer threads with it, so what
 stratumd wrote last -- why it refused the boot attach, say -- never reached the
 console: on 2026-11-12 a failed attach extincted with no cause, and finding it
 meant reading three trees. `main` now wraps `joey_main`. Once the drainer is up,
 `sd_drain_settle` parks 10 ms at a time until three parks in a row find the
-pipe empty (a zero-timeout poll, which takes nothing from the drainer), every
-chunk the drainer has woken for also handled, and the count handled unmoved; or
-until the drainer has read the end of the pipe. The drainer waits in a poll and
-counts a chunk as woken before the read that takes its bytes out of the pipe,
-so a chunk is always in one place the settle looks: still in the pipe, or woken
-and not yet handled. It gives up after 100 parks, so a daemon that keeps writing
-holds the end of the boot for about a second.
+pipe empty (a zero-timeout poll, which takes nothing from the reader), every
+chunk the reader has woken for also handled, the ring printed with no gap
+open (after the end of the pipe, the last gap's line printed too), and the
+count handled unmoved; or until the printer has printed everything after the
+end of the pipe. The reader waits in a poll and counts a chunk as woken
+before the read that takes its bytes out of the pipe, so a chunk is always
+in one place the settle looks: still in the pipe, woken and not yet handled,
+in the ring not yet printed, or counted in an open gap. With no printer, the
+settle is the ring's consumer and prints what it holds, up to the head it
+sees at each park and at most a ring's worth (16 KiB) and one write in all,
+then the last gap's line; it can, because joey returns only before it gives the console up,
+so no episode can park it. It gives up after 100 parks, so a daemon that
+keeps writing, or a console an episode holds, holds the end of the boot for
+about a second, and with no printer for at most the console time of the
+16 KiB and one write more.
 
 **The attach opts into loose cache mode, and the premise is written down.**
 `T_ATTACH_9P_LOOSE` on the SYSTEM mount asserts: this pool's block device
@@ -469,13 +578,24 @@ The spawn is one `t_sys_spawn_args`: flat NUL-separated argv (14 strings,
 
 ## Concurrency
 
-Sequential until the drainer thread is spawned. The drainer then runs for
-the daemon's lifetime, forwarding to the console; it exits when stratumd
-does. It advances its two counts and sets its end flag with release atomics,
-with a full fence between the woken count and its read; joey's exit path reads
-them with acquire loads (`sd_drain_settle`), and only polls the pipe, never
-reads it. A poll of the drainer's that fails is only a wait cut short: it still
-reads, so the pipe is never left unread.
+Sequential until the drainer's threads are spawned. They then run for the
+daemon's lifetime and end when stratumd does. The ring is single-producer,
+single-consumer: the reader alone writes `head` (bytes ever put), the gap
+count and the ring's free bytes; the consumer alone writes `tail` (bytes ever
+printed) and reads only bytes below `head`. The consumer is the printer, or,
+when the printer did not spawn (`no_printer`, set on that failure, so a
+forgotten store leaves no second consumer), the settle on joey's main thread.
+Each publishes its index with a release store and loads the other's with
+acquire, so the reader overwrites no byte the consumer has not finished with. The printer sleeps on a torpor
+word the reader bumps after every put (and at EOF): it loads the word before
+it checks `head`, so a put between the check and the wait changes the word
+and the wait returns at once (I-9). The reader advances its two counts with
+release atomics, with a full fence between the woken count and its read;
+joey's exit path reads them, `head`, `tail` and the gap with acquire loads
+(`sd_drain_settle`), and only polls the pipe, never reads it; it writes `tail`
+only as the consumer, when there is no printer. A poll of the
+reader's that fails is only a wait cut short: it still reads, so the pipe is
+never left unread.
 
 ## Invariants enforced
 
@@ -497,8 +617,8 @@ surface is unswept).
 ## Error paths
 
 Every step returns 1 and fails the boot, and every return first waits for
-the drainer to catch up (above). The one deliberate non-fatality is the
-drainer spawn.
+the drainer to catch up (above). The deliberate non-fatalities are the
+drainer's two spawns.
 
 **The `/bin/system.key` metadata probe asserts each refusal's errno
 (2026-10-22, G12).** On the read-only boot FS it checks that SYS_WSTAT
@@ -545,8 +665,10 @@ event-driven; no timing constant appears in this path.
 - The loose-mode premise list is a claim about the whole system, not this
   file. A change that gives some other writer access to this pool revokes
   it here.
-- The readiness read must keep draining, and the drainer must keep owning
-  the pipe. A reader that stops reading wedges the FS.
+- The readiness read must keep draining, and the reader must keep owning
+  the pipe. A reader that stops reading wedges the FS, and the reader must
+  never call anything that can park on the console: an IM-1 episode would
+  stop it for its whole length.
 - joey's own code ends joey only by returning from `joey_main`. A fault, a
   kill, or a stack-canary failure (libt's `__stack_chk_fail` calls SYS_EXITS
   directly) skips `main`'s wrapper, and stratumd's last words are lost then;
