@@ -2333,6 +2333,8 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
         proc_for_each(devproc_mem_walk_cb, &m);
         struct AddrSpace *busy = m.busy;
         if (!busy) return m.result;   // -T_E_ACCES refused, -1 not-found / not stopped; else bytes moved (0 = a hole at off)
+        // Busy on every try answers EBUSY, never the -1 a debugger reads as
+        // "resumed or gone": the target was found stopped each time (vote 134).
         // Under no lock, interrupts on: wait the holder out, then walk again
         // from the resolve -- a resume, a death or a seal may land meanwhile.
         devproc_mem_test_dropped(busy);
@@ -2342,7 +2344,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
             devproc_mem_test_waited(busy);
         }
         addrspace_unpin(busy);        // past the walk: the last pin frees
-        if (tries == DEBUG_MEM_TRIES) return -1;
+        if (tries == DEBUG_MEM_TRIES) return -T_E_BUSY;
     }
 }
 

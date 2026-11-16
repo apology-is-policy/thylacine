@@ -1959,7 +1959,7 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     // just inserted the VMA at exactly vaddr, so the lookup cannot miss; a
     // miss here is structural corruption of the vmas list under the held lock.
     struct Vma *vma = vma_lookup(dst, vaddr);
-    if (!vma) extinction("burrow_share_into: installed VMA vanished under vma_lock");
+    if (!vma) extinction("burrow_share_into: installed VMA vanished under as->lock");
     vma->flags |= VMA_FLAG_SHARED_IN;
 
     // #131: mark the region shared-out. This is what lets the SHARER's own

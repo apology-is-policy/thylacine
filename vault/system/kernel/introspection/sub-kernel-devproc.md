@@ -184,9 +184,11 @@ hold that admitted it, but only TRIES the space's lock there (operator vote 132)
 busy space is pinned, the hold drops with nothing copied, the reader waits for the
 lock outside with interrupts on and unpins, then resolves, gates and copies again from
 the start, so a resume, a death or a seal in the gap is judged afresh; after
-`DEBUG_MEM_TRIES` (8) walks it answers the not-stopped -1 -- which any holder can
-cause, a `maps` reader of an unsealed target included, since the lock is not fair
-(audit round 40 F5; DEBUG-FS-DESIGN 3.2). So a read
+`DEBUG_MEM_TRIES` (8) walks it answers `-T_E_BUSY` (operator vote 134), never the
+not-stopped -1, so a debugger can tell a busy lock from a target that resumed. Any
+holder can cause it, a `maps` reader of an unsealed target included, since the lock
+is not fair (audit round 40 F5; DEBUG-FS-DESIGN 3.2; ERRORS.md "The debug memory
+file"). So a read
 happens wholly before or wholly after a seal, whichever axis admitted the reader,
 including against a Proc that seals itself and then loads a secret, and
 `SPAWN_PERM_SEAL`'s two bits land in one critical section. That holds for the
@@ -232,8 +234,8 @@ takes its real lock there -- no gate takes that lock -- giving it back at the re
 wait point; a third hook reads the pin after the wait, before the unpin. Busy once
 copies on the second walk, the space pinned at the drop and still after the wait, and
 interrupts unmasked at the wait -- the same probe under the hold reads masked, the
-control; busy always gives up after eight walks and seven waits; a stop lifted in the
-gap is refused by the second walk's gate; a retried write lands and taints; every
+control; busy always answers EBUSY after eight walks and seven waits; a stop lifted in
+the gap is refused by the second walk's gate with the -1; a retried write lands and taints; every
 leg's pins are dropped. Not witnessed: the wait itself, and a pin taken after the
 walk instead of inside it -- each needs a second CPU's holder or reaper).
 Every seal

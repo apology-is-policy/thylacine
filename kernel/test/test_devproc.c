@@ -2932,7 +2932,7 @@ void test_devproc_mem_waits_outside_the_hold(void) {
     TEST_EXPECT_EQ(got[1], 64L, "busy once: the second walk copies");
     TEST_ASSERT(bytes_ok[1], "busy once: the bytes are the page's");
 
-    TEST_EXPECT_EQ(got[2], -1L, "busy always: the read gives up as not stopped");
+    TEST_EXPECT_EQ(got[2], (long)-T_E_BUSY, "busy always: the read answers EBUSY, not the not-stopped -1");
     TEST_EXPECT_EQ((long)walks[2], (long)8, "busy always: eight walks");
     TEST_EXPECT_EQ((long)drops[2], (long)8, "busy always: each one dropped the hold");
     TEST_EXPECT_EQ((long)waits[2], (long)7, "busy always: the last drop does not wait");
