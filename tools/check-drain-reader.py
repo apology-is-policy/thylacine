@@ -10,12 +10,16 @@ reader that writes to the real console -- it runs before joey gives the console
 up, when no episode can freeze joey -- so this reads the BUILT joey instead:
 every function reachable from sd_reader_main by direct call or tail call, and
 every system call in them, against an allowlist by NAME whose numbers come from
-the kernel's syscall enum. A call's number is the constant moved into w8/x8 in
+the kernel's syscall enum. Functions are keyed by start address and every
+direct branch is resolved by its target address, never a symbol name; a
+function whose last instruction can fall through runs on into the next one,
+which is followed too. A call's number is the constant moved into w8/x8 in
 the straight run of instructions before its svc: nothing in between may name
 x8 or w8, transfer control, or be a branch target. It fails closed: an indirect
-call or branch, a branch into the middle of another function, a system call
-whose number is not such a constant, a symbol it cannot find, or a reader in
-which it finds no poll and no read (then it is not reading the reader).
+call, branch or return, a branch to an address that starts no function, a
+branch form past the ARMv8.0 floor, a fall-through into no function, a system
+call whose number is not such a constant, or a reader in which it does not find
+both a poll and a read (then it is not reading the reader).
 
 Usage: check-drain-reader.py [--root ROOT] [--elf PATH] [--objdump PATH]
        check-drain-reader.py --self-test
@@ -32,6 +36,8 @@ ENTRY = 'sd_reader_main'
 # which any function with a canary can reach, calls it.
 ALLOWED = ('SYS_POLL', 'SYS_READ', 'SYS_TORPOR_WAKE', 'SYS_THREAD_EXIT', 'SYS_EXITS')
 REQUIRED = ('SYS_POLL', 'SYS_READ')
+# A function ending on one of these does not run on into the next.
+NORETURN_CALLS = ('SYS_THREAD_EXIT', 'SYS_EXITS')
 
 FUNC_RE = re.compile(r'^([0-9a-f]+) <([^>]+)>:\s*$')
 INSN_RE = re.compile(r'^\s+([0-9a-f]+):\s+(\S+)\s*(.*?)\s*$')
@@ -105,6 +111,38 @@ def svc_number(insns, i, targets):
     return None, 'no constant number in the %d instructions before it' % RUN_MAX
 
 
+def never_returns(insns, nums):
+    """A callee no call returns from: no return, no indirect branch, no branch out of
+    itself, and it ends on a branch into itself or a call that does not return."""
+    if not insns:
+        return False
+    lo, hi = insns[0][0], insns[-1][0]
+    for i, (addr, mn, ops) in enumerate(insns):
+        if RET.match(mn) or INDIRECT.match(mn) or UNSUPPORTED.match(mn) or mn == 'bl':
+            return False
+        if DIRECT.match(mn):
+            m = BR_TARGET.findall(ops)
+            if not m or not lo <= int(m[-1], 16) <= hi:
+                return False
+    return ends_without_falling(insns, len(insns) - 1, nums, set(), {})
+
+
+def ends_without_falling(insns, i, nums, targets, funcs):
+    """Whether the function's last instruction, insns[i], cannot run on into the next."""
+    addr, mn, ops = insns[i]
+    if mn == 'b' or RET.match(mn) or INDIRECT.match(mn) or mn in ('udf', 'brk') \
+            or mn.startswith('eret'):
+        return True
+    if mn == 'svc':
+        n, _ = svc_number(insns, i, targets)
+        return n is not None and n in {nums[c] for c in NORETURN_CALLS if c in nums}
+    if mn == 'bl' and funcs:
+        m = BR_TARGET.findall(ops)
+        t = int(m[-1], 16) if m else None
+        return t in funcs and never_returns(funcs[t][1], nums)
+    return False
+
+
 def check(text, nums):
     """Returns (problems, reached functions, syscall names seen)."""
     by_num = {v: k for k, v in nums.items()}
@@ -144,6 +182,12 @@ def check(text, nums):
             else:
                 problems.append('%s: %s at 0x%x to 0x%x, which starts no function'
                                 % (fn, mn, addr, t))
+        if not ends_without_falling(insns, len(insns) - 1, nums, targets, funcs):
+            nxt = insns[-1][0] + 4
+            if nxt in funcs:
+                todo.append(nxt)
+            else:
+                problems.append('%s: falls off its end at 0x%x into no function' % (fn, nxt))
         for i, (addr, mn, ops) in enumerate(insns):
             if INDIRECT.match(mn):
                 problems.append('%s: indirect %s %s' % (fn, mn, ops))
@@ -192,7 +236,7 @@ def selftest():
             + fn('helper', 0x400100, ['mov\tw8, #0x28', 'svc\t#0', 'b\t0x400200 <tail>'])
             + fn('tail', 0x400200, ['mov\tw8, #0x2a', 'svc\t#0']))
     cases = [
-        ('the reader as built', good, None),
+        ('the reader as built', good, 3),
         ('a console write', good.replace('mov\tw8, #0x28', 'mov\tw8, #0x1'), 'system call SYS_PUTS'),
         ('a wait on a lock word', good.replace('mov\tw8, #0x2a', 'mov\tw8, #0x27'), 'system call SYS_TORPOR_WAIT'),
         ('an indirect call', good.replace('bl\t0x400100 <helper>', 'blr\tx8'), 'indirect blr'),
@@ -208,12 +252,20 @@ def selftest():
         ('two functions of one name', good.replace('mov\tw8, #0x28', 'mov\tw8, #0x1')
                                        + fn('helper', 0x400300, ['mov\tw8, #0x28', 'svc\t#0', 'ret']),
          'system call SYS_PUTS'),
-        ('an unannotated branch, followed', good.replace('b\t0x400200 <tail>', 'b\t0x400200'), None),
+        ('an unannotated branch, followed', good.replace('b\t0x400200 <tail>', 'b\t0x400200'), 3),
         ('an unannotated branch to a console write', good.replace('b\t0x400200 <tail>', 'b\t0x400200')
                                                       .replace('mov\tw8, #0x2a', 'mov\tw8, #0x1'),
          'system call SYS_PUTS'),
         ('an unannotated branch to nowhere', good.replace('b\t0x400200 <tail>', 'b\t0x400600'), 'to 0x400600, which starts no function'),
         ('a return through another register', good.replace('\tret\n', '\tret\tx1\n'), 'indirect ret x1'),
+        ('a helper that returns, falling into a console write',
+         good.replace('\tb\t0x400200 <tail>', '\tmov\tw0, #0x0')
+         + fn('next', 0x40010c, ['mov\tw8, #0x1', 'svc\t#0', 'ret']),
+         'system call SYS_PUTS'),
+        ('a reader falling off into nothing', good.replace('\tret\n', '\tnop\n'), 'falls off its end'),
+        ('a last call that never returns', good.replace('\tret\n', '\tbl\t0x400300 <die>\n')
+         + fn('die', 0x400300, ['mov\tx8, #0x2', 'svc\t#0', 'wfe', 'b\t0x400308 <die+0x8>']), 4),
+        ('a last call that returns', good.replace('\tret\n', '\tbl\t0x400100 <helper>\n'), 'falls off its end'),
         ('a branch form past the floor', good.replace('b.le\t0x400000 <sd_reader_main>', 'bc.le\t0x400000 <sd_reader_main>'), 'unsupported branch form'),
         ('a branch into another function', good.replace('0x400200 <tail>', '0x400208 <tail+0x8>'), 'to 0x400208, which starts no function'),
         ('no reader at all', good.replace(ENTRY, 'other_main'), 'not in the disassembly'),
@@ -222,8 +274,8 @@ def selftest():
     bad = 0
     for name, text, want in cases:
         problems, reached, _ = check(text, nums)
-        if want is None:
-            ok = not problems and len(reached) == 3
+        if isinstance(want, int):
+            ok = not problems and len(reached) == want
         else:
             ok = any(want in p for p in problems)
         print('  %-34s %s' % (name, 'ok' if ok else 'WRONG: %s' % problems))

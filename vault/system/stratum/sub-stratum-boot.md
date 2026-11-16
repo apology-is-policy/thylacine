@@ -328,13 +328,14 @@ console only if the boot ends while joey still owns the console: the settle
 thawed stands in for the frozen console and takes at most 100 bytes a call
 (40 in legs 2 and 4, less than a gap line, so the line goes in pieces), as an
 episode's boundary cuts a write short. Four legs, each through a pipe of
-joey's own; in every leg the writer must finish while the sink takes
-nothing:
+joey's own; in every leg the pipe's writer must never be held up, frozen
+sink or not:
 
 1. Frozen while 64 KiB arrive, then the bytes stop: the reader's line must
    come after the quiet spell. That line takes the reserve and ends the ring
-   on a newline, so one line more, still frozen, opens a gap behind it, and
-   that gap's line at EOF must not start with a newline. The settle must not
+   on a newline, so one line more, still frozen, opens a gap behind it and
+   puts nothing in the ring; that gap's line (the reader's after the thaw, or
+   the printer's at EOF) must not start with a newline. The settle must not
    call the frozen ring caught up.
 2. Frozen with no quiet timer: thawed, the ring is printed with the gap still
    open, and the settle must not call that caught up; frozen again at EOF,
@@ -345,17 +346,25 @@ nothing:
    millisecond. There is no quiet timer, so only bytes arriving behind the
    gap close it, and the sink takes nothing on every 25th call. The writer
    moves from the paced phase to the frozen one only once the printer's
-   index has passed the last paced byte, so the counts below are exact.
-4. No printer: the settle prints the ring while the reader still runs, must
-   not call the open gap caught up, and prints the gap's line at EOF.
+   index has passed the last paced byte, and writes the first thawed line
+   only once the printer has freed room for the gap's line, that line and
+   the reserve, so the frozen phase's gap (16,512) and where its line stands
+   are exact.
+4. No printer: the settle prints the ring while the reader still runs and
+   must not call the open gap caught up; with stratumd still writing (four
+   lines a millisecond) it must not call that caught up either, and must
+   print no more than a ring's worth and one write; at EOF, with a console
+   that takes nothing, it must not call the drain caught up and must still
+   end; then it prints the gap's line.
 
 What each sink took is read back against the stream: runs of the stream's
 bytes, each starting exactly where the bytes before it and the losses counted
 between them end, and gap lines whose counts are above 0 and which start
 with a newline exactly when the byte before is not one. Legs 1 and 2 must
 keep exactly the first 16,256 bytes (the ring less the reserve), as must
-legs 2 and 4, and leg 3's
-first line must stand at stream offset 57,216 (its 40 KiB plus 16,256).
+leg 4, and leg 3's
+first line must stand at stream offset 57,216 (its 40 KiB plus 16,256)
+and count exactly 16,512.
 
 The selftest runs while joey still owns the console, so it cannot see a
 reader that writes to the real console. **The build checks that instead**:
@@ -363,8 +372,11 @@ reader that writes to the real console. **The build checks that instead**:
 direct call and branch from `sd_reader_main` by its target address (never a
 symbol name: two static functions may share one), and fails unless each
 system call it reaches is poll, read, a futex wake, thread exit or exit (by
-name, the numbers from the kernel's enum). It fails closed on an indirect
-call, branch or return, a branch to an address that starts no function, a
+name, the numbers from the kernel's enum). A function whose last
+instruction can fall through (anything but a branch, a return, a trap, an
+exit call, or a call to a function that never returns) runs on into the
+next, which is followed too. It fails closed on an indirect call, branch or
+return, a branch or a fall-through to an address that starts no function, a
 branch form past the ARMv8.0 floor, or a call number that is not a constant
 in the straight run of instructions before its `svc`. Its self-test runs
 first, and `tools/build.sh` stops on either failing.
