@@ -352,7 +352,7 @@ allocation.
 **Exec runs in the execing Proc's own context, before it has a second thread**,
 and the file leans on that in three places — the name stamp, the exe-path stamp,
 and the whole VMA installation, which is why `exec_setup` is the documented
-exemption from the `vma_lock` discipline ([[lock-vma]]).
+exemption from the `as->lock` discipline ([[lock-vma]]).
 
 The claim is sound but it is a *precondition*, not a check: nothing rejects an
 `exec_setup` on a Proc that already has threads. What stands in for the check is

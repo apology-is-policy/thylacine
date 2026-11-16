@@ -25,7 +25,7 @@ carries a true out.
 
 `burrow_free_internal` runs **outside** the lock, and must, because it reaches
 for the buddy allocator, the hardware-object refcounts, and the 9P Spoor clunk.
-That is the leaf discipline: order is `vma_lock -> Burrow.lock -> buddy zone`,
+That is the leaf discipline: order is `as->lock -> Burrow.lock -> buddy zone`,
 and freeing under the Burrow lock would nest the buddy lock inside it on the
 free path while the map path nests it outside — the cycle the split avoids.
 

@@ -540,10 +540,10 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // 0) triggers burrow_free_internal and releases the kobj_mmio ref.
     //
     // P6 #713 vma_lock audit F1: burrow_map walks + splices p->as->vmas
-    // (vma_insert), so it MUST hold p->vma_lock -- same discipline as
+    // (vma_insert), so it MUST hold p->as->lock -- same discipline as
     // SYS_BURROW_ATTACH. Without it a sibling thread's fault-path
     // vma_lookup (or another mapper) races this vma_insert. Lock order
-    // vma_lock -> buddy zone->lock holds (burrow_unref-on-failure ->
+    // as->lock -> buddy zone->lock holds (burrow_unref-on-failure ->
     // free_pages). burrow_create_mmio stays outside (no VMA touch).
     spin_lock(&p->as->lock);
     int rc = burrow_map(p, b, vaddr, km->size, prot);
@@ -973,7 +973,7 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // the held kobj_dma ref → if it was the last ref, free_pages.
     //
     // P6 #713 vma_lock audit F1: burrow_map mutates p->as->vmas (vma_insert),
-    // so it MUST hold p->vma_lock -- same discipline as SYS_BURROW_ATTACH /
+    // so it MUST hold p->as->lock -- same discipline as SYS_BURROW_ATTACH /
     // SYS_MMIO_MAP. stratumd (multi-thread, CAP_HW_CREATE) maps its
     // virtio-blk DMA buffer here concurrently with sibling-thread faults.
     spin_lock(&p->as->lock);
@@ -1199,7 +1199,7 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
 // prot by the handle rights (R+W needs RIGHT_WRITE; EXEC rejected; W-without-R
 // rejected -- AArch64 has no W-only AP), resolves bar_index -> the BAR's
 // KObj_MMIO, wraps it in a BURROW_TYPE_MMIO Burrow, installs the VMA under
-// p->vma_lock, and drops the construction ref. Returns 0 / -1.
+// p->as->lock, and drops the construction ref. Returns 0 / -1.
 static s64 pci_map_range(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw,
                          u64 offset, u64 length, bool whole_bar) {
     if (hraw >= PROC_HANDLE_MAX) return -1;
@@ -1251,8 +1251,8 @@ static s64 pci_map_range(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw,
     struct Burrow *b = burrow_create_pci_mmio(k, (u32)bar_index, offset, length);
     if (!b)                               { handle_put(&hh); return -1; }
 
-    // burrow_map walks + splices p->as->vmas, so it holds p->vma_lock (the #713
-    // discipline). Lock order vma_lock -> buddy zone->lock holds. km->size is the
+    // burrow_map walks + splices p->as->vmas, so it holds p->as->lock (the #713
+    // discipline). Lock order as->lock -> buddy zone->lock holds. km->size is the
     // full decoded BAR size; the user maps the whole BAR and indexes the
     // VIRTIO_PCI_CAP regions within it.
     spin_lock(&p->as->lock);
@@ -6751,7 +6751,7 @@ static s64 sys_note_mask_handler(u64 new_mask, u64 old_mask_out_va) {
 // and installs an anonymous RW Burrow; SYS_BURROW_DETACH tears one down.
 // =============================================================================
 //
-// Both run their VMA-list work under p->vma_lock. At v1.0 Procs are single-
+// Both run their VMA-list work under p->as->lock. At v1.0 Procs are single-
 // threaded so the lock is uncontended by construction; it is held so the
 // find-gap + vma_insert sequence (attach) and the lookup + vma_remove_in
 // sequence (detach) are atomic once the pouch-threads sub-chunk makes Procs
@@ -6759,7 +6759,7 @@ static s64 sys_note_mask_handler(u64 new_mask, u64 old_mask_out_va) {
 // Proc's VMA list, and the critical section never sleeps — burrow_create_anon
 // / vma_alloc are non-blocking allocations (NULL on OOM, never wait).
 //
-// F2 (P6-pouch-mem-a audit, P3, deferred): attach holds vma_lock across
+// F2 (P6-pouch-mem-a audit, P3, deferred): attach holds as->lock across
 // burrow_create_anon's eager (up to BURROW_ATTACH_MAX) page allocation.
 // At v1.0 the lock is uncontended so this is free; the pouch-threads
 // sub-chunk — which introduces real contention — narrows the hold (the
@@ -6798,7 +6798,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     }
 
     // #65 (I-32): charge this Proc's anon-page floor BEFORE committing the
-    // eager allocation. Under vma_lock, so the check+charge is atomic against a
+    // eager allocation. Under as->lock, so the check+charge is atomic against a
     // sibling attach (the cap is exact). A non-TCB Proc over its budget is
     // refused with -ENOMEM here -- it never reaches the allocator. Uncharged on
     // every failure path below + on SYS_BURROW_DETACH.
@@ -7907,7 +7907,7 @@ static s64 sys_burrow_map_file_handler(u64 fd_raw, u64 offset, u64 length_raw,
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 
-// PRECONDITION: caller holds p->vma_lock (walks p->as->vmas).
+// PRECONDITION: caller holds p->as->lock (walks p->as->vmas).
 static struct Vma *jit_find_peer_locked(struct Proc *p, const struct Vma *writer) {
     for (struct Vma *v = p->as->vmas; v; v = v->next) {
         if (v != writer && v->burrow == writer->burrow)
@@ -8079,7 +8079,7 @@ s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
     if (rc != 0) return rc;
 
     // Copy out with NO lock held. uaccess can fault -> demand-page -> which
-    // takes vma_lock, so doing this under the lock would self-deadlock. This is
+    // takes as->lock, so doing this under the lock would self-deadlock. This is
     // the REVENANT R-5-F1 rule (no faulting uaccess under a lock the fault path
     // needs) obeyed at the point where it costs nothing.
     // uaccess_copy_out returns 0 on success / -1 on fault -- NOT a byte count
@@ -8417,7 +8417,7 @@ s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
         done += chunk;
     }
 
-    // Dropped outside vma_lock. If a sibling destroyed the region while we
+    // Dropped outside as->lock. If a sibling destroyed the region while we
     // synced, this is the last reference and frees it here -- correct, and the
     // reason the ref was taken at all.
     burrow_unref(b);
@@ -8478,7 +8478,7 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     u64 ring_size = (ring_size_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
     // Resolve ring_va -> the caller's ANON ring Burrow, validate, and take a
-    // TEMPORARY ref so v survives the gap between dropping vma_lock and
+    // TEMPORARY ref so v survives the gap between dropping as->lock and
     // weft_share_register taking its own (registration) ref -- a multi-thread
     // netd could SYS_BURROW_DETACH the ring concurrently in that window.
     spin_lock(&p->as->lock);
@@ -8749,7 +8749,7 @@ int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
     // slot while mapping_count keeps the ring VMA alive), so WITHOUT this charge
     // a non-TCB Proc accumulates uncharged anon up to the physical cliff,
     // defeating the per-Proc page cap. Charge ring_size's pages here (under the
-    // same vma_lock as the map -> exact); relief comes from SYS_BURROW_DETACH on
+    // same as->lock as the map -> exact); relief comes from SYS_BURROW_DETACH on
     // the ring VA (the ring is a normal VMA in the burrow window, so the existing
     // detach uncharge fires) or vma_drain at exit. The close-without-detach
     // accumulation therefore hits the budget (or the pool) instead of RAM.
@@ -8766,7 +8766,7 @@ int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
     // Map the ring RW into the burrow-attach window. burrow_map takes its OWN
     // mapping_count ref (vma_alloc -> burrow_acquire_mapping); the Loom keeps
     // its handle_count ref, so the ring stays alive while EITHER side holds it
-    // (the #847 dual-refcount). vma_find_gap + burrow_map under one vma_lock so
+    // (the #847 dual-refcount). vma_find_gap + burrow_map under one as->lock so
     // a sibling thread cannot claim the same gap.
     spin_lock(&p->as->lock);
     u64 vaddr;
@@ -8947,8 +8947,8 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
 
     // handle_get holds a ref on the Loom across the call (the #844 by-value
     // snapshot with the obj ref held, table lock released), so loom_free cannot
-    // run while loom_register_buffers walks p->vma_lock -- no lock nesting between
-    // the handle-table lock and p->vma_lock.
+    // run while loom_register_buffers walks p->as->lock -- no lock nesting between
+    // the handle-table lock and p->as->lock.
     int rc = loom_is_private(l) ? loom_private_register_buffers_routed(l, p, bufs, n)
                                 : loom_register_buffers(l, p, bufs, n);
     handle_put(&lh);
@@ -15844,6 +15844,13 @@ static s64 viv_mmap(struct Proc *p, const u64 *args) {
         // Linux reads the fd through fget(unsigned int).
         sp = sys_get_mapping_spoor(p, (u64)(u32)a[4], &readable, &writable);
         if (!sp)                                     return -(s64)T_E_BADF;
+        // ksys_mmap_pgoff, right after fget and before do_mmap asks anything:
+        // MAP_HUGETLB through a file that is not hugetlbfs is EINVAL, and no
+        // file here is (/dev/zero included).
+        if ((u32)a[3] & (u32)VIV_MAP_HUGETLB) {
+            spoor_clunk(sp);
+            return -(s64)T_E_INVAL;
+        }
     }
     if (a[1] == 0) {
         if (sp) spoor_clunk(sp);
@@ -15907,12 +15914,15 @@ static s64 viv_mmap(struct Proc *p, const u64 *args) {
             return mmap_fixed_file_body(p, sp, a[0], length, prot, a[5]);
         }
         // A shape no arm serves (read-write private without MAP_FIXED, shared).
-        // do_mmap's file branch switches on the map type before it asks
+        // do_mmap finds the window (__get_unmapped_area: ENOMEM for a length no
+        // window holds) before its file branch, as the anonymous side below
+        // does. The file branch switches on the map type before it asks
         // FMODE_READ, and a type that is not shared, shared-validate or
         // private is EINVAL whatever the descriptor (round 34 F5). Past that,
         // an unreadable descriptor is EACCES in every served type, as Linux;
         // a readable one is declined.
         spoor_clunk(sp);
+        if (a[1] > BURROW_RESERVE_MAX) return -(s64)T_E_NOMEM;
         u32 mtype = (u32)a[3] & (u32)VIV_MAP_TYPE;
         if (mtype != (u32)VIV_MAP_SHARED && mtype != (u32)VIV_MAP_PRIVATE &&
             mtype != (u32)VIV_MAP_SHARED_VALIDATE)

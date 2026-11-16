@@ -49,6 +49,7 @@
 #include <thylacine/image.h>                // B-1a' audit F20: nothing idle for the reclaim
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>             // the step counter keys on this thread
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -424,6 +425,82 @@ void test_cow_clone_shares_readonly_eager_anon(void) {
                 "indivisible buddy block has no per-page ownership to break");
 
     drop_proc_for_cow(parent);
+}
+
+// The fork builds the child in the parent's order, each mapping after the last
+// (vma_insert_after_in), so a clone walks no insert list: linear in the
+// parent's mappings. The control is an ordinary insert into the child, whose
+// walk visits every mapping below it -- the counter counts.
+#define CLONE_ORDER_N 64u
+
+void test_cow_clone_builds_in_order(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc");
+    // Lazy pieces (the COW arm) and guards (the guard arm), alternating.
+    u32 mapped = 0;
+    for (u32 i = 0; i < CLONE_ORDER_N; i++) {
+        const u64 va = COW_TEST_VA + (u64)i * 2u * COW_ONE_PAGE;
+        int rc = -1;
+        if (i & 1u) {
+            struct Vma *g = vma_alloc_guard(va, va + COW_ONE_PAGE);
+            if (g) {
+                spin_lock(&parent->as->lock);
+                rc = vma_insert_in(parent->as, true, g);
+                spin_unlock(&parent->as->lock);
+                if (rc != 0) vma_free(g);
+            }
+        } else {
+            struct Burrow *b = burrow_create_anon_lazy(COW_ONE_PAGE);
+            if (b) {
+                rc = burrow_map(parent, b, va, COW_ONE_PAGE, VMA_PROT_RW);
+                burrow_unref(b);
+            }
+        }
+        if (rc != 0) break;
+        mapped++;
+    }
+
+    g_vma_insert_steps_owner_for_test = current_thread();
+    const u64 steps0 = g_vma_insert_steps_for_test;
+    struct AddrSpace *child = addrspace_clone(parent->as, /*exempt=*/true);
+    const u64 clone_steps = g_vma_insert_steps_for_test - steps0;
+
+    bool same = child != NULL, linked = true;
+    u32 n = 0;
+    u64 ctrl_steps = 0;
+    int crc = -1;
+    if (child) {
+        struct Vma *pv = parent->as->vmas, *cv = child->vmas, *cprev = NULL;
+        for (; pv && cv; pv = pv->next, cv = cv->next, n++) {
+            if (pv->vaddr_start != cv->vaddr_start || pv->vaddr_end != cv->vaddr_end) same = false;
+            if (cv->prev != cprev) linked = false;
+            cprev = cv;
+        }
+        if (pv || cv) same = false;
+
+        const u64 va = COW_TEST_VA + (u64)CLONE_ORDER_N * 2u * COW_ONE_PAGE;
+        struct Vma *g = vma_alloc_guard(va, va + COW_ONE_PAGE);
+        if (g) {
+            const u64 s0 = g_vma_insert_steps_for_test;
+            spin_lock(&child->lock);
+            crc = vma_insert_in(child, true, g);
+            spin_unlock(&child->lock);
+            ctrl_steps = g_vma_insert_steps_for_test - s0;
+            if (crc != 0) vma_free(g);
+        }
+        addrspace_unref(child);
+    }
+    g_vma_insert_steps_owner_for_test = NULL;
+    drop_proc_for_cow(parent);
+
+    TEST_EXPECT_EQ(mapped, CLONE_ORDER_N, "the parent's mappings");
+    TEST_ASSERT(child != NULL, "the clone");
+    TEST_ASSERT(same, "the child's list is the parent's, in order");
+    TEST_ASSERT(linked, "and each back link names its predecessor");
+    TEST_ASSERT(n >= CLONE_ORDER_N, "every mapping compared");
+    TEST_EXPECT_EQ(clone_steps, 0ull, "the clone walked no insert list: each mapping went after the last");
+    TEST_EXPECT_EQ(crc, 0, "control: an insert above the child's mappings");
+    TEST_EXPECT_EQ(ctrl_steps, (u64)n, "control: its walk visits every mapping below it");
 }
 
 // Private ring omission is selective. Protect must preserve its kernel tag,

@@ -18,7 +18,7 @@ it over [[lock-rendez]].
 The #343 lock-free mismatch return and the R-5 pre-fault both exist
 to keep traffic OFF this lock: the mismatch path never takes it, and
 the pre-fault guarantees the under-lock user-VA load cannot
-fault-and-SLEEP. The surviving fault edge, bucket lock → `vma_lock` → buddy, exists only in the
+fault-and-SLEEP. The surviving fault edge, bucket lock → `as->lock` → buddy, exists only in the
 decommit-race window and is non-blocking (the lazy-anon arm).
 
 ## Held across

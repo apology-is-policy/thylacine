@@ -308,7 +308,7 @@ unsafe fn torture(sz: u64, n1: u64, k: usize, m: u64, pairs: u64) -> i64 {
 // ---- Phase 4: multi-threaded SMP burrow stress -------------------------------
 // stratumd is multi-threaded; the single-threaded burrow path tested clean, so
 // the residual suspect is the SMP path -- concurrent attach/detach across vCPUs
-// stressing the buddy zone lock, the per-Proc vma_lock, and the inner-shareable
+// stressing the buddy zone lock, the space's as->lock, and the inner-shareable
 // TLBI broadcast (a detach on CPU-A must invalidate CPU-B's TLB before CPU-B
 // reuses the freed VA/PA). Each thread tortures its OWN burrows (no shared
 // region -> no app-level data race); a thread reading another thread's pattern

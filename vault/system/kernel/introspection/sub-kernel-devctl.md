@@ -122,6 +122,14 @@ accounts' count of the same pages, and `unpaired:` is `account_unpaired`, the br
 pairings they caught ([[sub-kernel-accounts]]). Both are atomics. The test reads the file
 through a larger buffer now, because the two lines can pass 256 bytes.
 
+**One more since 2026-11-14:** `overrefund:` is `addrspace_overrefunds`, the refunds an
+address space's own counts could not cover, each floored at zero
+([[sub-kernel-addrspace]]). An atomic, and the last line. The readers in the tree find
+their keys by name -- halcyon's `ctl_field`, prowl's sampler, diorama, pouch patch 0034's
+line-start match, `ls-halcyon-instrument.exp`'s `free:` pattern -- except
+`pouch-hello-malloc`, whose `fscanf` reads the first three lines in order; a line
+appended after them moves neither (`devctl.read_memory_format` asserts it reads 0).
+
 ### The gate is a special case, and it is default-allow
 
 Two leaves are gated, on the SAME `CAP_HOSTOWNER` check and for DIFFERENT

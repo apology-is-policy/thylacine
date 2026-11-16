@@ -2015,7 +2015,7 @@ enum {
     //   map would admit a state in which an RX alias exists with no writer (or
     //   a writer with no RX), and would put the rollback for a half-installed
     //   pair on the caller. Here the pair is installed under a single
-    //   vma_lock hold and either both aliases exist or neither does -- on a
+    //   as->lock hold and either both aliases exist or neither does -- on a
     //   W^X boundary that atomicity is worth more than the flexibility. It is
     //   also exactly the shape the scripture specifies for the userspace
     //   layer: "create -> (writer_ptr, exec_ptr)".

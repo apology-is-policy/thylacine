@@ -581,7 +581,7 @@ one per install path, each revert-probed against its own check.
 MAP_FIXED admission rule (**CORRECTED at D-3b, #196 — the design's rule was
 one shape short**): the target is either (a) `[addr, addr+len)` lying WHOLLY
 inside ONE existing VMA owned by the caller, replaced atomically under
-`vma_lock` (split + replace), or (b) an entirely FREE range, plain-mapped.
+`as->lock` (split + replace), or (b) an entirely FREE range, plain-mapped.
 Shape (b) is not a convenience: Linux MAP_FIXED does not require the target to
 be mapped already, and omitting it made an unmapped-address request answer
 **ENOMEM** — a WORSE reply than the ENOSYS it replaced, because ENOMEM cannot

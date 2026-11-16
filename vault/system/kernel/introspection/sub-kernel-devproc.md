@@ -161,14 +161,42 @@ its image files to nobody but itself; `status`, `sched` and `imperium` stay read
 
 **Ordering is a LOCK, not a load order.** `proc_seal` (kernel/proc.c) is the only writer
 of both seal bits and stamps them under `g_proc_table_lock`; every read above tests the
-seal under that same lock and renders there too (environ under `env->lock`, maps under
-`vma_lock`, the mem copy directly -- all leaves below it). ns alone renders after the
-lock is dropped, because a shed can hold its `ns_lock` for about a million steps, and
-so it asks its admission again under the lock once the render is done, of the Proc that
-still holds the rendered Territory (`devproc.ns_admission_after_render`). So a read
+seal under that same lock and renders there too (environ under `env->lock`, the mem
+copy directly -- leaves below it). ns and maps render after the lock is dropped -- a
+shed can hold its `ns_lock` for about a million steps, and a fork's clone holds a
+space's lock for a walk of every mapping it has -- and each asks its admission again
+under the lock once the render is done, of the Proc that still holds what was rendered
+(`devproc.ns_admission_after_render`, `devproc.maps_render_after_the_walk`). maps
+PINS the space under the table lock (`addrspace_pin`: a lifetime reference from a live
+owner -- a Proc in the table owns its space, since exec swaps it under the lock and
+the reap unlinks before `proc_free` drops it) and renders it under its own lock after;
+the second look checks the Proc still has that space and the code rows' verdict is
+unchanged, and when an exec replaced the space it renders the new one, up to four
+renders (`DEVPROC_MAPS_TRIES`) before it answers -1. A last owner's drain runs under
+the space's lock, so a pinned render sees the whole list or none. The render takes
+that lock with interrupts ON -- it runs under no other lock, and no handler takes a
+space's lock -- so a long clone costs the reader's CPU its wait, never its tick
+(audit round 39 F4). Before 2026-11-14
+maps took the space's lock under the table lock (OPEN-BUGS 2026-11-14T17:55:58Z), and
+until 2026-11-15 the mem copy did too, waiting there on any holder of a stopped
+target's space -- an RFMEM sibling's clone included. The copy still runs inside the
+hold that admitted it, but only TRIES the space's lock there (operator vote 132): a
+busy space is pinned, the hold drops with nothing copied, the reader waits for the
+lock outside with interrupts on and unpins, then resolves, gates and copies again from
+the start, so a resume, a death or a seal in the gap is judged afresh; after
+`DEBUG_MEM_TRIES` (8) walks it answers the not-stopped -1 -- which any holder can
+cause, a `maps` reader of an unsealed target included, since the lock is not fair
+(audit round 40 F5; DEBUG-FS-DESIGN 3.2). So a read
 happens wholly before or wholly after a seal, whichever axis admitted the reader,
 including against a Proc that seals itself and then loads a secret, and
-`SPAWN_PERM_SEAL`'s two bits land in one critical section. The first correction had
+`SPAWN_PERM_SEAL`'s two bits land in one critical section. That holds for the
+admission's monotone inputs (a Proc's seals only ever OR on; departed holders persist in
+`guards_ever`). The share family's part is not monotone: it joins the image only while
+the space maps shared anonymous memory, so a seal the target makes and ends between the
+two walks -- by mapping and unmapping its last shared mapping -- passes a render taken
+while sealed. What it can leak is the rows that changed in that window; the rest is
+readable after the unseal anyway, and the copy-under-the-lock readers had the same
+window between their seal test and the space's lock (audit round 39, observation). The first correction had
 made this structural by composition instead (ACQUIRE `principal_id` first, seal last);
 round 2 showed that held only for a reader admitted BECAUSE it saw the new identity --
 not for a spawn that changes no identity, nor for a `CAP_HOSTOWNER` reader. The boundary
@@ -190,7 +218,25 @@ the same-principal peer, the self exemption, NODUMP-is-not-a-debug-refusal);
 regression is reported as one); `devproc.ns_admission_after_render` (ns's second look:
 a hook between the two walks seals the target, exits it through the real Territory
 release, or unlinks it, against a control hook that does nothing -- EACCES, the empty
-file with the reader's ref the last one holding the Territory, and gone). Every seal
+file with the reader's ref the last one holding the Territory, and gone);
+`devproc.maps_render_after_the_walk` (maps' window, between the pin and the render:
+a page mapped there shows, so the render follows the walk; a seal refuses; an
+exec-shaped swap of the space renders the new space on a second render; an unlink
+reads as gone; and a second hook AFTER the render, before the read is admitted
+again, where a seal must still refuse -- a read that asked before it rendered would
+hand the rows out (audit round 39 F1). The idle leg reads the pin in the window;
+every leg's pins are dropped, the swap's second one on the other space too);
+`devproc.mem_waits_outside_the_hold` (the mem copy's busy space: a hook counts each
+walk as it finds the target, before the gates, and while a leg wants the space busy
+takes its real lock there -- no gate takes that lock -- giving it back at the reader's
+wait point; a third hook reads the pin after the wait, before the unpin. Busy once
+copies on the second walk, the space pinned at the drop and still after the wait, and
+interrupts unmasked at the wait -- the same probe under the hold reads masked, the
+control; busy always gives up after eight walks and seven waits; a stop lifted in the
+gap is refused by the second walk's gate; a retried write lands and taints; every
+leg's pins are dropped. Not witnessed: the wait itself, and a pin taken after the
+walk instead of inside it -- each needs a second CPU's holder or reaper).
+Every seal
 test sets the bit through `proc_seal`, the
 production writer, and captures its verdicts before freeing its Procs.
 
@@ -873,7 +919,9 @@ slot recycled into a new thread of the same Proc never matches a stale focus.
 Lock order, all nested *under* `g_proc_table_lock` and all acyclic on the same
 ground (each is a leaf; nothing held under it takes the global lock):
 
-- `vma_lock` — the `maps` walk and the cross-Proc memory copy
+- the space's lock (`as->lock`; older prose says `vma_lock`) — the cross-Proc memory
+  copy, which only TRIES it under the global lock and waits for it outside (vote 132);
+  `maps` renders under it after the walk, nested under nothing
 - `dot_lock` — the cwd render
 - `env_lock` — the environ render
 - each peer's `wait_lock` — the parked-thread scan and the resume wake
@@ -944,11 +992,13 @@ truncated render, so there is no partial-disclosure path.
 The lock hold is the thing being managed throughout, since `g_proc_table_lock`
 is global and taken with IRQs off:
 
-- the cross-Proc memory copy is clamped to one page per call; the debugger loops
+- the cross-Proc memory copy is clamped to one page per call; the debugger loops. The
+  hold never waits for the target space's lock: a busy one is waited for outside it,
+  then the walk repeats, at most eight walks in all
 - the environ read is clamped to 8 KiB per call, and short reads are POSIX-legal
 - every row-formatting loop commits a row only once it wholly fits, so a walk is
   bounded by the **output buffer** rather than by the number of VMAs or threads.
-  A process at the VMA maximum therefore holds `vma_lock` for tens of rows, not
+  A process at the VMA maximum therefore holds `as->lock` for tens of rows, not
   tens of thousands — do not "fix" the truncation by continuing past a full
   buffer without re-deriving that bound.
 
@@ -1090,7 +1140,7 @@ reader with debug authority over it (the I-39 predicate, image join included). T
 reflexive case is written out because I-39 refuses a NOTRACE Proc even to itself,
 and a Proc reading its own layout tells no one else anything.
 
-`format_maps(p, show_code, ...)` prints the table exactly as before when it may.
+`format_maps_in(as, show_code, ...)` prints the table exactly as before when it may.
 Otherwise a code row takes no buffer during the walk: it is counted by permission
 class (r, w, x and the share flag, `maps_class`) and printed after the walk as
 `0x0-0x0 <perms> 0x0 code - -`, grouped by class. Each such row is a function of

@@ -677,15 +677,14 @@ int addrspace_quiesce_mapped_devices(struct AddrSpace *as) {
     if (!as) return 0;
     int reset = 0;
     // The walk reads the list without its lock, and the weft reaper is the one
-    // cross-Proc writer of it: it unmaps under the lock, reaches a space only
-    // through a live Proc's `->as` under g_proc_table_lock, and skips a Proc that
-    // is non-ALIVE, or in its exit close while holding the space alone (both read
-    // under that lock). Every caller is in one of those cases or past them: the
-    // exit close walks only a space it holds alone, exec has swapped `->as` off
-    // the space, and at the last reference no Proc names it. So no new unmap
-    // starts here, and taking and dropping the lock waits out one already under
-    // way.
+    // cross-Proc writer of it: it unmaps under the lock, and only while
+    // `quiesced` is clear, which it reads under that lock. Setting the flag
+    // under the lock therefore waits out an unmap already under way and keeps
+    // every later one out. Every caller walks a space no other owner holds (the
+    // exit close and the reap read one owner; at the last owner none is left),
+    // so nothing else here wants the list again before its drain.
     spin_lock(&as->lock);
+    as->quiesced = true;
     spin_unlock(&as->lock);
     for (struct Vma *v = as->vmas; v; v = v->next) {
         struct Burrow *b = v->burrow;
@@ -5900,13 +5899,16 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     __atomic_store_n(&p->phenotype, new_pheno, __ATOMIC_RELEASE);
 
     // Every cross-Proc reader of `->as` resolves its target under
-    // g_proc_table_lock. /proc/<pid>/{maps,mem} and /ctl/procs finish with it
-    // inside that walk, so after the section above none of them is holding
-    // `old`. The weft reaper keeps `old`'s LOCK past its walk, by the pointer
-    // it captured there, never by re-reading ours; if the drop below is the
-    // last, its drain takes that lock first and so waits for the reaper rather
-    // than freeing under it. That is what makes the drop safe rather than a
-    // race.
+    // g_proc_table_lock. /ctl/procs finishes with it inside that walk, so after
+    // the section above it is not holding `old`. /proc/<pid>/maps, the weft
+    // reaper and /proc/<pid>/mem (when it found the space's lock busy) PIN the
+    // space they found there and use only that pointer afterwards, never
+    // re-reading ours: the pin keeps the descriptor and its page table past the
+    // drop below. maps reads and the reaper unmaps under `old`'s lock, which the
+    // drain takes too, so each sees the list whole or drained (and the reaper,
+    // finding the drain's quiesce flag, does not unmap at all); mem only takes
+    // and releases that lock, then resolves the Proc afresh. That is what makes
+    // the drop safe rather than a race.
 
     // Put the NEW translation in the hardware before touching the old one. After
     // the isb inside this call, no fetch or access on this CPU walks `old`, and

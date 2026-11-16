@@ -17,6 +17,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>       // the test step counter keys on current_thread()
 #include <thylacine/visibility.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -254,40 +255,34 @@ bool vma_linked_in(const struct AddrSpace *as, const struct Vma *v) {
     return !v->next || v->next->prev == v;
 }
 
-int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
+static void vma_insert_check(const struct AddrSpace *as, const struct Vma *v) {
     if (!as || !v)               extinction("vma_insert_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_insert of corrupted Vma");
-    // The head test catches the sole mapping, whose links are both NULL: the walk
-    // below would reject it as overlapping itself, and the caller would free it
-    // with the head still pointing at it.
+    // The head test catches the sole mapping, whose links are both NULL: the
+    // overlap check would reject it as overlapping itself, and the caller would
+    // free it with the head still pointing at it.
     if (v->next || v->prev || as->vmas == v)
         extinction("vma_insert of already-linked Vma");
+}
 
-    // Walk the sorted list to find:
-    //   - The insertion point (last node with start < v->start).
-    //   - Any overlap with existing VMAs.
-    struct Vma *prev = NULL;
-    struct Vma *cur  = as->vmas;
-    while (cur) {
-        if (cur->magic != VMA_MAGIC) extinction("vma_insert: corrupted list entry");
-        if (ranges_overlap(v->vaddr_start, v->vaddr_end,
-                           cur->vaddr_start, cur->vaddr_end)) {
-            return -1;            // overlap rejected
-        }
-        if (cur->vaddr_start >= v->vaddr_end) break;     // first node past v
-        prev = cur;
-        cur  = cur->next;
-    }
+#ifdef KERNEL_TESTS
+u64 g_vma_insert_steps_for_test;
+struct Thread *g_vma_insert_steps_owner_for_test;
+#endif
 
+// The link half of an insert: prev is the last mapping below v (NULL: v becomes
+// the head), cur its successor, and v overlaps neither.
+static int vma_link_in(struct AddrSpace *as, bool exempt, struct Vma *v,
+                       struct Vma *prev, struct Vma *cur) {
     // I-32 FOURTH axis (overcommit, ARCH §6.5): bound live VMAs — the DoS a free
     // SYS_BURROW_ATTACH_LAZY reservation (uncharged at attach) would otherwise open.
-    // Checked AFTER the overlap walk (so a rejected overlap doesn't consume the
+    // Checked AFTER the overlap check (so a rejected overlap doesn't consume the
     // budget) and BEFORE the list mutation (so a cap-hit installs nothing). A non-TCB
     // address space at PROC_VMA_MAX is rejected here as -T_E_NOMEM (an overlap is
     // -1: the cap is a resource refusal, reportable as one -- B-1a' audit F18; the
     // caller vma_frees the rejected Vma either way). The charge requires as->lock — every
-    // vma_insert caller holds it (attach / share under vma_lock; the exec load path
-    // builds a detached address space no other thread can reach). Paired by
+    // vma_insert caller holds it (attach / share under as->lock; the exec load path
+    // and the fork build a detached address space no other thread can reach). Paired by
     // addrspace_uncharge_vma in vma_remove_in. Charges nothing on failure, so no
     // rollback is needed on the rejected path.
     if (!addrspace_charge_vma(as, exempt)) return -(int)T_E_NOMEM;
@@ -309,6 +304,46 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (v->burrow) burrow_lazy_bind_va0(v->burrow, v->vaddr_start - v->burrow_offset);
     return 0;
 }
+
+int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
+    vma_insert_check(as, v);
+
+    // Walk the sorted list to find:
+    //   - The insertion point (last node with start < v->start).
+    //   - Any overlap with existing VMAs.
+    struct Vma *prev = NULL;
+    struct Vma *cur  = as->vmas;
+    while (cur) {
+#ifdef KERNEL_TESTS
+        if (g_vma_insert_steps_owner_for_test == current_thread())
+            g_vma_insert_steps_for_test++;
+#endif
+        if (cur->magic != VMA_MAGIC) extinction("vma_insert: corrupted list entry");
+        if (ranges_overlap(v->vaddr_start, v->vaddr_end,
+                           cur->vaddr_start, cur->vaddr_end)) {
+            return -1;            // overlap rejected
+        }
+        if (cur->vaddr_start >= v->vaddr_end) break;     // first node past v
+        prev = cur;
+        cur  = cur->next;
+    }
+    return vma_link_in(as, exempt, v, prev, cur);
+}
+
+// Only the cursor and its successor are compared, and that is exact: the list is
+// sorted and disjoint, so every mapping before prev ends before prev starts and
+// every one after prev's successor starts after it.
+int vma_insert_after_in(struct AddrSpace *as, bool exempt, struct Vma *v, struct Vma *prev) {
+    vma_insert_check(as, v);
+    if (prev && (prev->magic != VMA_MAGIC || !vma_linked_in(as, prev)))
+        extinction("vma_insert_after_in: the cursor is not in this space");
+    struct Vma *cur = prev ? prev->next : as->vmas;
+    if (cur && cur->magic != VMA_MAGIC) extinction("vma_insert: corrupted list entry");
+    if (prev && prev->vaddr_end > v->vaddr_start) return -1;
+    if (cur  && cur->vaddr_start < v->vaddr_end)  return -1;
+    return vma_link_in(as, exempt, v, prev, cur);
+}
+
 
 void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     if (!as || !v)               extinction("vma_remove_in(NULL)");
@@ -1033,9 +1068,9 @@ void vma_drain(struct Proc *p) {
 void vma_drain_in(struct AddrSpace *as) {
     if (!as) return;
 
-    // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->vma_lock --
+    // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->as->lock --
     // retiring its lockless exemption. The weft reaper's cross-Proc
-    // force-reclaim holds the target's vma_lock ACROSS its per-page
+    // force-reclaim holds the target's as->lock ACROSS its per-page
     // TLBI unmap after dropping g_proc_table_lock (so the multi-ms loop
     // runs IRQs-on, off the global lock); this acquire is what makes a
     // reap racing that window serialize instead of draining under it.

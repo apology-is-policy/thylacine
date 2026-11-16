@@ -132,11 +132,9 @@ bool addrspace_private_begin(struct AddrSpace *as) {
     return true;
 }
 
-#ifdef KERNEL_TESTS
 void addrspace_pin(struct AddrSpace *as) {
     addrspace_lifetime_get(as);
 }
-#endif // KERNEL_TESTS
 
 int addrspace_owner_count(const struct AddrSpace *as) {
     return as ? __atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) : 0;
@@ -267,11 +265,9 @@ void addrspace_destroy(struct AddrSpace *as) {
     addrspace_lifetime_put(as);
 }
 
-#ifdef KERNEL_TESTS
 void addrspace_unpin(struct AddrSpace *as) {
     addrspace_lifetime_put(as);
 }
-#endif // KERNEL_TESTS
 
 void addrspace_private_end(struct AddrSpace *as) {
     if (!as) extinction("addrspace_private_end(NULL)");
@@ -299,8 +295,11 @@ static bool vma_is_cow(const struct Vma *v) {
 // Build the child's counterpart of one parent VMA. Returns false on any failure;
 // the caller then discards the whole partially-built child, so nothing here needs
 // to unwind anything except what it allocated and has not yet handed over.
+// *tail is the child's last mapping: the parent's list is walked in ascending
+// order, so each counterpart goes after it, and the build is linear in the
+// parent's mappings rather than an insert walk from the head for each.
 static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
-                          const struct Vma *src_vma) {
+                          const struct Vma *src_vma, struct Vma **tail) {
     // Private kernel ring pages can submit operations, so a child must never
     // inherit them, even as read-only aliases or after protect/split. Ordinary
     // registered user-buffer VMAs are NOT tagged and retain their existing
@@ -312,7 +311,8 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     if (!src_vma->burrow) {
         struct Vma *g = vma_alloc_guard(src_vma->vaddr_start, src_vma->vaddr_end);
         if (!g) return false;
-        if (vma_insert_in(dst, exempt, g) != 0) { vma_free(g); return false; }
+        if (vma_insert_after_in(dst, exempt, g, *tail) != 0) { vma_free(g); return false; }
+        *tail = g;
         return true;
     }
 
@@ -406,11 +406,12 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     // The child's mapping inherits the parent's CEILING (vma_alloc set it to the
     // current prot, which may be lower after a protect), plus the COW routing.
     nv->flags = flags | (src_vma->flags & VMA_FLAG_MAX_MASK);
-    if (vma_insert_in(dst, exempt, nv) != 0) {
+    if (vma_insert_after_in(dst, exempt, nv, *tail) != 0) {
         vma_free(nv);                   // symmetric: releases the mapping ref
         if (minted) { src_vma->burrow->clone_cursor = NULL; burrow_unref(minted); }
         return false;
     }
+    *tail = nv;
 
     if (minted) {
         // The child maps these pages too, so it counts them too (the Linux RSS
@@ -484,8 +485,9 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
 
     // PHASE 2 -- build the child. The only phase that can fail.
     bool ok = true;
+    struct Vma *tail = NULL;
     for (struct Vma *v = src->vmas; v && ok; v = v->next)
-        ok = clone_one_vma(dst, exempt, v);
+        ok = clone_one_vma(dst, exempt, v, &tail);
 
     // B-1a: retire the per-Burrow dedupe cursors clone_one_vma parked, on every
     // outcome, while src->lock still excludes the next clone of this space. A
@@ -586,13 +588,46 @@ bool addrspace_charge_table(struct AddrSpace *as, bool exempt) {
     return true;
 }
 
+static u64 g_addrspace_overrefunds;
+
+static void addrspace_overrefund(void) {
+    __atomic_fetch_add(&g_addrspace_overrefunds, 1u, __ATOMIC_RELAXED);
+}
+
+u64 addrspace_overrefunds(void) {
+    return __atomic_load_n(&g_addrspace_overrefunds, __ATOMIC_RELAXED);
+}
+
+#ifdef KERNEL_TESTS
+// One exchange, so a count landing on another CPU between a read and a clear
+// is not lost.
+u64 addrspace_overrefunds_take_for_test(void) {
+    return __atomic_exchange_n(&g_addrspace_overrefunds, 0u, __ATOMIC_RELAXED);
+}
+
+// Takes back n counts and no more -- floored, never wrapped -- so a count the
+// caller did not make stays for the runner to report.
+void addrspace_overrefunds_forgive_for_test(u64 n) {
+    u64 cur = __atomic_load_n(&g_addrspace_overrefunds, __ATOMIC_RELAXED);
+    for (;;) {
+        u64 nv = (cur >= n) ? cur - n : 0;
+        if (__atomic_compare_exchange_n(&g_addrspace_overrefunds, &cur, nv, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
+}
+#endif
+
 void addrspace_uncharge_table(struct AddrSpace *as) {
     if (!as) return;
     addrspace_uncharge_pages(as, 1);
     u32 cur = __atomic_load_n(&as->pgtable_pages, __ATOMIC_RELAXED);
-    while (cur > 0 && !__atomic_compare_exchange_n(&as->pgtable_pages, &cur, cur - 1,
-                                                   true, __ATOMIC_RELAXED,
-                                                   __ATOMIC_RELAXED)) { }
+    for (;;) {
+        if (cur == 0) { addrspace_overrefund(); return; }
+        if (__atomic_compare_exchange_n(&as->pgtable_pages, &cur, cur - 1, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 bool addrspace_charge_file(struct AddrSpace *as, bool exempt) {
@@ -608,8 +643,10 @@ void addrspace_uncharge_file(struct AddrSpace *as, u32 npages) {
     for (;;) {
         u32 nv = (cur >= npages) ? cur - npages : 0;
         if (__atomic_compare_exchange_n(&as->file_pages, &cur, nv, true,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            if (cur < npages) addrspace_overrefund();
             return;
+        }
     }
 }
 
@@ -653,8 +690,10 @@ void addrspace_uncharge_pages(struct AddrSpace *as, u32 npages) {
     for (;;) {
         u32 nv = (cur >= npages) ? cur - npages : 0;
         if (__atomic_compare_exchange_n(&as->page_count, &cur, nv,
-                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            if (cur < npages) addrspace_overrefund();
             return;
+        }
     }
 }
 
@@ -677,8 +716,10 @@ void addrspace_uncharge_vma(struct AddrSpace *as) {
     for (;;) {
         u32 nv = (cur > 0) ? cur - 1 : 0;
         if (__atomic_compare_exchange_n(&as->vma_count, &cur, nv,
-                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            if (cur == 0) addrspace_overrefund();
             return;
+        }
     }
 }
 
@@ -701,7 +742,9 @@ void addrspace_uncharge_shared_map(struct AddrSpace *as, u32 npages) {
     for (;;) {
         u32 nv = (cur >= npages) ? cur - npages : 0;
         if (__atomic_compare_exchange_n(&as->shared_map_pages, &cur, nv,
-                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            if (cur < npages) addrspace_overrefund();
             return;
+        }
     }
 }

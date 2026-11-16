@@ -833,7 +833,7 @@ rejects SYSTEM), and `principal_id` is immutable on a running Proc, so a capped
 user can neither reach nor race into the exempt set.
 
 **Enforcement points (all under the relevant existing lock).** Page —
-`sys_burrow_attach_for_proc`, under `vma_lock`, after the page count is known,
+`sys_burrow_attach_for_proc`, under `as->lock`, after the page count is known,
 before `burrow_create_anon` (and the matching uncharge in
 `sys_burrow_detach_for_proc` on a successful unmap). Thread —
 `proc_thread_admit`, against `thread_budget` under `p->threads_lock`.

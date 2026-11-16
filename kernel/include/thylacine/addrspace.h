@@ -198,6 +198,12 @@ struct AddrSpace {
     // read by the join without it: the family joins this image only while it
     // is nonzero.
     u32            shared_maps;
+
+    // Set under lock by the device quiesce, which then walks `vmas` WITHOUT the
+    // lock: from here the list is that death path's until its drain, and the
+    // weft reaper, the one cross-Proc writer, no longer unmaps in it. Never
+    // cleared.
+    bool           quiesced;
 };
 
 _Static_assert(sizeof(struct AddrSpace) == 112,
@@ -206,7 +212,7 @@ _Static_assert(sizeof(struct AddrSpace) == 112,
                "page_budget + page_peak + pgtable_pages + file_pages + "
                "guards_ever (32) + id (8) + caps_ever (8) + owners + "
                "private_rings (8) + paid_burrows (8) + family (8) + "
-               "shared_maps (4, padded to 8). "
+               "shared_maps (4) + quiesced (1, padded to 8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Vote 122 (I-39; DEBUG-FS-DESIGN 3.4): the record of a share family, the
@@ -266,15 +272,17 @@ bool addrspace_private_begin(struct AddrSpace *as);
 void addrspace_private_end(struct AddrSpace *as);
 
 
-#ifdef KERNEL_TESTS
-// Kernel-only lifetime pins: no execution or process-sharing authority. Caller
-// holds a live owner or pin across pin acquisition. Unpin is NULL-safe; the last
-// total ref alone frees the descriptor/page tables. The last OWNER drains
-// mappings through the ordinary exit/exec path, which can sleep on file clunk.
+// Kernel-only lifetime pins: no execution or process-sharing authority. A live
+// owner or pin must exist and be unable to go across the call -- the caller's
+// own, or a linked Proc naming the space under g_proc_table_lock (exec swaps and
+// the reap unlinks under it, so its ownership holds). Unpin is NULL-safe; the last
+// total ref alone frees the descriptor/page tables, so it is never called under
+// as->lock. The last OWNER drains mappings through the ordinary exit/exec path,
+// which can sleep on file clunk; a pinned space's list is then empty, and the
+// drain runs under as->lock, so a walk under it sees all of the list or none.
 // No Proc pointer is needed or permitted after its owner's lifetime ends.
 void addrspace_pin(struct AddrSpace *as);
 void addrspace_unpin(struct AddrSpace *as);
-#endif // KERNEL_TESTS
 
 // Constructor/Proc owner count, excluding kernel pins. Use for process sharing
 // and last-process device quiescence, with the existing publication/exit proof.
@@ -473,7 +481,16 @@ void addrspace_uncharge_table(struct AddrSpace *as);
 bool addrspace_charge_file(struct AddrSpace *as, bool exempt);
 void addrspace_uncharge_file(struct AddrSpace *as, u32 npages);
 
+// Every uncharge above floors its count at zero, so I-32 fails clean on a refund
+// the count cannot cover; this counts each such refund, which would otherwise pass
+// as a smaller number (memaccount.h's account_unpaired, for the space's own counts).
+u64 addrspace_overrefunds(void);
+
 #ifdef KERNEL_TESTS
+// The runner's read-and-clear, after each test.
+u64 addrspace_overrefunds_take_for_test(void);
+// A test that refunds past zero on purpose takes back the counts it made, before the runner reads.
+void addrspace_overrefunds_forgive_for_test(u64 n);
 // The in-kernel tests' reach into addrspace.c (.claude/rules/kernel-code.md,
 // "Cross-file declarations"): hooks compiled only with the tests, and
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
