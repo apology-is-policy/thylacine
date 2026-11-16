@@ -568,6 +568,10 @@ static size_t format_memory(const struct Proc *reader, char *buf, size_t cap) {
     n = fmt_udec(buf, cap, off, account_unpaired()); off += n;
     n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
 
+    n = fmt_str(buf, cap, off, "overrefund: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, addrspace_overrefunds()); off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+
     return off;
 }
 

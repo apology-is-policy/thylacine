@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-14
 ---
 ## Purpose
 
@@ -278,30 +278,43 @@ threads of one guest mapping the same fid each build a binding from a distinct
 identifier; exactly one wins, and the loser tears its own down and returns the
 winner's address.
 
-**The reaper's order** is registry lock, then the process table, then the target's
-address-space lock — acquired under the table lock and *held past its release*,
-so the per-page unmap runs with interrupts on rather than inside the table's
-interrupt-off window. The held lock alone keeps the space's teardown out: every
-last unref drains through `vma_drain_in`, which takes it before the page table
-or the struct is freed. The find hands back the SPACE it locked, and the sweep
+**The reaper's order** is registry lock, then the process table, then the
+target's address-space lock -- but never the space's lock under the table lock.
+The find, under the table lock, matches the pid, gates ALIVE and PINS the space
+(a Proc on the table owns its space, so the pin is taken on a live descriptor);
+the table lock and its interrupt mask drop at the walk's end, and the sweep then
+takes the space's lock with interrupts on and unmaps under it alone. The pin
+keeps the descriptor and its page table alive; the drain takes the same lock, so
+the unmap sees the list whole or drained. Until 2026-11-14 the find took the
+space's lock under the table lock and returned holding it, so an RFMEM sharer or
+the Proc itself holding that lock for a clone or an insert walk made the reaper
+wait with the global lock held and interrupts off (OPEN-BUGS
+2026-11-14T17:55:58Z). The find hands back the SPACE it pinned, and the sweep
 uses only that pointer, because exec swaps a Proc's space under the table lock
-alone. Until 2026-10-08 the sweep re-read the Proc's pointer three times after
-the walk; an exec in that window had it unlock the new space and leave the old
-one locked forever, and exec's drain of the old space then spun on it (vmaguard
-audit F1). It holds a lock and not a reference because the device-death
-quiesce and the image join read the reference count as "who else holds this
-space", and a transient reaper reference read as a sharer (audit r2 F1). The
-find skips a Proc whose exit close has begun (`PROC_FLAG_EXIT_CLOSING`, read
-under the lock) when it holds the space alone, and the quiesce takes and drops
-the lock before its lock-free walk ([[sub-kernel-death]]); a SHARED space is
-unmapped as usual, because the quiesce does not walk it and the survivor's
-drain would come only at the survivor's death (audit r3 F1).
-`weft.reap_unlocks_the_space_it_locked` swaps the space inside that window
-while another party holds the new space's lock, and checks that the find held
-the old lock and took no reference, that the sweep unmapped and uncharged the
-old space and unlocked its lock, and that the other party's hold survived;
-`weft.reap_skips_an_exit_closing_proc` checks the skip, and
-`weft.reap_unmaps_a_shared_exit_closing_space` that a shared space is still
+alone (until 2026-10-08 the sweep re-read the Proc's pointer after the walk;
+vmaguard audit F1). A pin counts in `ref`, never in `owners`, which is what the
+device-death quiesce and the image join read, so the reaper's pin is no sharer to
+either.
+
+**Whether to unmap is decided under the space's lock, from the space alone.**
+The device quiesce sets `as->quiesced` under that lock before its lock-free walk
+([[sub-kernel-death]]), and the sweep unmaps only while the flag is clear, so it
+either finishes before the quiesce's lock or keeps out. Until 2026-11-14 the skip
+was read from the Proc -- `PROC_FLAG_EXIT_CLOSING` and a `ref` of 1 -- and a kernel
+pin (a loom private ring holds one through the close) made `ref` 2 while the
+quiesce, reading `owners`, walked unlocked anyway: the sweep could free a VMA
+under the walk (OPEN-BUGS 2026-11-14T19:39:35Z). A SHARED space is unmapped as
+usual, because the quiesce does not walk it and the survivor's drain would come
+only at the survivor's death (audit r3 F1). The space's pin drops after the
+registry lock, beside the Burrow pins, since it may be the last and free the page
+table.
+`weft.reap_unmaps_the_space_it_pinned` swaps the space inside the window between
+the find and the unmap, and checks that the find held no lock and one more
+reference there, and that the sweep unmapped and uncharged the old space, left no
+lock held and dropped its pin; `weft.reap_skips_an_exit_closing_proc` runs the
+exit close as exits() does (the flag, then the quiesce) and checks the skip;
+`weft.reap_skips_a_pinned_sole_owner` does the same with a pin on the space; and
+`weft.reap_unmaps_a_shared_exit_closing_space` checks that a shared space is still
 unmapped.
 
 Registration and unregistration take the registry lock alone, never the table

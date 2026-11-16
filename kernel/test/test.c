@@ -935,8 +935,9 @@ struct test_case g_tests[] = {
     { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
     { "weft.sharer_charge_released_at_detach", test_weft_sharer_charge_released_at_detach, false, NULL },
     { "weft.reap_kproc_pid_survives_walk", test_weft_reap_kproc_pid_survives_walk, false, NULL },
-    { "weft.reap_unlocks_the_space_it_locked", test_weft_reap_unlocks_the_space_it_locked, false, NULL },
+    { "weft.reap_unmaps_the_space_it_pinned", test_weft_reap_unmaps_the_space_it_pinned, false, NULL },
     { "weft.reap_skips_an_exit_closing_proc", test_weft_reap_skips_an_exit_closing_proc, false, NULL },
+    { "weft.reap_skips_a_pinned_sole_owner", test_weft_reap_skips_a_pinned_sole_owner, false, NULL },
     { "weft.reap_unmaps_a_shared_exit_closing_space", test_weft_reap_unmaps_a_shared_exit_closing_space, false, NULL },
     { "weft.reap_orphan_reclaimed",       test_weft_reap_orphan_reclaimed,    false, NULL },
     { "weft.reap_live_session_untouched", test_weft_reap_live_session_untouched, false, NULL },
@@ -1008,6 +1009,7 @@ struct test_case g_tests[] = {
     { "shared_anon.fork_shares_the_page", test_shared_anon_fork_shares_the_page, false, NULL },
     { "shared_anon.creator_pays_every_mint", test_shared_anon_creator_pays_every_mint, false, NULL },
     { "shared_anon.unmap_keeps_the_page", test_shared_anon_unmap_keeps_the_page, false, NULL },
+    { "shared_anon.detach_keeps_the_page", test_shared_anon_detach_keeps_the_page, false, NULL },
     { "shared_anon.creator_death_hands_over", test_shared_anon_creator_death_hands_over, false, NULL },
     { "shared_anon.install_loser_refunds", test_shared_anon_install_loser_refunds, false, NULL },
     { "shared_anon.protect_split_keeps_payer", test_shared_anon_protect_split_keeps_payer, false, NULL },
@@ -1247,6 +1249,7 @@ struct test_case g_tests[] = {
                                        test_cow_addrspace_clone_shares_and_writeprotects, false, NULL },
     { "cow.addrspace_clone_refuses_and_leaves_parent_intact",
                                        test_cow_addrspace_clone_refuses_and_leaves_parent_intact, false, NULL },
+    { "cow.clone_builds_in_order",     test_cow_clone_builds_in_order,     false, NULL },
     { "cow.clone_shares_readonly_eager_anon",
                                        test_cow_clone_shares_readonly_eager_anon, false, NULL },
     { "cow.break_read_then_write_copies",
@@ -1270,6 +1273,8 @@ struct test_case g_tests[] = {
                                        test_addrspace_share_drains_at_last_ref, false, NULL },
     { "addrspace.proc_alloc_in_shares",
                                        test_addrspace_proc_alloc_in_shares, false, NULL },
+    { "addrspace.overrefund_is_counted",
+                                       test_addrspace_overrefund_is_counted, false, NULL },
     { "proc.rfork_rfmem_refuses_without_addrspace",
                                        test_proc_rfork_rfmem_refuses_without_addrspace, false, NULL },
     { "fork.frame_init",               test_fork_frame_init,               false, NULL },
@@ -1283,6 +1288,8 @@ struct test_case g_tests[] = {
     { "vma.insert_sorted_invariant",   test_vma_insert_sorted_invariant,   false, NULL },
     { "vma.drain_releases_all",        test_vma_drain_releases_all,        false, NULL },
     { "vma.linked_in_tracks_the_list", test_vma_linked_in_tracks_the_list, false, NULL },
+    { "vma.insert_after_checks_neighbours",
+                                       test_vma_insert_after_checks_neighbours, false, NULL },
     { "vma.find_gap_smoke",            test_vma_find_gap_smoke,            false, NULL },
     { "vma.find_gap_no_fit",           test_vma_find_gap_no_fit,           false, NULL },
     { "vma.find_gap_constraints",      test_vma_find_gap_constraints,      false, NULL },
@@ -1727,6 +1734,8 @@ struct test_case g_tests[] = {
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },
     { "devproc.maps_shared_anon",     test_devproc_maps_shared_anon,      false, NULL },
+    { "devproc.maps_render_after_the_walk",
+                                      test_devproc_maps_render_after_the_walk, false, NULL },
     { "devproc.maps_code_visible",    test_devproc_maps_code_visible,     false, NULL },
     { "devproc.maps_code_redacted",   test_devproc_maps_code_redacted,    false, NULL },
     { "devproc.maps_code_truncated",  test_devproc_maps_code_truncated,   false, NULL },
@@ -1780,6 +1789,7 @@ struct test_case g_tests[] = {
     { "devproc.debug_birth_hold_ctl",          test_devproc_debug_birth_hold_ctl,          false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
+    { "devproc.mem_waits_outside_the_hold",    test_devproc_mem_waits_outside_the_hold,    false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
     { "devproc.thread_files_name_their_thread", test_devproc_thread_files_name_their_thread, false, NULL },
     { "devproc.thread_step_names_its_thread",  test_devproc_thread_step_names_its_thread,  false, NULL },
@@ -3942,6 +3952,14 @@ void test_run_all(void) {
             if (!current_test->failed)
                 test_fail("a ledger pairing broke (see ACCOUNT-UNPAIRED)");
             account_unpaired_rewind_for_test(0u);
+        }
+
+        // The same for an address space's own counts, which floor at zero: an
+        // over-refund reads as a smaller count wherever the count sat low.
+        if (addrspace_overrefunds_take_for_test() != 0u) {
+            uart_puts("ADDRSPACE-OVERREFUND ");
+            if (!current_test->failed)
+                test_fail("an address space count was refunded past zero (see ADDRSPACE-OVERREFUND)");
         }
 
         // The user pool's test park is the seventh piece of that state. A

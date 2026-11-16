@@ -415,8 +415,9 @@ before the first C call, turn into a line ([[sub-kernel-boot-sequence]]).
 documented as such at each — the invalidates are all-ASID. It is retained for a
 future address-targeted optimization.
 
-**Three headers in this subsystem still describe `Proc.vma_lock` as future
-work.** It has existed since #713 and is taken at 116 sites. Task #60.
+**The space's lock (`AddrSpace.lock`, `Proc.vma_lock` until L-1) has existed since
+#713.** Headers once described it as future work; none of the kernel or arm64
+headers does now (searched 2026-11-15). Task #60.
 
 ## The range uninstall walks by subtree (2026-09-23; B-1a audit F2)
 

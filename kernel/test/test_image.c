@@ -68,40 +68,53 @@ static struct Spoor *mk_spoor(u64 qpath, u32 qvers) {
 
 void test_image_miss_then_hit_shares(void) {
     image_cache_evict_idle_for_test();   // isolate from any prior case
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cache empty at start");
-
+    u64 live0    = image_cache_live_count_for_test();
     u64 freed0   = spoor_total_freed();
     u64 hits0    = image_cache_hits_for_test();
     u64 creates0 = image_cache_creates_for_test();
 
+    // Every value is read where it holds and asserted only after the refs drop
+    // (see private_unless_versioned).
     // First exec: MISS -> create. s1 is ADOPTED into B1.
-    struct Spoor *s1 = mk_spoor(0x1000, 1);
-    struct Burrow *b1 = image_lookup_or_create(s1, 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(b1 != NULL, "first lookup creates a Burrow");
-    TEST_EXPECT_EQ(burrow_handle_count(b1), 2, "B1 handle_count = cache 1 + caller 1");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "one live entry");
-    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 1, "one create");
+    struct Burrow *b1 = image_lookup_or_create(mk_spoor(0x1000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    int  hc_miss  = b1 ? burrow_handle_count(b1) : -1;
+    u64  live1    = image_cache_live_count_for_test();
+    u64  creates  = image_cache_creates_for_test() - creates0;
 
     // Second exec, SAME identity: HIT -> shares B1. s2 is redundant -> clunked.
-    struct Spoor *s2 = mk_spoor(0x1000, 1);
-    struct Burrow *b2 = image_lookup_or_create(s2, 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(b2 == b1, "second lookup SHARES the same Burrow (cross-Proc text share)");
-    TEST_EXPECT_EQ(burrow_handle_count(b1), 3, "handle_count = cache 1 + 2 callers");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "still one entry");
-    TEST_EXPECT_EQ(image_cache_hits_for_test() - hits0, 1, "one hit");
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 1, "redundant spoor s2 clunked on the hit");
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0x1000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    bool shared   = b1 != NULL && b2 == b1;
+    int  hc_hit   = b1 ? burrow_handle_count(b1) : -1;
+    u64  live2    = image_cache_live_count_for_test();
+    u64  hits     = image_cache_hits_for_test() - hits0;
+    u64  freed2   = spoor_total_freed() - freed0;
 
     // Both callers drop their refs (exec's post-map burrow_unref).
-    burrow_unref(b2);
-    burrow_unref(b1);
-    TEST_EXPECT_EQ(burrow_handle_count(b1), 1, "back to the cache's single (strong) ref");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 1, "still cached after callers drop");
+    if (b2) burrow_unref(b2);
+    if (b1) burrow_unref(b1);
+    int  hc_idle  = (b1 && shared) ? burrow_handle_count(b1) : -1;
+    u64  live3    = image_cache_live_count_for_test();
 
     // Evict the idle image: drops the cache ref -> B1 frees -> s1 (adopted) clunked.
-    int ev = image_cache_evict_idle_for_test();
+    int  ev       = image_cache_evict_idle_for_test();
+    u64  live4    = image_cache_live_count_for_test();
+    u64  freed4   = spoor_total_freed() - freed0;
+
+    TEST_EXPECT_EQ(live0, 0, "cache empty at start");
+    TEST_ASSERT(b1 != NULL, "first lookup creates a Burrow");
+    TEST_EXPECT_EQ(hc_miss, 2, "B1 handle_count = cache 1 + caller 1");
+    TEST_EXPECT_EQ(live1, 1, "one live entry");
+    TEST_EXPECT_EQ(creates, 1, "one create");
+    TEST_ASSERT(shared, "second lookup SHARES the same Burrow (cross-Proc text share)");
+    TEST_EXPECT_EQ(hc_hit, 3, "handle_count = cache 1 + 2 callers");
+    TEST_EXPECT_EQ(live2, 1, "still one entry");
+    TEST_EXPECT_EQ(hits, 1, "one hit");
+    TEST_EXPECT_EQ(freed2, 1, "redundant spoor s2 clunked on the hit");
+    TEST_EXPECT_EQ(hc_idle, 1, "back to the cache's single (strong) ref");
+    TEST_EXPECT_EQ(live3, 1, "still cached after callers drop");
     TEST_EXPECT_EQ(ev, 1, "one idle image evicted");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cache empty after evict");
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 2, "s1 clunked at B1 free (2 spoors total)");
+    TEST_EXPECT_EQ(live4, 0, "cache empty after evict");
+    TEST_EXPECT_EQ(freed4, 2, "s1 clunked at B1 free (2 spoors total)");
 }
 
 // Vote 114: the same identity off a Dev that does not answer content_versioned
@@ -179,26 +192,33 @@ void test_image_distinct_qid_distinct_entry(void) {
     image_cache_evict_idle_for_test();
     struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xA000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xB000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
-    TEST_ASSERT(b1 != b2, "distinct qid.path -> distinct Burrow");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two entries");
-    burrow_unref(b1);
-    burrow_unref(b2);
-    TEST_EXPECT_EQ(image_cache_evict_idle_for_test(), 2, "both evicted");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
+    bool created = b1 != NULL && b2 != NULL, distinct = b1 != b2;
+    u64  live    = image_cache_live_count_for_test();
+    if (b1) burrow_unref(b1);
+    if (b2) burrow_unref(b2);
+    int  evicted = image_cache_evict_idle_for_test();
+    u64  live2   = image_cache_live_count_for_test();
+    TEST_ASSERT(created, "both created");
+    TEST_ASSERT(distinct, "distinct qid.path -> distinct Burrow");
+    TEST_EXPECT_EQ(live, 2, "two entries");
+    TEST_EXPECT_EQ(evicted, 2, "both evicted");
+    TEST_EXPECT_EQ(live2, 0, "cleaned");
 }
 
 void test_image_qid_vers_bump_new_entry(void) {
     image_cache_evict_idle_for_test();
     struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xC000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xC000, 2), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
-    TEST_ASSERT(b1 != b2, "qid.vers bump (atomic replace) -> NEW entry (coherence)");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two entries");
-    burrow_unref(b1);
-    burrow_unref(b2);
+    bool created = b1 != NULL && b2 != NULL, distinct = b1 != b2;
+    u64  live    = image_cache_live_count_for_test();
+    if (b1) burrow_unref(b1);
+    if (b2) burrow_unref(b2);
     image_cache_evict_idle_for_test();
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
+    u64  live2   = image_cache_live_count_for_test();
+    TEST_ASSERT(created, "both created");
+    TEST_ASSERT(distinct, "qid.vers bump (atomic replace) -> NEW entry (coherence)");
+    TEST_EXPECT_EQ(live, 2, "two entries");
+    TEST_EXPECT_EQ(live2, 0, "cleaned");
 }
 
 // LARDER-DESIGN 12.6 (a new mapping): a file mapping keys its Image on the
@@ -267,13 +287,16 @@ void test_image_distinct_offset_distinct_entry(void) {
     image_cache_evict_idle_for_test();
     struct Burrow *b1 = image_lookup_or_create(mk_spoor(0xD000, 1), 0,         PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xD000, 1), PAGE_SIZE, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(b1 != NULL && b2 != NULL, "both created");
-    TEST_ASSERT(b1 != b2, "same qid, distinct file_offset -> distinct segment entry");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two segment entries");
-    burrow_unref(b1);
-    burrow_unref(b2);
+    bool created = b1 != NULL && b2 != NULL, distinct = b1 != b2;
+    u64  live    = image_cache_live_count_for_test();
+    if (b1) burrow_unref(b1);
+    if (b2) burrow_unref(b2);
     image_cache_evict_idle_for_test();
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
+    u64  live2   = image_cache_live_count_for_test();
+    TEST_ASSERT(created, "both created");
+    TEST_ASSERT(distinct, "same qid, distinct file_offset -> distinct segment entry");
+    TEST_EXPECT_EQ(live, 2, "two segment entries");
+    TEST_EXPECT_EQ(live2, 0, "cleaned");
 }
 
 // #45 audit F1: exec is part of the key. Two segments with an IDENTICAL file
@@ -288,20 +311,27 @@ void test_image_exec_discriminates_key(void) {
     // SAME identity + window; differ only in exec.
     struct Burrow *bx = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
     struct Burrow *br = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/false, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(bx != NULL && br != NULL, "both created");
-    TEST_ASSERT(bx != br, "same window, different X-ness -> DISTINCT Burrows (no dual-prot alias)");
-    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2, "TWO creates, not one");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 2, "two entries");
+    bool created = bx != NULL && br != NULL, distinct = bx != br;
+    u64  creates = image_cache_creates_for_test() - creates0;
+    u64  live    = image_cache_live_count_for_test();
     // A repeat of each exec-class HITS its own entry (sharing still works per class).
     u64 hits0 = image_cache_hits_for_test();
     struct Burrow *bx2 = image_lookup_or_create(mk_spoor(0xF000, 1), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
-    TEST_ASSERT(bx2 == bx, "exec=true repeat shares the exec entry");
-    TEST_EXPECT_EQ(image_cache_hits_for_test() - hits0, 1, "one hit (per-class sharing intact)");
-    burrow_unref(bx);
-    burrow_unref(bx2);
-    burrow_unref(br);
-    TEST_EXPECT_EQ(image_cache_evict_idle_for_test(), 2, "both entries evicted");
-    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
+    bool shares  = bx2 != NULL && bx2 == bx;
+    u64  hits    = image_cache_hits_for_test() - hits0;
+    if (bx)  burrow_unref(bx);
+    if (bx2) burrow_unref(bx2);
+    if (br)  burrow_unref(br);
+    int  evicted = image_cache_evict_idle_for_test();
+    u64  live2   = image_cache_live_count_for_test();
+    TEST_ASSERT(created, "both created");
+    TEST_ASSERT(distinct, "same window, different X-ness -> DISTINCT Burrows (no dual-prot alias)");
+    TEST_EXPECT_EQ(creates, 2, "TWO creates, not one");
+    TEST_EXPECT_EQ(live, 2, "two entries");
+    TEST_ASSERT(shares, "exec=true repeat shares the exec entry");
+    TEST_EXPECT_EQ(hits, 1, "one hit (per-class sharing intact)");
+    TEST_EXPECT_EQ(evicted, 2, "both entries evicted");
+    TEST_EXPECT_EQ(live2, 0, "cleaned");
 }
 
 void test_image_eviction_bounds_cache(void) {
@@ -364,8 +394,11 @@ void test_image_bad_arg_retains_spoor(void) {
     u64 freed0 = spoor_total_freed();
     struct Spoor *s = mk_spoor(0xE000, 1);
     struct Burrow *b = image_lookup_or_create(s, 0, /*length=*/0, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    u64 freed1 = spoor_total_freed() - freed0;
+    if (b) burrow_unref(b);  // a wrong create adopted s: its ref is the one to drop
+    else   spoor_clunk(s);   // the caller still owns it -> cleans up
+    u64 freed2 = spoor_total_freed() - freed0;
     TEST_ASSERT(b == NULL, "length==0 -> NULL");
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 0, "bad-arg path does NOT consume the spoor");
-    spoor_clunk(s);          // the caller still owns it -> cleans up
-    TEST_EXPECT_EQ(spoor_total_freed() - freed0, 1, "caller clunks its retained spoor");
+    TEST_EXPECT_EQ(freed1, 0, "bad-arg path does NOT consume the spoor");
+    TEST_EXPECT_EQ(freed2, 1, "caller clunks its retained spoor");
 }

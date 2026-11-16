@@ -371,6 +371,7 @@ void test_devctl_read_memory_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "pages"),     "uses page units");
     TEST_ASSERT(contains(buf, (size_t)got, "ledger:"),   "has ledger:");
     TEST_ASSERT(contains(buf, (size_t)got, "unpaired: 0\n"), "no pairing has broken");
+    TEST_ASSERT(contains(buf, (size_t)got, "overrefund: 0\n"), "no space count was refunded past zero");
 
     spoor_clunk(c);
 }

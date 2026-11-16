@@ -16,7 +16,7 @@
 // reaches for the same codec.
 //
 // Wire conventions (canonical reference: `kernel/include/thylacine/9p_wire.h`;
-// matches `stratum/v2/docs/reference/20-9p.md`):
+// matches `stratum/docs/reference/20-9p.md`):
 //   - All multi-byte integers are LITTLE-ENDIAN.
 //   - 9P-strings are length-prefixed (u16 LE), NOT NUL-terminated. The
 //     unpack returns a zero-copy slice into the caller's buffer.

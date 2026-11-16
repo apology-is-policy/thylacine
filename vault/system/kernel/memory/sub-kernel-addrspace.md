@@ -48,7 +48,7 @@ stay on `Proc`.
 | `addrspace_alloc(page_budget)` | fresh L0 table, `ref = owners = 1`; **NULL on a 0 budget** |
 | `addrspace_ref(as)` (tests build only; production takes `addrspace_try_ref`) | +1 owner and total lifetime; requires a live owner |
 | `addrspace_unref(as)` | -1 owner; last owner drains VMAs while retaining its total reference, then releases that reference |
-| `addrspace_pin/unpin(as)` (tests build only) | kernel descriptor lifetime only; final total drop destroys page tables and descriptor, never drains VMAs |
+| `addrspace_pin/unpin(as)` | kernel descriptor lifetime only, taken while a live owner or pin exists and cannot go across the call (the caller's own, or a linked Proc naming the space under `g_proc_table_lock`); final total drop destroys page tables and descriptor, never drains VMAs, so an unpin is never under `as->lock`. Production callers: the `/proc/<pid>/maps` render ([[sub-kernel-devproc]]), which pins under `g_proc_table_lock` and renders after it; the `/proc/<pid>/mem` copy ([[sub-kernel-devproc]]), which pins a space whose lock it found busy there, waits for that lock after it and unpins outside every lock (operator vote 132); and the weft orphan reaper ([[sub-kernel-weft]]), which pins there and unmaps after it, dropping the pin outside every lock |
 | `addrspace_clone(src, exempt)` | the COW fork; a fresh space, or NULL having freed everything |
 | `addrspace_owner_count(as)` | constructor/Proc ownership snapshot for sharing and last-driver predicates; not a lock |
 | `addrspace_ref_count(as)` | total lifetime including kernel pins; diagnostic only, not a mapping count |
@@ -102,7 +102,26 @@ which is the Linux memcg shape; and `addrspace_charge_table` /
 the Image cache's; the mapping is the holder's -- charged per leaf installed,
 refunded per leaf cleared; `file_pages`; the round-2 audit's F8)
 (`/proc/<pid>/status` `tables:` and `file:`; the capacity probe's data census
-is `pages:` minus both). The
+is `pages:` minus both).
+
+**Every uncharge floors its count at zero, and counts the refund it could
+not cover.** A refund past zero is a broken pairing -- a double refund, or a
+refund to the wrong space -- and the floor alone made it read as a smaller
+number wherever the count sat low, which is how a mutant that refunded a
+payer's leaves twice stayed green. So each of the five (`page_count`,
+`vma_count`, `shared_map_pages`, `file_pages`, `pgtable_pages`) still floors,
+and I-32 still fails clean, but the refund is also added to one global count,
+`addrspace_overrefunds`: `/ctl/memory`'s `overrefund:` line
+([[sub-kernel-devctl]]), and a per-test check in the suite's runner
+([[sub-substrate-kernel-suite]]), which reads and clears it in one exchange, while a
+test that refunds past zero on purpose takes back exactly the counts it made, floored
+(`addrspace_overrefunds_forgive_for_test`) -- the memory accounts' `unpaired` shape
+([[sub-kernel-accounts]]) for the space's own counts. `file_pages` and
+`pgtable_pages` refund `page_count` first, so one short refund can count
+twice; `addrspace.overrefund_is_counted` isolates each of the five, with an
+exact refund as its control.
+
+The
 address space carries a `u64 id` from a global counter at `addrspace_alloc`
 -- never reused, unlike a pid -- because the eager charge record
 ([[sub-kernel-burrow]]) must name the space that PAID: a non-CLOEXEC Loom that
@@ -305,10 +324,14 @@ counts the space's shared anonymous mappings, kept by `vma_insert_in` /
 the family joins the image only while it is nonzero, [[sub-kernel-proc]]) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4)
 / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins) /
+`quiesced` (set under `lock` by `addrspace_quiesce_mapped_devices` before its
+lock-free walk, never cleared: from then the list is the death path's, and the
+weft reaper, which reads it under `lock`, unmaps nothing more here;
+[[sub-kernel-death]]) /
 `paid_burrows` (the record-paid Burrows whose payer record names this space --
 private images since vote 118, shared anonymous memory since vote 119 -- under
 `g_payer_lock`, never `as->lock`; [[sub-kernel-burrow]]).
-The struct is 96 bytes. `addrspace_destroy` calls
+The struct is 112 bytes (`quiesced` sits in the tail padding after `shared_maps`). `addrspace_destroy` calls
 `burrow_payers_lapse` after `vma_drain_in`: the record-paid Burrows only this
 space held were freed by the drain (refunding a count that dies with the
 space), and every record left -- an image or a shared region surviving in a
@@ -464,11 +487,18 @@ and the I-32 axes bound far below.
 
 `alloc`/`ref`/`unref` are O(1) plus a page-table create/destroy. The clone
 is **three walks of the parent's VMA list** under one lock hold — two full
-passes plus the per-VMA build — so its cost is linear in region count, and
-it runs with interrupts off. A `fork` in an address space with tens of
-thousands of regions is therefore a long interrupts-off hold; nothing
-bounds it today beyond `PROC_VMA_MAX`, and that is recorded as a seam
-rather than measured.
+passes plus the per-VMA build — and the build inserts each child mapping
+after the last one built (`vma_insert_after_in` through a tail cursor), so
+the whole clone is linear in region count (plus the resident pages each
+Burrow clone shares). It was not linear before 2026-11-14: each child
+mapping was a `vma_insert_in` walk from the head of the child's list, so a
+clone of N regions visited about N^2/2 nodes -- some 2x10^9 at
+`PROC_VMA_MAX` (65536), an estimate never measured -- while every thread
+asking for the parent's lock waited (audit round 37 P2-1; OPEN-BUGS
+2026-11-14T17:55:58Z). `cow.clone_builds_in_order` pins the build at zero
+walk steps. A `fork` in an address space with tens of thousands of regions
+is still a long hold of the parent's lock, linear now, bounded only by
+`PROC_VMA_MAX`; that is recorded as a seam rather than measured.
 
 The counter CAS loops are uncontended in the common case. The COW lock is
 held for a single compare; contention exists only between concurrent
@@ -518,9 +548,14 @@ What a change must re-establish:
 
 ## Seams
 
-- **The clone's unbounded walk.** Three passes under one interrupts-off
-  hold, linear in VMA count. The [[lock-vma]] discipline requires
-  consumers to bound their own walks, and this one does not.
+- **The clone's unbounded walk.** Three passes under one hold of the
+  parent's lock, linear in VMA count (the build was quadratic until the
+  tail cursor, 2026-11-14). The [[lock-vma]] discipline requires consumers
+  to bound their own walks, and this one does not. Two /proc readers still
+  wait on a space's lock while holding `g_proc_table_lock` with interrupts
+  off (`format_maps`, the mem copy), so a long clone stalls them and every
+  CPU behind the table lock -- OPEN-BUGS 2026-11-14T17:55:58Z, the half
+  this change does not close.
 - **A per-page hashed lock array** for [[lock-cow]], recorded and
   deliberately not taken now: contention is only between concurrent
   breaks, each holding the lock for a single compare.
@@ -596,7 +631,11 @@ the last drop frees), `addrspace.kproc_has_none` (kproc's `as` stays NULL),
 closed on a kernel-only Proc), `addrspace.proc_alloc_in_shares` (an
 `RFPROC|RFMEM` child shares the parent's space), and
 `addrspace.share_drains_at_last_ref` (the VMA drain runs at the last unref, not
-the first death — the L-3 fix). The COW break's two arms are pinned by
+the first death — the L-3 fix). `cow.clone_builds_in_order` (`test_cow.c`):
+a parent of 64 alternating lazy and guard mappings clones to a child whose
+list is the parent's, in order, with every back link right, and the clone's
+inserts walk no node; the control is an ordinary insert above the child's
+mappings, whose walk visits every one of them. The COW break's two arms are pinned by
 [[spec-cow]]'s buggy cfgs and exercised at runtime through the fork path.
 
 B-1a (`kernel/test/test_protect.c`, [[sub-kernel-protect-witness]]):

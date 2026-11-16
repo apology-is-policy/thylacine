@@ -6,6 +6,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>     // the step counter keys on this thread
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 
@@ -279,6 +280,84 @@ void test_vma_linked_in_tracks_the_list(void) {
     p->state = 2;     // PROC_STATE_ZOMBIE
     proc_free(p);
     burrow_unref(burrow);
+}
+
+static struct Vma *ia_vma(struct Burrow *b, u64 lo, u64 hi) {
+    return vma_alloc(VA_BASE + lo * VA_PAGE, VA_BASE + hi * VA_PAGE, VMA_PROT_RW, b, 0);
+}
+
+// The cursor insert compares only the cursor and its successor, which is exact
+// on a sorted, disjoint list. The cursor check refuses an overlap and a span
+// that belongs before the cursor; the successor check refuses an overlap and a
+// span that belongs past the successor (not merely one that overlaps it). A
+// refused span then fits at its own cursor, and a span touching its neighbour's
+// end fits (half-open). No insert walks.
+void test_vma_insert_after_checks_neighbours(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *b = burrow_create_anon(VA_2MIB, false);
+    if (!b) { p->state = 2; proc_free(p); TEST_ASSERT(false, "burrow_create_anon failed"); }
+    struct AddrSpace *as = p->as;
+    const u64 steps0 = g_vma_insert_steps_for_test;
+
+    struct Vma *a = ia_vma(b, 2, 3), *c = ia_vma(b, 8, 9), *m = ia_vma(b, 5, 6);
+    struct Vma *x = ia_vma(b, 2, 4);      // overlaps the cursor a
+    struct Vma *z = ia_vma(b, 0, 1);      // belongs before the cursor a
+    struct Vma *y = ia_vma(b, 4, 6);      // overlaps a's successor m
+    struct Vma *h = ia_vma(b, 1, 3);      // at the head, overlapping it
+    struct Vma *w = ia_vma(b, 9, 10);     // touches c's end
+    struct Vma *k = ia_vma(b, 10, 11);    // belongs past the cursor a's successor m
+    if (!a || !c || !m || !x || !z || !y || !h || !w || !k) {
+        struct Vma *all[] = { a, c, m, x, z, y, h, w, k };
+        for (u32 i = 0; i < 9; i++) if (all[i]) vma_free(all[i]);
+        p->state = 2; proc_free(p); burrow_unref(b);
+        TEST_ASSERT(false, "vma_alloc failed");
+    }
+    g_vma_insert_steps_owner_for_test = current_thread();   // set past every early return
+    const int ra = vma_insert_after_in(as, false, a, NULL);   // the first mapping
+    const int rc = vma_insert_after_in(as, false, c, a);
+    const int rm = vma_insert_after_in(as, false, m, a);      // between a and c
+    const int rx = vma_insert_after_in(as, false, x, a);
+    const int rz = vma_insert_after_in(as, false, z, a);
+    const int ry = vma_insert_after_in(as, false, y, a);
+    const int rh = vma_insert_after_in(as, false, h, NULL);
+    // z goes in again only if it was refused: a linked mapping inserted twice is
+    // an extinction, and a broken check must read as a failure here, not a crash.
+    const int rz2 = rz != 0 ? vma_insert_after_in(as, false, z, NULL) : -2;
+    const int rw  = vma_insert_after_in(as, false, w, c);
+    const int rk  = vma_insert_after_in(as, false, k, a);
+    const u64 steps = g_vma_insert_steps_for_test - steps0;
+    g_vma_insert_steps_owner_for_test = NULL;
+
+    const struct Vma *want[] = { z, a, m, c, w };
+    bool order = true;
+    const struct Vma *prev = NULL, *v = as->vmas;
+    for (u32 i = 0; i < 5; i++, prev = v, v = v ? v->next : NULL)
+        if (v != want[i] || (v && v->prev != prev)) order = false;
+    if (v) order = false;
+
+    if (rx != 0) vma_free(x);                 // refused: never linked (else the drain frees it)
+    if (ry != 0) vma_free(y);
+    if (rh != 0) vma_free(h);
+    if (rz != 0 && rz2 != 0) vma_free(z);
+    if (rk != 0) vma_free(k);
+    vma_drain(p);
+    p->state = 2;                             // PROC_STATE_ZOMBIE
+    proc_free(p);
+    burrow_unref(b);
+
+    TEST_EXPECT_EQ(ra, 0, "the first mapping, at the head");
+    TEST_EXPECT_EQ(rc, 0, "a mapping after it");
+    TEST_EXPECT_EQ(rm, 0, "a mapping between the cursor and its successor");
+    TEST_EXPECT_EQ(rx, -1, "refused: overlaps the cursor");
+    TEST_EXPECT_EQ(rz, -1, "refused: belongs before the cursor");
+    TEST_EXPECT_EQ(ry, -1, "refused: overlaps the cursor's successor");
+    TEST_EXPECT_EQ(rh, -1, "refused: at the head, overlapping it");
+    TEST_EXPECT_EQ(rz2, 0, "control: the span refused after a fits at the head");
+    TEST_EXPECT_EQ(rw, 0, "control: a span touching its neighbour's end fits");
+    TEST_EXPECT_EQ(rk, -1, "refused: belongs past the cursor's successor, overlapping nothing");
+    TEST_ASSERT(order, "the list: z a m c w, each back link its predecessor");
+    TEST_EXPECT_EQ(steps, 0ull, "no insert walked the list");
 }
 
 // =============================================================================

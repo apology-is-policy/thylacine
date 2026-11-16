@@ -158,7 +158,10 @@ services. `pool` is the rest, the pages every user process may hold together.
 `ledger` is the same pages as the memory accounts count them, and it reads the same as
 `charged` unless pages are being allocated or freed at that moment. `unpaired` counts the
 times an account's charges and refunds failed to match, and it should stay at 0. Accounts
-limit nothing yet, so neither figure changes what a process may hold.
+limit nothing yet, so neither figure changes what a process may hold. `overrefund` counts
+the times a process's own page, mapping or page-table count was refunded more than it
+held. Such a count stops at 0 rather than going below it, and `overrefund` should read 0
+too.
 
 ### Judge the headroom
 

@@ -115,7 +115,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
 | `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation; an image with a W+X segment or an executable stack, from `execve` and `SYS_SPAWN_FULL_ARGV`, operator vote 33; `SYS_POSTNOTE` to a Proc that is not the caller's child, which Pouch's `kill` and the phenotype's report as `EPERM`; a file mapping of a descriptor not open for reading, as Linux's `mmap`, where one naming nothing or opened `O_PATH` is `EBADF`, natively and in the phenotype -- audit round 32, operator vote 116) |
 | `T_E_FAULT`     | 14    | `EFAULT`     | Bad address (uaccess fault on user VA) |
-| `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention; mount-busy) |
+| `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention, e.g. `/proc/<pid>/mem` after its eight busy tries; mount-busy) |
 | `T_E_EXIST`     | 17    | `EEXIST`     | Already exists (mount over existing point; create-excl) |
 | `T_E_XDEV`      | 18    | `EXDEV`      | Cross-device link: a rename whose two directories are on different devices -- two Devs, or two dev9p sessions. `SYS_RENAME` answers it before the rename's own Dev op, before a Dev's missing rename slot (`EOPNOTSUPP`) and before its permission checks, as Linux refuses a cross-mount rename before it asks the file system; `mv` reads it as "copy, then remove". Loom's `RENAMEAT` and `LINK` answer it for two handles on two devices -- another session or Dev, whichever handle it is -- before anything reaches the wire. A server answers it too, by value (the Mac app, for a rename between two shared folders). Kernels before it answered `EINVAL`, or `EOPNOTSUPP` when the source directory's Dev had no rename slot (#80's seam). Operator vote M15, 2026-11-14 (`dec-2026-11-14-exdev-and-names`) |
 | `T_E_NODEV`     | 19    | `ENODEV`     | The backing endpoint disappeared (the Loom device-gone terminal CQE; MENAGERIE §10); also a file mapping of a file whose Dev backs none (`Dev.may_back_mapping` unset: Linux's answer for a driver with no mmap; operator vote 113), except that the Linux phenotype maps `/dev/zero` as anonymous memory, as Linux does (vote 115) |
@@ -611,7 +611,7 @@ trigger surfaces; self + Fable audit before the arc closes):
 
 ## Cross-project coordination
 
-Stratum's `STM_E*` enum (`stratum/v2/src/include/stratum/error.h`)
+Stratum's `STM_E*` enum (`stratum/include/stratum/types.h`)
 predates this design and is NOT subsumed. Thylacine consumes Stratum
 errors via two surfaces:
 - 9P wire (Stratum's server translates `stm_status_t` -> 9P `Tlerror`
@@ -908,3 +908,18 @@ caught note ends answers -T_E_INTR (Linux phenotype only until ARCH 8.8.3's
 item 11c). A server's errno crosses by value inside [-4095,-2], -T_E_STALE
 for an unlinked file's fid among them, except its `EBADF`, which reads
 -T_E_IO.
+
+### The debug memory file (operator vote 134, 2026-11-16)
+
+Operator vote 134 (audit round 40 F5; DEBUG-FS-DESIGN 3.2). A read or write of
+`/proc/<pid>/mem` answers the bytes moved (0 for a hole, for a write to a
+read-only page and for a read of an execute-only page), -T_E_ACCES for every
+authority refusal (the 2026-10-06 rule, DEBUG-FS-DESIGN 3), -T_E_BUSY when the
+target address space's lock was busy on all eight tries of the copy (vote 132's
+trylock and wait), and the bare -1 for a target that is gone, not ALIVE or not
+stopped. It asks no debug-owner question: any caller with the authority may read
+or write a target somebody else holds stopped, which is why a write stamps the
+debug taint itself. EBUSY says only that the copy did not get the lock: the target
+was found stopped on every try, and a retry may succeed. Linux sleeps on the mm
+lock and answers -EIO only when a fatal signal ends the wait; 9front sleeps on the
+segment lock. Neither gives this answer.

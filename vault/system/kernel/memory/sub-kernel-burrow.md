@@ -468,7 +468,11 @@ baseline: `shared_anon.fork_shares_the_page` (one physical page behind both
 leaves; the private map beside it, one variable away, gets a copy; the fork
 charges the child the private clone's footprint and nothing for the shared
 page),
-`creator_pays_every_mint`, `unmap_keeps_the_page`, `creator_death_hands_over`,
+`creator_pays_every_mint`, `unmap_keeps_the_page`, `detach_keeps_the_page` (the
+whole-mapping `burrow_unmap` reaches the release with no type check of its own,
+where the munmap's range detach checks first, so the release's admission is
+all that keeps a sharer's page; added 2026-11-14 after procs7's MS7 showed no
+test reached that caller), `creator_death_hands_over`,
 `install_loser_refunds` (a probe runs the rival's fault between the loser's
 charge and its install), `protect_split_keeps_payer`,
 `dontneed_keeps_contents`, `refused_mint_refunds` (a full pool before the

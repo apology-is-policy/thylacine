@@ -1279,7 +1279,7 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // Loom-6: resolve + PIN one registered-buffer VA range into *out. On success
 // fills *out (with a burrow_ref HELD on out->burrow) and returns 0; on any
 // validation failure returns -1 having taken NO ref and left *out untouched.
-// Caller holds p->vma_lock (vma_lookup needs it; lock order vma_lock ->
+// Caller holds p->as->lock (vma_lookup needs it; lock order as->lock ->
 // burrow->lock matches burrow_map). The range must lie within ONE anonymous
 // (CPU-accessible, contiguous), writable VMA -- the same posture io_uring's
 // IORING_REGISTER_BUFFERS pins. The kva is computed from the Burrow's stable
@@ -1763,7 +1763,7 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     if (n > 0 && !bufs)                      return -T_E_INVAL;
 
     // Resolve + pin the WHOLE new set first (all-or-nothing, like
-    // loom_register_handles): under p->vma_lock so vma_lookup is stable. On any
+    // loom_register_handles): under p->as->lock so vma_lookup is stable. On any
     // failure roll back the refs taken so far and leave the live table untouched.
     struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {

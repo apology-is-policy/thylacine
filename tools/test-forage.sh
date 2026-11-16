@@ -384,5 +384,44 @@ out="$(WEBKIT_PIN="$PINSHA" webkit_checkout_ok "$TMP/dco1" "$TMP/port1" 2>&1)"; 
 if [[ $rc -ne 0 ]]; then ok "D5 extra hunk over a one-patch series refused"; else bad "D5 extra hunk over a one-patch series accepted"; fi
 assert_grep "$out" "not the pin plus the patch series" "D5 names the mismatch"
 
+# --- E. clone: a checkout left behind its upstream --------------------------------
+# A plain clone section is fetched, never merged. A checkout behind its upstream that
+# still lacks the probe is refused with the pull named and left where it was; a fresh
+# clone that has the probe is gathered.
+EUP="$TMP/eup"; mkdir -p "$EUP"
+$G -C "$EUP" init -q && echo a > "$EUP/old.txt" && $G -C "$EUP" add -A && $G -C "$EUP" commit -qm old
+$G clone -q "$EUP" "$TMP/eco"
+mkdir -p "$EUP/src" && echo p > "$EUP/src/probe.c" && $G -C "$EUP" add -A && $G -C "$EUP" commit -qm moved
+clone_fix() {   # PATH -> a manifest with one clone section
+    cat > "$TMP/clone.toml" <<EOF3
+[meta]
+schema = "1"
+
+[fork.thing]
+path = "$1"
+probe = "src/probe.c"
+repo = "file://$EUP"
+branch = "main"
+feeds = "thing feed"
+forageable = "clone"
+EOF3
+}
+runc() { FORAGE_ROOT="$TMP" MANIFEST="$TMP/clone.toml" "$FORAGE" "$@"; }
+clone_fix "$TMP/eco"
+h0="$(git -C "$TMP/eco" rev-parse HEAD)"
+out="$(runc fork.thing 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "E1 a checkout behind its upstream, without the probe, is not gathered"; else bad "E1 a behind checkout was reported gathered: $out"; fi
+assert_grep "$out" "1 commit\(s\) behind its upstream" "E1 says it is behind, and by how much"
+assert_grep "$out" "git -C $TMP/eco pull --ff-only" "E1 names the pull"
+if [[ "$(git -C "$TMP/eco" rev-parse HEAD)" == "$h0" ]]; then ok "E2 the checkout is left where it was"; else bad "E2 the gather moved a shared checkout"; fi
+clone_fix "$TMP/eco2"
+out="$(runc fork.thing 2>&1)"; rc=$?
+if [[ $rc -eq 0 && -f "$TMP/eco2/src/probe.c" ]]; then ok "E3 a fresh clone with the probe is gathered"; else bad "E3 fresh clone: rc=$rc $out"; fi
+# A probe only a build makes (the Go fork's bin/go) is absent after any clone; an
+# up-to-date clone is gathered all the same.
+clone_fix "$TMP/eco3"; sed -i.bak 's#^probe = .*#probe = "bin/built"#' "$TMP/clone.toml" && rm -f "$TMP/clone.toml.bak"
+out="$(runc fork.thing 2>&1)"; rc=$?
+if [[ $rc -eq 0 && -d "$TMP/eco3/.git" ]]; then ok "E4 an up-to-date clone whose probe a build makes is gathered"; else bad "E4 build-made probe: rc=$rc $out"; fi
+
 echo "== $pass passed, $fail failed =="
 [[ "$fail" -eq 0 ]]

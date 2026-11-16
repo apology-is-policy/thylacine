@@ -369,14 +369,21 @@ same reason the anon arm is; `len` is still deliberately unjudged.
 `MAP_ANONYMOUS` drops the descriptor and the offset; any other call takes ONE
 `sys_get_mapping_spoor` (`EBADF` for nothing or `O_PATH`; readability and,
 since 2026-11-14, writability reported, not judged) and holds that Spoor through every arm, so the devzero decision and
-the map are made on the same file. A zero length is `EINVAL` next. A readable
+the map are made on the same file. `MAP_HUGETLB` through any descriptor is `EINVAL`
+right after it, as `ksys_mmap_pgoff` answers for a file that is not hugetlbfs before
+`do_mmap` asks anything, and no file here is (`/dev/zero` included; audit round 39
+F6, read from v6.12's mm/mmap.c). A zero length is `EINVAL` next. A readable
 devzero becomes the anonymous call (flags gain `MAP_ANONYMOUS`, `fd` -1, offset
 0, the Spoor released) and is served exactly where `MAP_ANONYMOUS` is, as
 Linux's `mmap_zero` does; a write-only one is `EACCES`. The file arms run their
 window (`mmap_file_window` / `mmap_fixed_file_window`, shared with the native
 door), then `EACCES` for an unreadable descriptor, then the shared bodies
 (`mmap_file_body` / `mmap_fixed_file_body`, which consume the Spoor). A shape no
-arm serves is judged on its map type first: one that is not shared,
+arm serves is judged on the window first: a length past `BURROW_RESERVE_MAX` is
+`ENOMEM`, because `do_mmap` finds the window (`__get_unmapped_area`) before its
+file branch, as the anonymous side's order already had it (until 2026-11-14 the
+unserved tail answered its type or access errno first, OPEN-BUGS
+2026-11-14T14:50Z). Then its map type: one that is not shared,
 shared-validate or private (`VIV_MAP_TYPE`) is `EINVAL` whatever the descriptor,
 as `do_mmap`'s switch is (round 34 F5). Past that it answers `EACCES` for an
 unreadable descriptor and `ENOSYS` for a readable one, before any device is
@@ -389,8 +396,14 @@ lazy anonymous Burrow at the asked prot; `/dev/null` is the control, `ENOSYS`
 and `ENODEV`; write-only `EACCES`, `O_PATH` `EBADF`), and
 `vivarium.mmap_order_is_linux` pins the order, each refusal beside a call one
 step later that answers the next step's errno, with the native door's
-length-first order as a control; its last pair is a call with no map type
-(`EINVAL`) beside the same descriptor in a served type (`EACCES`).
+length-first order as a control; a call with no map type (`EINVAL`) sits beside
+the same descriptor in a served type (`EACCES`), and three unserved calls past the
+window (write-only, readable, typeless: `ENOMEM`) beside their in-window twins
+(`EACCES`, `ENOSYS`, `EINVAL`), with the bound pinned from both sides (past the file
+arm's own `BURROW_ATTACH_MAX`, and exactly `BURROW_RESERVE_MAX`: both `EACCES`; audit
+round 39 F3), and `MAP_HUGETLB` (`EINVAL` before the access mode and the window,
+after the descriptor's `EBADF`); `vivarium.mmap_dev_zero_is_anonymous` has its
+`/dev/zero` row.
 
 **Shared anonymous memory (operator votes 117 + 119, 2026-11-14; VIVARIUM
 6.21).** `MAP_SHARED|MAP_ANONYMOUS` (and its `MAP_FIXED` form) mints a

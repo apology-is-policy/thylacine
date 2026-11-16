@@ -123,11 +123,13 @@ Enforcement: the two-axis gate at each debug read/write site (the
 OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); every `/proc` authority refusal --
 this gate, kproc, either seal, the I-26 kill gate, the owner-or-hostowner reads and
 the none wall -- answers `EACCES`, as `/ctl/kernel-base` and `/ctl/kstack` do, ERRORS.md's binding rule for a permission denial
-(2026-10-06; it answered a bare -1 before, which pouch and Go read as `EPERM`), while
+(2026-10-06; it answered a bare -1 before, which Go read as `EPERM` and pouch as `EIO`), while
 a target that is gone, not ALIVE, not stopped, or held by another ctl stays the
-generic -1; the stopped-only guard on mem/reg access; HW
+generic -1, and a `mem` copy that found the target space's lock busy on all eight
+tries (3.2) answers `EBUSY` (operator vote 134); the stopped-only guard on mem/reg access; HW
 breakpoints (never software `BRK`) preserving I-12/I-36; the cross-Proc VA->PA
-walk confined to the target `pgtable_root` under the target `vma_lock`; the
+walk confined to the target `pgtable_root` under the target space's lock (only
+tried inside the table-lock hold, 3.2); the
 handle-lifetime-tied stop ownership. Validation: `specs/debug_stop.tla` (the
 stop/continue/step SM) + prose in this doc + ARCH §28 + the focused 8a audits +
 the SMP gate.
@@ -430,7 +432,24 @@ principal — not for a spawn that changes no identity, which publishes nothing 
 with, and not for a `CAP_HOSTOWNER` reader, whose admission never consulted the
 identity at all. So the ordering is no longer derived. `proc_seal` is the **only**
 writer of both bits and stamps them under `g_proc_table_lock`; every `/proc` reader
-that tests them runs under that same lock (`proc_for_each`) and renders there too. A
+that tests them runs under that same lock (`proc_for_each`) and renders there too --
+except `ns` and `maps`, which render after the lock drops (a namespace shed, or a
+fork's clone of the space, can hold the lock the render needs for a long walk) and then
+ask their admission again under the lock, refusing what they rendered if a seal landed
+meanwhile (`maps` holds its space by a lifetime pin taken under the lock). `mem`
+copies inside the hold that admitted it, but that hold never *waits* for the target
+space's lock, which a sharing sibling's fork can hold across a whole clone: when the
+lock is busy, `mem` pins the space, drops the hold without copying, waits for the
+space's lock outside with interrupts on, and then runs the resolve, the gates and the
+copy again from the start -- a resume, a death or a seal in the gap is judged afresh --
+up to eight tries (operator vote 132, 2026-11-15), and then it answers `EBUSY`
+(operator vote 134, 2026-11-16), never the generic -1, so a debugger can tell a busy
+lock from a target that resumed or died. Any holder can cause that answer, not only a
+sibling: a `maps` reader, which anyone may run against an unsealed target, renders
+under the same lock, and the lock is not fair, so readers that keep it busy can use
+up the eight tries (audit round 40 F5). The target was found stopped on every try,
+and a retry may succeed. Linux and 9front sleep on the lock instead and never give
+this answer. A
 read therefore happens entirely before a seal or entirely after it, whichever axis
 admitted the reader — including against a Proc that seals *itself* and then loads a
 secret. `SPAWN_PERM_SEAL`'s two bits land in one critical section, so no reader ever
@@ -540,8 +559,10 @@ under `g_proc_table_lock`*, which is also the lock `proc_exec_replace` swaps `->
 under and the lock every debug gate already holds. So it is exact at the instant of
 the access, and a fork racing alongside cannot defeat it: a child published after
 the check is bounded by the parent the check already weighed (I-2). The fast path
-is `addrspace_ref_count == 1` — no sharing, no walk — which is the overwhelmingly
-common case, so a per-operation join costs nothing in the ordinary one.
+is a sole owner, `addrspace_owner_count <= 1`, asked after the space's record of the
+holders that have left it (below; the share family's part, 3.4) -- no other owner, no
+walk -- which is the overwhelmingly common case, so a
+per-operation join costs nothing in the ordinary one.
 
 **`shared` is "references, minus the zombies the traversal saw".** It asks whether
 another Proc could still *use* the image, and a ZOMBIE cannot: an attach refuses a
@@ -1051,8 +1072,8 @@ Every `uaccess_*` and every `pgtable_root` reader today operates on the CURRENT
 - **Memory.** A non-growing VA->PA walk cloned from `mmu_install_user_pte`
   (descend L0..L3 via `pa_to_kva` per level, bail on any `!PTE_VALID`, read the
   leaf, `pa_to_kva(leaf_pa)` for direct-map access) against the *target's*
-  `pgtable_root`, taken under the target's `vma_lock` for a coherent VMA/PTE
-  snapshot. An empty L3 (an unfaulted `BURROW_TYPE_ANON_LAZY` or REVENANT
+  `pgtable_root`, taken under the target space's lock (`as->lock`, only tried
+  inside the table-lock hold, 3.2) for a coherent VMA/PTE snapshot. An empty L3 (an unfaulted `BURROW_TYPE_ANON_LAZY` or REVENANT
   `BURROW_TYPE_FILE` page) reads as "not resident" — the debug reader does NOT
   drive `userland_demand_page` on the target (that path assumes `current` is the
   faulting Proc and would fault-in on the debugger's behalf; v1.0 reports

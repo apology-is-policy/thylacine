@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-11-09
+updated: 2026-11-14
 ---
 ## Session registry retirement
 
@@ -787,6 +787,26 @@ about to step through. The reaper also holds the space by its lock rather than
 a reference, because this sweep reads a reference count of 1 as "no other
 holder": a transient reaper reference would have skipped a dying driver's
 device reset (vmaguard audit r2 F1).
+Both halves of the reaper's side changed on 2026-11-14 (next section).
+
+## The reaper's skip is read from the space (2026-11-14, corona)
+
+The quiesce's barrier now SETS `as->quiesced` under the space's lock instead of
+only taking and dropping it, and the reaper reads that flag under the same lock:
+it unmaps only while the flag is clear. The skip used to be read from the Proc,
+`PROC_FLAG_EXIT_CLOSING` and a lifetime `ref` of 1, while this sweep decides to
+walk on one OWNER (`addrspace_owner_count`); a kernel pin raises `ref` and not
+`owners` -- a loom private ring holds one through the close, since the quiesce
+runs before the handles close -- so a sole owner with a private ring walked
+unlocked while the reaper read 2 and unmapped under the walk (OPEN-BUGS
+2026-11-14T19:39:35Z, pre-existing since the reaper's check, 2026-10-08). The
+reaper now holds the space by a pin, taken under the table lock and used after
+it ([[sub-kernel-weft]]); the pin counts in `ref` only, so this sweep's owner
+read never sees it. Every caller of the walk sets the flag: the exit close and
+the reap (one owner) and the last owner's drain (none), so the flag means "a death
+path owns the list" and is never cleared. `weft.reap_skips_a_pinned_sole_owner`
+is the witness.
+
 
 ## Exec resets the image's devices; the last reference resets what is mapped (2026-10-08, execquiesce)
 

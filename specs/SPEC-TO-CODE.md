@@ -720,12 +720,12 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 
 ### Reference
 
-- `stratum/v2/docs/reference/20-9p.md` — Stratum's 9P2000.L server wire
+- `stratum/docs/reference/20-9p.md` — Stratum's 9P2000.L server wire
   semantics (the canonical contract Thylacine binds to).
-- `stratum/v2/docs/reference/23-9p_client.md` — Stratum's reference
+- `stratum/docs/reference/23-9p_client.md` — Stratum's reference
   C-side client (sync, one-op-at-a-time; Thylacine's kernel client
   pipelines per `ARCH §21`).
-- `stratum/v2/docs/OS-INTEGRATION.md` — OS-side integration manual.
+- `stratum/docs/OS-INTEGRATION.md` — OS-side integration manual.
 - `ARCHITECTURE.md §10.2` + `§14` + `§28` — Thylacine-side dialect +
   integration + invariants.
 
@@ -1433,7 +1433,7 @@ resolution maps onto the existing actions + invariants (the Loom-3 precedent):
 
 | Spec action / invariant | Loom-6a source location | Notes |
 |---|---|---|
-| `UserRegister(obj)` → `reg` slot | `kernel/loom.c::loom_register_buffers` / `loom_resolve_buf` | the registered-buffer TABLE is a second concrete realization of the abstract `reg` slot: `vma_lookup` → one writable anon Burrow → `burrow_ref` the pin + snapshot the contiguous-direct-map kva + len; all-or-nothing install (resolve under `p->vma_lock`, swap under `l->lock`, unref displaced outside both). |
+| `UserRegister(obj)` → `reg` slot | `kernel/loom.c::loom_register_buffers` / `loom_resolve_buf` | the registered-buffer TABLE is a second concrete realization of the abstract `reg` slot: `vma_lookup` → one writable anon Burrow → `burrow_ref` the pin + snapshot the contiguous-direct-map kva + len; all-or-nothing install (resolve under `p->as->lock`, swap under `l->lock`, unref displaced outside both). |
 | `Consume(o)`: `sqe_arg ∈ ValidArgs` + pin `reg` | `kernel/loom.c::loom_submit_payload` (was `loom_submit_rw`; generalized at 6b-1) | the submit gate: resolve + pin the file handle (`spoor_ref`) AND the registered buffer (an independent `burrow_ref`) together under `l->lock`; bounds-check the `[buf_off, buf_off+len)` slice against the KERNEL snapshot (`ActedArgValidated` — an OOB slice is `arg_bad` → rejected); rights-gate (the *builder* + the *required right* are opcode-selected: WRITE→`RIGHT_WRITE`, every read-shaped op→`RIGHT_READ`). |
 | `Dispatch(o)`: act on `snap_arg` + `snap_obj` (`ArgPinnedToSnapshot` + `ObjPinnedToSnapshot`) | `kernel/loom.c::loom_build_read`/`write`/`readdir`/`readlink`/`getattr`/`statfs` | the builder reads only the op's submit-time snapshot (`op->op_fid`/`op_offset`/`op_count`/`buf_kva`) under `c->lock`; WRITE reads the pinned buffer slice; never re-reads the shared SQE fields, never re-resolves `buf_idx`. |
 | `PostCqe(o)`: no re-resolve (`ObjPinnedToSnapshot`) | `kernel/loom.c::loom_payload_result` in `loom_async_complete` | the read-shaped ops copy the reply INTO the pinned buffer (`min(reply_len, op_count)`, under `c->lock`): READ/READDIR/READLINK stream bytes; GETATTR/STATFS copy the fixed `struct p9_attr`/`p9_statfs` (the Loom output ABI, `_Static_assert`-pinned). The result is the byte count; the pin is never re-resolved at completion. |
@@ -3304,7 +3304,7 @@ the kernel invariants):
   the R2-F2 non-vacuity check), and **the R2-F3 reaper**
   (`kernel/weft.c::weft_reap_sweep` + the kproc kthread) force-reclaims
   the orphaned client mapping after `WEFT_REAP_GRACE_NS`: the
-  cross-Proc unmap under `g_proc_table_lock` + the target's `vma_lock`
+  cross-Proc unmap under the target space's lock (pinned under `g_proc_table_lock`, locked after it)
   re-checks the G-2-audit-F1 identity guard, the budget uncharges, and
   the registration pin drops so the pixel chunk frees at reclaim.
   Regressions `weft.reap_{orphan_reclaimed,live_session_untouched,

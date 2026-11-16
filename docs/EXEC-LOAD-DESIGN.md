@@ -202,7 +202,7 @@ kernel-pinned `Spoor` (the executable's Chan) at a base offset. It holds:
 ### 4.3 The demand-page fault arm
 
 `userland_demand_page` already dispatches on `burrow_type` (ANON / MMIO / DMA)
-under `vma_lock`. The new `BURROW_TYPE_FILE` arm, on a fault into a text VMA:
+under `as->lock`. The new `BURROW_TYPE_FILE` arm, on a fault into a text VMA:
 
 1. Compute the file offset (`burrow base + in-VMA offset`).
 2. **Consult the Image cache** (§4.4) for the page at `(qid, offset)`. On a hit,

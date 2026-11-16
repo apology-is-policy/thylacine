@@ -137,7 +137,7 @@ Pre-commit: full test suite on default build. Pre-merge for invariant-bearing ch
 
 ### 3.4 Stratum is the reference deployment environment from Phase 5 onward
 
-Once Phase 5 (= §7 by header label) lands, all development work happens inside a Thylacine QEMU VM with Stratum as the root filesystem. **Eating the dog food** from Phase 5 onward. Stratum v2 is shipping today (2026 Q2) — the integration binds to its stable 9P2000.L wire surface + Unix-socket-bound `stratumd` daemon, exactly as documented in `stratum/v2/docs/OS-INTEGRATION.md`.
+Once Phase 5 (= §7 by header label) lands, all development work happens inside a Thylacine QEMU VM with Stratum as the root filesystem. **Eating the dog food** from Phase 5 onward. Stratum v2 is shipping today (2026 Q2) — the integration binds to its stable 9P2000.L wire surface + Unix-socket-bound `stratumd` daemon, exactly as documented in `stratum/docs/OS-INTEGRATION.md`.
 
 ### 3.5 No in-kernel drivers (with bounded exceptions)
 
@@ -466,7 +466,7 @@ None. This is the foundation phase.
 
 **Goal**: Thylacine's kernel speaks 9P2000.L + Stratum extensions; mounts Stratum at `/`; `stratumd` runs as a userspace driver-as-9P-server within Thylacine's process model; the `.key` sidecar is unwrapped via janus during boot; Stratum's `/ctl/` admin synthetic FS is consumed by Thylacine userspace; the system boots from a real Stratum pool. Pipelined 9P client achieves the latency + throughput budgets per VISION §4.5.
 
-**Stratum v2 status**: feature-complete and shipping (2026 Q2). The 9P2000.L wire surface + Stratum extensions + libstratum-9p ABIs are stable per `stratum/v2/docs/OS-INTEGRATION.md`. **No external delivery dependency** — Phase 5 entry consumes a known-stable integration target.
+**Stratum v2 status**: feature-complete and shipping (2026 Q2). The 9P2000.L wire surface + Stratum extensions + libstratum-9p ABIs are stable per `stratum/docs/OS-INTEGRATION.md`. **No external delivery dependency** — Phase 5 entry consumes a known-stable integration target.
 
 ### 7.1 The integration model
 
@@ -474,7 +474,7 @@ Thylacine binds to Stratum the same way Linux v9fs does, with adjustments for Th
 
 - **`stratumd` is a userspace daemon under Thylacine's process model**. One process per Stratum pool. Bound to a Unix socket (Thylacine's equivalent: a 9P endpoint reachable inside the territory). Started early in the boot sequence as one of the first non-kernel procs; survives root pivot.
 - **Two sockets per stratumd**: the FS socket (Thylacine's kernel 9P client mounts this at `/`) and the `/ctl/` socket (admin / observability synthetic FS; mounted at `/srv/stratum-ctl/` by userspace tools).
-- **`.key` sidecar is a separate-factor security boundary**. Stored separately from the pool block device — initramfs unwraps it before `stratumd` consumes it. Key-delivery options per `stratum/v2/docs/OS-INTEGRATION.md §5`: passphrase + Argon2id, TPM-sealed, hardware token, network keyserver, Shamir split. Thylacine v1.0 ships passphrase + Argon2id as the default; janus handles the unwrap.
+- **`.key` sidecar is a separate-factor security boundary**. Stored separately from the pool block device — initramfs unwraps it before `stratumd` consumes it. Key-delivery options per `stratum/docs/OS-INTEGRATION.md §5`: passphrase + Argon2id, TPM-sealed, hardware token, network keyserver, Shamir split. Thylacine v1.0 ships passphrase + Argon2id as the default; janus handles the unwrap.
 - **`stratum` unified CLI** lives in `/sbin/stratum` (carried in the ramfs initially, lives on Stratum-mounted `/sbin/` post-pivot).
 
 ### 7.2 Deliverables
@@ -484,7 +484,7 @@ Thylacine binds to Stratum the same way Linux v9fs does, with adjustments for Th
 The Phase 5 9P stack lands as a sequence of bounded sub-chunks, each tightly scoped + testable + revertable. The decomposition mirrors the architectural layering described in ARCH §9.6 and §10.
 
 Codec + session + transport + client (the byte-pipe layer):
-- `kernel/9p_wire.c` (**P5-wire / -io / -meta / -mutation**): 9P2000.L wire codec — message framing, marshalling, demarshalling per `stratum/v2/docs/reference/20-9p.md`. Covers the 9P2000.L standard surface (handshake + walk + clunk + IO + metadata + mutation). Stratum extensions (`Tsync`, `Treflink`, `Tbind`, `Tunbind`, `Txattrwalk`, `Txattrcreate`, `Tgetxattr`, `Tsetxattr`, `Tlistxattr`, `Tremovexattr`) land in `-stratum-ext` and `-xattr` sub-chunks; lock family in `-lock`. **All landed except `-lock` / `-xattr` / `-stratum-ext`** (deferred low-priority).
+- `kernel/9p_wire.c` (**P5-wire / -io / -meta / -mutation**): 9P2000.L wire codec — message framing, marshalling, demarshalling per `stratum/docs/reference/20-9p.md`. Covers the 9P2000.L standard surface (handshake + walk + clunk + IO + metadata + mutation). Stratum extensions (`Tsync`, `Treflink`, `Tbind`, `Tunbind`, `Txattrwalk`, `Txattrcreate`, `Tgetxattr`, `Tsetxattr`, `Tlistxattr`, `Tremovexattr`) land in `-stratum-ext` and `-xattr` sub-chunks; lock family in `-lock`. **All landed except `-lock` / `-xattr` / `-stratum-ext`** (deferred low-priority).
 - `kernel/9p_session.c` (**P5-session**): per-session state — tag pool (`I-10` per-session tag uniqueness), fid table (`I-11` per-session fid identity stable across open lifetime), outstanding-request table, send/receive dispatch. Pipelined per ARCH §10 (out-of-order completion + flow control). **Landed.**
 - `kernel/9p_transport.c` + `kernel/9p_transport_loopback.c` (**P5-transport**): frame-aware byte pipe + vtable-based backend abstraction (initially loopback for testing; future Spoor-over-Unix-socket implements the same vtable). State machine INIT → OPEN → CLOSED + ERROR sink. Partial-read aggregation. Session composition helper (`p9_transport_exchange`). **Landed.**
 - `kernel/9p_client.c` (**P5-client**): high-level wrapper consolidating codec + session + transport into 25 op functions (lifecycle / handshake / walk / clunk / IO / metadata / mutation). Signed-errno return convention (0 / -EINVAL / -EBUSY / -EIO / -ecode). **Landed.**
@@ -598,8 +598,8 @@ POSIX coverage on Stratum:
 
 ### 7.6 Risks
 
-- **9P client correctness**: fid management, walk chains, clunk on close — these are subtle. Stratum's server is strict (it's been audit-loop-hardened through Stratum's R0..R136+ series). Mitigation: spec first; integrate-with-Stratum testing from day one — `tools/test.sh` boots Thylacine against a real Stratum pool produced by `stratum/v2/tools/stratum/`.
-- **Stratum extensions semantics**: `Tsync` / `Treflink` / `Tbind` / `Txattrwalk` are Stratum-specific; their semantics must be exactly aligned with `stratum/v2/docs/reference/20-9p.md`. Mitigation: exhaustive bidirectional integration tests; spec the extensions in `9p_client.tla`.
+- **9P client correctness**: fid management, walk chains, clunk on close — these are subtle. Stratum's server is strict (it's been audit-loop-hardened through Stratum's R0..R136+ series). Mitigation: spec first; integrate-with-Stratum testing from day one — `tools/test.sh` boots Thylacine against a real Stratum pool produced by `stratum/tools/stratum/`.
+- **Stratum extensions semantics**: `Tsync` / `Treflink` / `Tbind` / `Txattrwalk` are Stratum-specific; their semantics must be exactly aligned with `stratum/docs/reference/20-9p.md`. Mitigation: exhaustive bidirectional integration tests; spec the extensions in `9p_client.tla`.
 - **Boot sequencing**: ramfs → Stratum transition is a one-shot operation that must be correct. Mitigation: documented sequence (this section + OS-INTEGRATION.md §4); failure path drops to UART recovery shell with `stratum fs verify` available; the recovery shell is also where `STM_ECORRUPT` / `STM_EBADTAG` / `STM_EBADKEY` / `STM_EWEDGED` get surfaced and resolved.
 - **Key lifetime**: the unwrapped key sits in RAM between janus-unwrap and stratumd-consume. Mitigation: `mlock` + `MADV_DONTDUMP` per OS-INTEGRATION.md §5; `explicit_bzero` the ramfs copy after `stratumd` acknowledges consumption.
 - **Pipelining bug surface**: out-of-order completion is the load-bearing throughput claim; bugs here are subtle (e.g., a fid clunked on session A is reused on session B before the server confirms; a stale Rread arrives after the fid is recycled). Mitigation: `9p_client.tla` covers it; integration tests stress it.

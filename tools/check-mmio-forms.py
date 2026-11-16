@@ -44,7 +44,7 @@ RAM_SITES = {
     'kernel/mmio_handle.c': (1, 'wiping a claims array on the stack'),
     'kernel/test/test_devproc.c': (10, 'hand-built stack frames'),
     'kernel/test/test_pci_irq.c': (7, 'a virtqueue in a DMA page'),
-    'kernel/test/test_shared_anon.c': (4, 'a shared anonymous page through its kernel alias'),
+    'kernel/test/test_shared_anon.c': (6, 'a shared anonymous page through its kernel alias'),
 }
 ROOTS = ('arch', 'kernel', 'mm', 'lib')
 TESTS = 'kernel/test/'
@@ -150,7 +150,7 @@ def self_test():
         'kernel/mmio_handle.c': 'void z(char *c) { ((volatile u8 *)c)[0] = 0; }\n',
         'kernel/test/test_devproc.c': 'void t(u64 *m) { ' + '*(volatile u64 *)m = 1; ' * 10 + '}\n',
         'kernel/test/test_pci_irq.c': 'void t(u64 *m) { ' + '*(volatile u16 *)m = 1; ' * 7 + '}\n',
-        'kernel/test/test_shared_anon.c': 'void t(u64 *m) { ' + '*(volatile u64 *)m = 1; ' * 4 + '}\n',
+        'kernel/test/test_shared_anon.c': 'void t(u64 *m) { ' + '*(volatile u64 *)m = 1; ' * 6 + '}\n',
         'kernel/test/test_map.c': 'void t(void) { void *k = mmu_map_mmio(0, 1); (void)k; }\n',
         'arch/arm64/mmu.c': 'void *mmu_map_mmio(u64 pa, u64 n) { return 0; }\n',
         'arch/arm64/mmu.h': 'void *mmu_map_mmio(u64 pa, u64 n);\n',

@@ -240,9 +240,9 @@ so a same-principal target holding a clearance the debugger lacks is refused —
 `dlv` attaching to an imperium-elevated shell, or to `stratumd`'s
 `CAP_TCB_DIAL`-holding home proxy, needs `CAP_DEBUG` (or an equally-elevated
 debugger). Launch-then-attach is unaffected: caps only shrink at fork, so a
-debugger always covers what it spawned. Note also that a refused `attach` write is
-a bare `-1` shared with "not found", "not ALIVE" and `Einuse`, so the backend
-cannot yet tell the operator which one it hit (tracked).
+debugger always covers what it spawned. A refused `attach` write answers `EACCES` for
+an authority refusal (every /proc authority refusal does, since 2026-10-06); the
+bare -1 is left for "not found", "not ALIVE" and `Einuse`.
 
 **`dlv exec <bin>` / `dlv debug` (launch — 8c-1/8c-4).** Delve must gain control
 *before* the Go runtime runs, to set breakpoints before `main.main`. Thylacine

@@ -421,8 +421,9 @@ void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
 void test_weft_sharer_charge_released_at_detach(void);
 void test_weft_reap_kproc_pid_survives_walk(void);
-void test_weft_reap_unlocks_the_space_it_locked(void);
+void test_weft_reap_unmaps_the_space_it_pinned(void);
 void test_weft_reap_skips_an_exit_closing_proc(void);
+void test_weft_reap_skips_a_pinned_sole_owner(void);
 void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
 void test_weft_reap_orphan_reclaimed(void);
 void test_weft_reap_live_session_untouched(void);
@@ -457,6 +458,7 @@ void test_demand_page_file_cached_image_takes_no_payer(void);
 void test_shared_anon_fork_shares_the_page(void);
 void test_shared_anon_creator_pays_every_mint(void);
 void test_shared_anon_unmap_keeps_the_page(void);
+void test_shared_anon_detach_keeps_the_page(void);
 void test_shared_anon_creator_death_hands_over(void);
 void test_shared_anon_install_loser_refunds(void);
 void test_shared_anon_protect_split_keeps_payer(void);
@@ -581,6 +583,7 @@ void test_addrspace_kproc_has_none(void);
 void test_addrspace_charge_helpers_refuse_without_as(void);
 void test_addrspace_share_drains_at_last_ref(void);
 void test_addrspace_proc_alloc_in_shares(void);
+void test_addrspace_overrefund_is_counted(void);
 void test_proc_rfork_rfmem_refuses_without_addrspace(void);
 // LINEAGE L-4b: the per-page COW share count.
 void test_cow_set_sole_never_inherits(void);
@@ -590,6 +593,7 @@ void test_burrow_lazy_free_is_conditional_on_share(void);
 void test_cow_burrow_clone_shares_resident_pages(void);
 void test_cow_addrspace_clone_shares_and_writeprotects(void);
 void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
+void test_cow_clone_builds_in_order(void);
 void test_cow_clone_shares_readonly_eager_anon(void);
 void test_cow_break_read_then_write_copies(void);
 void test_cow_break_sole_holder_takes_in_place(void);
@@ -608,6 +612,7 @@ void test_vma_insert_overlap_rejected(void);
 void test_vma_insert_sorted_invariant(void);
 void test_vma_drain_releases_all(void);
 void test_vma_linked_in_tracks_the_list(void);
+void test_vma_insert_after_checks_neighbours(void);
 void test_vma_find_gap_smoke(void);
 void test_vma_find_gap_no_fit(void);
 void test_vma_find_gap_constraints(void);
@@ -1021,6 +1026,7 @@ void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
 void test_devproc_maps_shared_anon(void);      // votes 117 + 119
+void test_devproc_maps_render_after_the_walk(void);
 void test_devproc_maps_code_visible(void);     // B-2b audit F2
 void test_devproc_maps_code_redacted(void);    // B-2b audit F2
 void test_devproc_maps_code_truncated(void);   // B-2b audit F2
@@ -1093,6 +1099,7 @@ void test_spawn_env_refusals(void);
 void test_spawn_env_account_tail(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
+void test_devproc_mem_waits_outside_the_hold(void);
 void test_devproc_debug_regs(void);
 void test_devproc_thread_files_name_their_thread(void);
 void test_devproc_thread_step_names_its_thread(void);

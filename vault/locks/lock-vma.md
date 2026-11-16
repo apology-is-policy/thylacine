@@ -6,7 +6,7 @@ kind: spin
 orders-before: [lock-burrow, lock-cow, lock-buddy-zone]
 guards: "one address space's vmas list, and -- for the cap DECISION only -- the three I-32 counters charged against it"
 created: 2026-08-02
-updated: 2026-08-06
+updated: 2026-11-15
 ---
 ## Discipline
 
@@ -15,9 +15,10 @@ multi-thread Proc's address space genuinely concurrent. The rule is total:
 **every mutator of the `vmas` list and the demand-page reader hold it.** A
 walk that skips it is reading a list another Thread may be splicing.
 
-Two exemptions, both by construction rather than by argument: the exec setup path
-and the teardown drain run single-threaded, before any peer exists or after all
-have gone.
+One exemption, by construction rather than by argument: the exec setup path runs
+single-threaded, before any peer exists. The teardown drain used to be the second;
+since G-3 it takes the lock too, so a weft reap racing it serializes instead of
+draining under it.
 
 **It is per-ADDRESS-SPACE, not per-Proc**, since the L-1 extraction moved it off
 `struct Proc` — and that is not a rename. Under `rfork(RFPROC|RFMEM)` and after a
@@ -33,20 +34,27 @@ takes *another* Proc's `vma_lock`", and now two sharers of one address space tak
 **the same** lock rather than each its own — so the ordering, not the
 disjointness, is what carries it.
 
-Inbound, it is a **leaf below [[lock-proc-table]]**, and three callers rely on
-that: the cross-Proc memory copy for a debugged target, the address-space render,
-and the hardware-driver map paths all take the table lock first. Nothing held
-under it reaches back for the table lock.
+Inbound, it sits **below [[lock-proc-table]]**: nothing held under it reaches
+back for the table lock. No table-lock hold *waits* for it, though, because that
+hold is global and masks interrupts while a space's holder can run long. The
+cross-Proc memory copy for a debugged target only *tries* it under the hold; on a
+busy lock it pins the space, drops the hold, waits with interrupts on, and runs
+again from the start (operator vote 132). The `/proc/<pid>/maps` render and the
+weft reaper pin the space under the hold and take its lock after the walk.
 
-**Bounded hold is a correctness property, not a courtesy.** It is taken with
-interrupts off, and the address space may legitimately hold tens of thousands of
-regions, so every consumer bounds its own walk: the debug memory copy clamps to a
+**Bounded hold is a correctness property, not a courtesy.** Every hold is
+non-preemptible (`spin_lock` leaves interrupts as they were), and the address space
+may legitimately hold tens of thousands of regions, so every consumer bounds its own walk: the debug memory copy clamps to a
 page per call, and the `/proc/<pid>/maps` render commits whole rows and stops when
 its output buffer fills — which bounds the walk by the *buffer*, not by the region
 count. Removing that truncation without re-deriving the bound turns a diagnostic
-read into a multi-millisecond interrupts-off hold. `addrspace_clone` is the one
-consumer that does **not** bound its walk (three passes, linear in region count)
-and is recorded as a seam on [[sub-kernel-addrspace]].
+read into a multi-millisecond non-preemptible hold. Three holders do **not** bound
+their walk by a buffer: `addrspace_clone` (three passes, linear in region count;
+a seam on [[sub-kernel-addrspace]]), the last owner's drain (`vma_drain_in`, linear
+in region count plus each mapping's release), and the weft reaper's force-reclaim,
+which unmaps a whole weave -- thousands of pages, each uninstall waiting on a
+barrier. None of them runs under the table lock, and a `mem` copy that meets one
+waits outside the hold (DEBUG-FS-DESIGN 3.2).
 
 Nothing that sleeps may run under it. The demand-page path that *does* block —
 faulting a file-backed page in over 9P — is structured to do its blocking read

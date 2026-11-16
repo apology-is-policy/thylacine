@@ -525,7 +525,7 @@ void weft_binding_release(struct weft_binding *b);
 // identity), and (c) the VMA at the recorded guest_va is STILL backed by this
 // weave's Burrow (the F1 guard: after an explicit SYS_BURROW_DETACH, an
 // unrelated fresh mapping can land at the same VA -- it must survive the
-// close untouched). Takes closer->vma_lock; the unmap uncharges the shared-in
+// close untouched). Takes closer->as->lock; the unmap uncharges the shared-in
 // budget via the SHARED_IN pairing. Returns 0 (unmapped) or -1 (skipped --
 // wrong kind / wrong Proc / no live weave mapping at the VA). Called by
 // dev9p_close BEFORE weft_binding_release; unit-driven directly (the closer
@@ -563,12 +563,12 @@ int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer);
 // teardown instead -- bounded, just not early.
 //
 // Lock order (the audit F1 fix): g_weft_reap_lock -> g_proc_table_lock
-// (irqsave; the FIND-AND-LOCK walk ONLY -- the per-page TLBI unmap never
-// runs under it) -> vma_lock (acquired under gptl, HELD PAST its release;
-// vma_drain now takes vma_lock, so the target's reap serializes here) ->
+// (irqsave; the FIND-AND-PIN walk ONLY: it pins the target's space and takes
+// no space lock), and, after the walk, g_weft_reap_lock -> as->lock (the
+// per-page TLBI unmap; vma_drain takes it too, so the reap serializes here) ->
 // v->lock -> buddy. Acyclic: register runs lock-free (after the map's
-// vma_lock drop), unregister runs lock-free (dev9p_close), and nothing
-// under gptl/vma takes the reap lock. The deferred pin drop (burrow_unref
+// as->lock drop), unregister runs lock-free (dev9p_close), and nothing
+// under gptl or as->lock takes the reap lock. The deferred pin drop (burrow_unref
 // outside the reap lock) follows the weft_share_unregister discipline.
 
 // The dead-session grace before a force-reclaim, and the sweep cadence.
