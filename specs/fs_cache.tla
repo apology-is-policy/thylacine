@@ -126,6 +126,21 @@
 (*                                 (NoWrongRead counterexample); its flush   *)
 (*                                 puts the older content back (NoLostStage, *)
 (*                                 with NoWrongRead left out).               *)
+(*   fs_cache_buggy_unpinned.cfg                                             *)
+(*                                 BUGGY_NO_PIN (votes M24/M24a) -- a stage  *)
+(*                                 starts while another open's write-through *)
+(*                                 is in flight (its leg passed, its wire op *)
+(*                                 not yet landed): the write then lands     *)
+(*                                 over the newer stage (audit round 5 of    *)
+(*                                 M15, F1). InvariantsWb counterexample.    *)
+(*   fs_cache_wb_nopop.cfg        fs_cache_wb without the write-populate:    *)
+(*                                 the green control one variable from the   *)
+(*                                 peer cfgs, which run without it.          *)
+(*   fs_cache_buggy_peer_unordered_lost.cfg                                  *)
+(*                                 BUGGY_PEER_WRITE_UNORDERED with           *)
+(*                                 NoWrongRead left out: the holder's flush  *)
+(*                                 puts the older content back (NoLostStage  *)
+(*                                 counterexample).                          *)
 (*   fs_cache_buggy_skip_keeps_entry.cfg                                     *)
 (*                                 BUGGY_SKIP_KEEPS_ENTRY + external writer  *)
 (*                                 -- an open whose populate the gen guard   *)
@@ -137,7 +152,14 @@
 (*   M23 (LARDER-DESIGN 12.6): a file's held bytes are the CLIENT's, so a    *)
 (*   read through another open must not miss them (the observing legs: an    *)
 (*   open's or a stat's populate is judged by the Read that serves it) and a *)
-(*   write through another open lands after them (the changing legs).        *)
+(*   write through another open lands after them (the changing legs). Votes *)
+(*   M24/M24a: a write-through is two steps, its leg (OwnWriteBegin) and its *)
+(*   wire op with the invalidate (OwnWriteLand), and the leg pins the file   *)
+(*   so no stage starts in between. The fidless cached open's own leg is     *)
+(*   beneath the model (its per-open snapshot is not modelled); a runtime    *)
+(*   test pins it. So is the own install's gen guard (13): FlushClose lands  *)
+(*   and installs in one step, and with the pin no write lands in between;   *)
+(*   the guard is the impl's second layer, pinned by a runtime test.         *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -273,10 +295,14 @@ CONSTANTS
                             \*   may land while another open's stage is held:
                             \*   the changing legs of vote M23 missing, so the
                             \*   older stage lands after the newer write.
-    BUGGY_SKIP_KEEPS_ENTRY  \* BOOLEAN -- TRUE: an open whose populate the gen
+    BUGGY_SKIP_KEEPS_ENTRY, \* BOOLEAN -- TRUE: an open whose populate the gen
                             \*   guard discards keeps the entry from before it,
                             \*   which a stat through the open then serves
                             \*   (audit round 4 of M15, F4).
+    BUGGY_NO_PIN            \* BOOLEAN -- TRUE: a write-through's leg pins
+                            \*   nothing, so another open may start staging
+                            \*   while the write is in flight (votes M24/M24a;
+                            \*   audit round 5 of M15, F1).
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
@@ -299,6 +325,8 @@ ASSUME /\ Capacity \in Nat
        \* The peer legs exist only where something stages.
        /\ ((BUGGY_PEER_SKIPS_STAGED \/ BUGGY_PEER_WRITE_UNORDERED) => EnableStaging)
        /\ BUGGY_SKIP_KEEPS_ENTRY \in BOOLEAN
+       /\ BUGGY_NO_PIN \in BOOLEAN
+       /\ (BUGGY_NO_PIN => EnableStaging)
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
@@ -320,11 +348,14 @@ VARIABLES
                  \*   open-time revalidation and no write has happened to f since
                  \*   (the close-to-open "known fresh" mark). Set by Open; cleared
                  \*   by any write to f and by Evict.
-    bad_read     \* BOOLEAN -- monotonic history flag: TRUE once any Read has
+    bad_read,    \* BOOLEAN -- monotonic history flag: TRUE once any Read has
                  \*   served a token that did NOT equal the file's current content
                  \*   at the moment of the read. NoWrongRead == ~bad_read.
+    wpend        \* [Files -> [Opens -> BOOLEAN]] -- a write-through by the open
+                 \*   whose leg has run and whose wire op has not landed: the pin
+                 \*   (LARDER-DESIGN 12.6, votes M24/M24a).
 
-vars == <<svr_cvers, guest_cvers, stage, cache, validated, bad_read>>
+vars == <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend>>
 
 ValidSet == {f \in Files : cache[f].valid}
 
@@ -333,6 +364,9 @@ Holders(f)   == {o \in Opens : stage[f][o] # 0}
 AnyStaged(f) == Holders(f) # {}
 \* No open other than o holds a stage of f.
 PeersClear(f, o) == \A p \in Opens \ {o} : stage[f][p] = 0
+\* No write-through of f is in flight through an open other than o: no pin of
+\* another open stands. BUGGY_NO_PIN ignores the pins.
+Unpinned(f, o) == BUGGY_NO_PIN \/ \A p \in Opens \ {o} : ~wpend[f][p]
 
 TypeOk ==
     /\ svr_cvers \in [Files -> 0..MaxCvers]
@@ -341,6 +375,7 @@ TypeOk ==
     /\ cache \in [Files -> [valid : BOOLEAN, cvers : 0..MaxCvers]]
     /\ validated \in [Files -> BOOLEAN]
     /\ bad_read \in BOOLEAN
+    /\ wpend \in [Files -> [Opens -> BOOLEAN]]
 
 (***************************************************************************)
 (* Cold start: the server holds every file at content-version 0, the       *)
@@ -353,6 +388,7 @@ Init ==
     /\ cache     = [f \in Files |-> [valid |-> FALSE, cvers |-> 0]]
     /\ validated = [f \in Files |-> FALSE]
     /\ bad_read  = FALSE
+    /\ wpend     = [f \in Files |-> [o \in Opens |-> FALSE]]
 
 (***************************************************************************)
 (* Open(f) -- the close-to-open REVALIDATION + populate point. The guest    *)
@@ -387,7 +423,7 @@ Open(f) ==
              /\ validated' = [validated EXCEPT ![f] = TRUE]
           \/ /\ ~is_hit                        \* miss or stale: drop + refetch
              /\ Refetch(f, fresh)
-    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read, wpend>>
 
 (***************************************************************************)
 (* OpenSkipped(f) -- an Open whose populate the gen guard discards (larder.c  *)
@@ -405,7 +441,7 @@ OpenSkipped(f) ==
               /\ validated' = [validated EXCEPT ![f] = cache[f].valid]
          ELSE /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
               /\ validated' = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read, wpend>>
 
 (***************************************************************************)
 (* Read(f) -- serve f from a valid cached entry, WITHOUT re-fetching cvers   *)
@@ -433,29 +469,42 @@ Read(f, o) ==
     \/ \* the staged-overlay arm: the holder's own read within its run.
        /\ stage[f][o] # 0
        /\ bad_read' = (bad_read \/ stage[f][o] # guest_cvers[f])
-       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated>>
+       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, wpend>>
     \/ \* the cache arm. CORRECT only when no open holds a stage of f (the
        \* impl's overlay-wins split, and the observing legs' flush).
        /\ (stage[f][o] = 0 \/ BUGGY_READ_SKIPS_STAGED)
        /\ (PeersClear(f, o) \/ BUGGY_PEER_SKIPS_STAGED)
        /\ cache[f].valid
        /\ bad_read' = (bad_read \/ cache[f].cvers # guest_cvers[f])
-       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated>>
+       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, wpend>>
 
 (***************************************************************************)
-(* OwnWrite(f) -- the guest writes f: bump the content-version and, in the   *)
-(* CORRECT path, invalidate write-through (drop the cached entry) so the     *)
-(* next read misses + refetches the post-write content. Clears `validated`.  *)
+(* OwnWrite(f) -- the guest writes f through, in two steps: OwnWriteBegin is  *)
+(* the leg, OwnWriteLand the wire op and the invalidate. Land bumps the       *)
+(* content-version and, in the CORRECT path, invalidates write-through (drops *)
+(* the cached entry) so the next read misses + refetches the post-write       *)
+(* content. Clears `validated`.                                              *)
 (*                                                                         *)
 (* BUGGY_NO_OWN_INVALIDATE bumps the version but leaves the entry valid at    *)
 (* the OLD cvers, so a subsequent Read serves the pre-write content -- the    *)
 (* guest fails to see its own write.                                         *)
+(*                                                                         *)
+(* The leg (vote M23's changing legs) lands another open's run first and     *)
+(* stops its holder staging; BUGGY_PEER_WRITE_UNORDERED skips it. The leg     *)
+(* also pins the file until the land (votes M24/M24a): StageWrite waits out   *)
+(* every other open's pin. A write-through by the holder itself takes no pin  *)
+(* in the impl (its wb_lock orders its own writes); the model pins it too,    *)
+(* which only removes interleavings the impl's lock removes anyway.           *)
 (***************************************************************************)
-OwnWrite(f, o) ==
+OwnWriteBegin(f, o) ==
+    /\ ~wpend[f][o]      \* one write-through of f per open at a time
     /\ stage[f][o] = 0   \* the impl flushes its own run before a write-through
-    \* Vote M23's changing legs: another open's run lands first (and its holder
-    \* stops staging). BUGGY_PEER_WRITE_UNORDERED lets the write land ahead of it.
     /\ (PeersClear(f, o) \/ BUGGY_PEER_WRITE_UNORDERED)
+    /\ wpend' = [wpend EXCEPT ![f][o] = TRUE]
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read>>
+
+OwnWriteLand(f, o) ==
+    /\ wpend[f][o]
     /\ guest_cvers[f] < MaxCvers
     /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
@@ -463,6 +512,7 @@ OwnWrite(f, o) ==
     /\ IF BUGGY_NO_OWN_INVALIDATE
          THEN cache' = cache
          ELSE cache' = [cache EXCEPT ![f].valid = FALSE]
+    /\ wpend' = [wpend EXCEPT ![f][o] = FALSE]
     /\ UNCHANGED <<stage, bad_read>>
 
 (***************************************************************************)
@@ -479,7 +529,7 @@ ExternalWrite(f) ==
     /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ validated'  = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<stage, cache, bad_read>>
+    /\ UNCHANGED <<stage, cache, bad_read, wpend>>
 
 (***************************************************************************)
 (* Evict(f) -- LRU/capacity eviction of a valid entry (the bounded page/     *)
@@ -491,7 +541,7 @@ Evict(f) ==
     /\ cache[f].valid
     /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
     /\ validated' = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read, wpend>>
 
 (***************************************************************************)
 (* StageWrite(f) -- the F1 write-behind: a pure-append write lands in the    *)
@@ -501,15 +551,20 @@ Evict(f) ==
 (* staged-overlay arm of Read keeps same-priv reads correct in the interim.   *)
 (* One holder (LARDER-DESIGN 12.6): an open stages only while no other open    *)
 (* holds a stage of the file -- in the impl a second open is never eligible,   *)
-(* and its writes are changing legs that land the holder's run first.          *)
+(* and its writes are changing legs that land the holder's run first. And no   *)
+(* stage starts while another open's write-through is in flight (the pin,      *)
+(* votes M24/M24a): in the impl the changing leg dropped the holder's anchor   *)
+(* and an open that would become the holder is refused while the pin stands.  *)
 (***************************************************************************)
 StageWrite(f, o) ==
     /\ EnableStaging
     /\ guest_cvers[f] < MaxCvers
+    /\ ~wpend[f][o]
     /\ PeersClear(f, o)
+    /\ Unpinned(f, o)
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ stage'       = [stage EXCEPT ![f][o] = guest_cvers[f] + 1]
-    /\ UNCHANGED <<svr_cvers, cache, validated, bad_read>>
+    /\ UNCHANGED <<svr_cvers, cache, validated, bad_read, wpend>>
 
 (***************************************************************************)
 (* FlushClose(f) -- the flush (close / fsync / cap / non-append pre-flush):   *)
@@ -532,7 +587,7 @@ FlushClose(f, o) ==
          THEN svr_cvers' = svr_cvers
          ELSE svr_cvers' = [svr_cvers EXCEPT ![f] = stage[f][o]]
     /\ stage'     = [stage EXCEPT ![f][o] = 0]
-    /\ UNCHANGED <<guest_cvers, bad_read>>
+    /\ UNCHANGED <<guest_cvers, bad_read, wpend>>
     \* G1 (term-4, the write-populate): on the landed arm, install the flushed
     \* content as the CURRENT token -- semantically "as if an Open refetched
     \* immediately after the flush", so it reuses Refetch verbatim (capacity-
@@ -552,7 +607,8 @@ Next ==
         \/ Evict(f)
         \/ \E o \in Opens :
               \/ Read(f, o)
-              \/ OwnWrite(f, o)
+              \/ OwnWriteBegin(f, o)
+              \/ OwnWriteLand(f, o)
               \/ StageWrite(f, o)
               \/ FlushClose(f, o)
 

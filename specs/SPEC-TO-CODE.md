@@ -2574,11 +2574,12 @@ populate) + documented in LARDER-DESIGN §3.2/§11.
 - `fs_cache.cfg` (single-writer; Files={f1,f2}, Capacity=1, MaxCvers=2):
   `Invariants` = `TypeOk` + `CacheNeverAhead` + `Bounded` +
   `NoStalePastRevalidation` + `NoWrongRead` (ABSOLUTE single-writer). GREEN —
-  72 distinct states.
+  288 distinct states (TLC 2026-11-16, with the write-through in two steps;
+  72 before the split).
 - `fs_cache_external.cfg` (external writer): `SafetyCore` (incl.
   `NoStalePastRevalidation` — the gate holds vs an out-of-band writer). GREEN —
-  213 distinct states. NoWrongRead deliberately unchecked (the accepted
-  within-episode window).
+  852 distinct states (TLC 2026-11-16; 213 before the split). NoWrongRead
+  deliberately unchecked (the accepted within-episode window).
 - `fs_cache_liveness.cfg` (external writer, WF(Open)+WF(Evict)):
   `WriteEventuallyVisible`. GREEN, non-vacuous.
 
@@ -2600,7 +2601,8 @@ mutation surface (install/evict/invalidate) is untouched.
 - `fs_cache_buggy_stale_serve.cfg`: `NoStalePastRevalidation` VIOLATED (Open
   keeps a stale entry validated) — a 4-state counterexample.
 - `fs_cache_buggy_no_invalidate.cfg`: `NoWrongRead` VIOLATED (a read serves the
-  guest's own stale write) — a 4-state counterexample.
+  guest's own stale write) — a 5-state counterexample since the write-through
+  split (2026-11-16; 4 before).
 
 ### Write-behind (LARDER-DESIGN 12, G1 13) and the client's holder (vote M23, 12.6)
 
@@ -2610,17 +2612,32 @@ own-page install on the err==0 full-land arm. Vote M23 (2026-11-15) named the
 opens: `stage[f][o]` is one `dev9p_priv`'s run, holding the token it staged. A
 `Read(f, o)` by an open with no stage of its own serves the cache only when no
 other open holds a stage (the observing legs: open, read, fstat, fsync, stat by
-name flush the holder first); `OwnWrite(f, o)` needs every open's stage landed
-(the changing legs: write, truncating open, wstat, Loom registration through
-another open land the holder's run and drop its anchor); `StageWrite(f, o)`
-needs no other open's stage (one registered holder per client and file);
+name flush the holder first). A write-through is two steps (votes M24/M24a,
+2026-11-16): `OwnWriteBegin(f, o)` is its leg (`wb_holder_flush` with
+`changing`), which needs every other open's stage landed (the changing legs:
+write, truncating open, wstat, Loom registration through another open land the
+holder's run and drop its anchor) and pins the file (`wpend[f][o]`, the leg's
+`struct wb_pin` linked in the bucket); `OwnWriteLand(f, o)` is the wire op and
+its invalidate (`p9_client_write` and the attr/page drops in `dev9p_write`,
+then the unpin). `StageWrite(f, o)` needs no other open's stage (one registered
+holder per client and file) and no other open's pin (`wb_register` refuses an
+open while a pin stands, and the leg dropped the old holder's anchor);
 `FlushClose(f, o)` lands its own open's token. An open's or a stat's populate
 is judged by the `Read` that serves it, so the model's read leg stands for the
-open and stat legs. TLC 2026-11-15 (Files={f1,f2}, Capacity=1, MaxCvers=3,
-Opens={o1,o2}; the non-staging cfgs above run Opens={o1} and kept their counts):
+open and stat legs. Two impl mechanisms are beneath the model, each pinned by a
+runtime test instead: the fidless cached open's own leg (its per-open snapshot
+is not modelled; `dev9p.m23_cached_open_of_a_held_file_falls_back`), and the own
+install's gen guard (LARDER-DESIGN 13: `FlushClose` lands and installs in one
+step, and with the pin no write lands between them, so no cfg can show the
+guard; it is the impl's second layer). TLC 2026-11-16 (Files={f1,f2},
+Capacity=1, MaxCvers=3, Opens={o1,o2}; the non-staging cfgs above run
+Opens={o1}); all fifteen cfgs as wanted (aux-gate resid/m15-tlc-fscache.sh):
 - `fs_cache_wb.cfg` (EnableStaging, EnableFlushPopulate): `InvariantsWb` =
-  `SafetyCore` + `NoWrongRead` + `NoLostStage` + `OneHolder`. GREEN -- 1860
-  distinct states.
+  `SafetyCore` + `NoWrongRead` + `NoLostStage` + `OneHolder`. GREEN -- 6960
+  distinct states (1860 before the write-through split).
+- `fs_cache_wb_nopop.cfg` (the same without EnableFlushPopulate; the green
+  control one variable from each peer cfg, which run without it): GREEN --
+  6960 distinct states.
 - `fs_cache_buggy_skip_staged.cfg`: `NoWrongRead` VIOLATED (the holder's own
   read misses its run).
 - `fs_cache_buggy_lost_stage.cfg`: `NoLostStage` VIOLATED (a stage cleared
@@ -2630,9 +2647,17 @@ Opens={o1,o2}; the non-staging cfgs above run Opens={o1} and kept their counts):
 - `fs_cache_buggy_peer_skips_staged.cfg` (M23, audit round 4 of M15 F1):
   `NoWrongRead` VIOLATED -- open o1 stages, open o2 reads the cache (4 states).
 - `fs_cache_buggy_peer_unordered.cfg` (M23): `NoWrongRead` VIOLATED -- o1
-  stages, o2 writes through, o1's own read serves its older token (5 states);
-  with `NoWrongRead` left out, o1's flush lands the older token and
-  `NoLostStage` is VIOLATED (4 states).
+  stages, o2's write-through passes its leg and lands, o1's own read serves its
+  older token (5 states: Init, stage, begin, land, read; before the split the
+  trace was 4 states, which this entry once gave as 5).
+- `fs_cache_buggy_peer_unordered_lost.cfg` (M23; the same with `NoWrongRead`
+  left out): o1's flush lands the older token over the newer write and
+  `NoLostStage` is VIOLATED (5 states: Init, stage, begin, land, flush).
+- `fs_cache_buggy_unpinned.cfg` (M24/M24a, audit round 5 of M15 F1; one
+  variable from `fs_cache_wb.cfg`): `InvariantsWb` VIOLATED at `NoWrongRead` --
+  o1's write-through passes its leg with nothing staged, o2 starts staging while
+  it is in flight, the write lands, and o2's own read serves its stage under the
+  newer content (5 states: Init, begin, stage, land, read).
 
 ---
 

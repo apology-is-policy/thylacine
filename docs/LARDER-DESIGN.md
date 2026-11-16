@@ -1056,7 +1056,9 @@ The measured mix -- one writer per file, read after its close -- never meets a
 holder. A program that stats a file while another program writes it pays a
 flush per stat, as an NFS client's `getattr` writes dirty pages back first.
 
-**Spec.** `fs_cache.tla` names the opens (12.4).
+**Spec.** `fs_cache.tla` names the opens (12.4). A write-through is two steps
+there, its leg and its land, and `fs_cache_buggy_unpinned.cfg` shows the race
+the pin closes: a stage started while another open's write is in flight.
 
 ---
 
