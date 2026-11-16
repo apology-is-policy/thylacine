@@ -1,7 +1,7 @@
 # Stratum Stabilization Arc — Charter
 
 Binding charter for the proactive hardening of Stratum against the Thylacine
-workload. Stratum is in scope (`~/projects/stratum/v2`, branch
+workload. Stratum is in scope (`~/projects/stratum`, branch
 `main`); Thylacine is its only client, so the bar is "whatever
 serves Thylacine." This document is scripture for the arc: areas, method, exit
 criteria. Redesigns surface as their own scripture commits first (per
@@ -91,7 +91,7 @@ For each area, iterate until convergence:
 - The throughput bar is met, or the residual gap is quantified + tracked as
   named perf debt.
 - An **as-built technical reference** for the area's subsystem is written or
-  refreshed in the Stratum reference docs (`~/projects/stratum/v2/docs/`). The
+  refreshed in the Stratum reference docs (`~/projects/stratum/docs/`). The
   audit's line-by-line read is the source — Stratum's write-path internals are
   thinly documented today, and the arc is the moment they're understood deeply
   enough to document right (the Thylacine `docs/reference/NN-*.md` per-subsystem

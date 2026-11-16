@@ -75,7 +75,7 @@
 // spin_lock_t held across every send/dispatch sequence (R15-c F230
 // close). Direct callers of p9_session_* below the client layer
 // (typically test code) are responsible for their own serialization.
-// This matches `stratum/v2/docs/reference/23-9p_client.md`
+// This matches `stratum/docs/reference/23-9p_client.md`
 // §"Concurrency model" — "One client = one connection = one fid namespace."
 
 #ifndef THYLACINE_9P_SESSION_H

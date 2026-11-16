@@ -32,7 +32,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-11-14
+updated: 2026-11-16
 ---
 ## Purpose
 
@@ -159,23 +159,42 @@ kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,
 `loom-bridge-probe`, therefore sits in the curated `usr_bins` list of every
 image. The kernel test holds it to the verdict its own lever implies.
 
-Stratum's source is the one input found by a rule and not a fixed path.
-`stratum-src.sh` gives `$STRATUM_SRC` when it is set, else the checkout at
-`~/projects/stratum`: its root when the tree is there
-(`src/btree_engine/engine.c`), its `v2/` when the checkout still has the layout
-from before Stratum's tree moved to the repository's root. The second arm exists
-so that the day the shared checkout moves, a worktree whose branch already
-carries this rule keeps building; it goes once no checkout needs it. The same
-file drops a Stratum build directory (`build/host-stratum`,
+Stratum's source is `$STRATUM_SRC` when it is set, else the checkout at
+`~/projects/stratum` (`stratum-src.sh`). Its tree is at the repository's root;
+a source is taken as Stratum's tree only when `src/btree_engine/engine.c` is
+there. A checkout from before the tree moved to the root (2026-11-14) has it
+under `v2/` and the old prototype's tree at the root, which configures but has
+no `stratumd` target: building it fails with a CMake error that names no fix.
+So it is refused first, with the `git -C <checkout> pull --ff-only` that brings
+it up to date (local changes put away first) or an up-to-date `STRATUM_SRC` as
+the way out; so is a source that is not Stratum's tree, cannot be read, is not a
+directory, or is not there, each said as such. `kernel`, `all` and `stratumd`
+refuse before any step runs, so no kernel, userspace or sysroot work (a sysroot
+rebuild empties `build/pouch`) is spent on a build that cannot finish;
+`build_stratumd` and `build_stratum_host_tools` refuse again on their own paths,
+and the host tools' stale check reads a refused source as stale, so the `pool`
+step reaches the refusal rather than taking tools built from the old tree as
+current. `THYLACINE_MKFS_PRESERVE=1` with both files present is decided before
+the stale check: it runs no host tool and needs no source. The stale check
+watches `third_party/` too, since BLAKE3 and xxHash are compiled into the
+tools. The same file drops a Stratum build directory (`build/host-stratum`,
 `build/pouch/stratumd-cmake`) whose `CMakeCache.txt` names another source tree,
 since CMake refuses to configure it and the directory is only a cache; trees
-are compared by their real paths, and nothing is dropped for a source that is
-not there. A tree that is gone counts as another: build.sh runs under
-`set -euo pipefail`, so a failed `cd` into it is caught, never left to end the
-build without a word, and a cache that cannot be read is kept for CMake to
-report. `test-stratum-src.sh` runs both rules against made-up checkouts, and
-each call of the build-dir rule as build.sh makes it, under errexit, seen to
-return.
+are compared by their real paths (`CDPATH` ignored, a name starting with a dash
+still a name), and nothing is dropped for a refused source, so a `STRATUM_SRC`
+that is briefly wrong costs no warm build. (A checkout pulled to the new layout
+drops its dirs once, since they were configured from its `v2/`.) A tree that is
+gone counts as another: build.sh runs under `set -euo pipefail`, so a failed
+`cd` into it is caught, never left to end the build without a word, and a cache
+that cannot be read is kept for CMake to report. `test-stratum-src.sh` runs
+these rules against made-up checkouts (each call of the build-dir rule as
+build.sh makes it, under errexit, seen to return), and build.sh's own functions,
+sliced from it with each one's single definition checked: the stale check, and
+the builders with `cmake` stubbed, which must refuse before they configure,
+drop or delete anything. The manifest's probe for the checkout is the same file,
+so `forage.sh status` reports a checkout from before the move as absent, and
+`forage.sh stratum` on a checkout behind its upstream names the pull rather than
+reporting it gathered (a checkout already there is fetched, never merged).
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a
@@ -287,7 +306,11 @@ runs, joined them with thread-model C6); nothing else goes at the top, so no sta
 name can meet one of the kernel's synthetic mount points
 ([[dec-2026-09-25-initrd-bin-directory]]; the flat layout had carried the
 native `env` under the `/env` mount point since G15). The bake always passes
-`--require bin/joey`, and when the sysroot has `libc.so` also `--require
+`--require bin/joey --require bin/stratumd` (joey spawns stratumd from the
+archive to mount the root; the copy of `build/pouch/progs/stratumd` is quiet
+when it is absent, as after a sysroot rebuild empties `build/pouch`, so the
+require is what makes such a bake fail; 2026-11-16), and when the sysroot has
+`libc.so` also `--require
 lib/libc.so --require lib/libdlprobe.so --require bin/pouch-hello-dlopen`:
 `mkcpio.py` re-reads the archive it wrote, and a missing entry deletes the
 archive and fails the build, so no stale `ramfs.cpio` survives for `test.sh` to
@@ -980,6 +1003,25 @@ the invariant registry check: fatal, no skip switch, self-testing (it refuses to
 run if its own planted cases do not read as expected). It fails a build that
 casts a raw syscall argument to a narrower type with no full-width check first
 (ERRORS.md principle 6; [[sub-kernel-syscall-dispatch]]).
+
+## The drain reader check (2026-11-16)
+
+`build_ramfs` runs `tools/check-drain-reader.py` on the built joey right after
+the expect form check: fatal, no skip switch, its self-test first. joey's
+stratumd drain reader must never write to the console, or an IM-1 episode parks
+it and stratumd blocks on its full pipe; joey's boot selftest runs while joey
+still owns the console and cannot see that ([[sub-stratum-boot]]). The check
+disassembles joey with `$LLVM_PREFIX/bin/llvm-objdump`, follows every direct
+call and branch from `sd_reader_main` by target address (functions keyed by
+start address, never by name), and the fall-through out of any function whose
+last instruction can fall through (a conditional branch, a call or system call
+that returns, any other instruction), and fails unless each system call it reaches is
+on an allowlist by name, the numbers read from the kernel's enum. It fails
+closed on an indirect call, branch or return, a branch to an address that
+starts no function, a branch form past the ARMv8.0 floor, a call number that is
+not a constant (a move from the zero register is 0) in the straight run before
+its `svc`, or a reader in which it
+does not find both a poll and a read.
 
 ## The audit-trigger row check (2026-10-28)
 

@@ -332,6 +332,9 @@ sysroot_is_stale() {
 stratum_host_tools_stale() {
     local stratum_src; stratum_src="$(stratum_src_dir)"
     local hb="$BUILD_DIR/host-stratum"
+    # A source that is not Stratum's tree is refused by build_stratum_host_tools, before
+    # anything is dropped for it.
+    stratum_src_ok "$stratum_src" "stratum host tools" 2>/dev/null || return 0
     # Tools configured from a tree that has since moved are not this tree's: with the
     # build dir dropped, the checks below report them missing.
     stratum_build_dir_fits "$hb" "$stratum_src"
@@ -344,7 +347,8 @@ stratum_host_tools_stale() {
     # checks accept -- and with nothing newer in the source tree that
     # state is otherwise STUCK as "fresh" until someone hand-deletes it.
     [[ -f "$hb/.complete" ]] || return 0
-    if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" \
+    # third_party/ is compiled into the tools too (BLAKE3, xxHash, its CMakeLists).
+    if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" "$stratum_src/third_party" \
                      "$stratum_src/CMakeLists.txt" -newer "$sd" 2>/dev/null)" ]]; then
         return 0
     fi
@@ -817,7 +821,11 @@ EOF
     # three must reach the archive (mkcpio --require below), and joey fails
     # a boot that ships the prover without its loader.
     local dynbin
-    local cpio_require=( --require bin/joey )
+    # joey spawns bin/stratumd from this archive to mount the root, so an archive
+    # without it cannot boot -- and the copy below is quiet when the binary is
+    # absent (a sysroot rebuild empties build/pouch; `ramfs` and `go-probes` bake
+    # without building stratumd). Required, so such a bake fails here instead.
+    local cpio_require=( --require bin/joey --require bin/stratumd )
     if [[ -f "$BUILD_DIR/sysroot/lib/libc.so" ]]; then
         cpio_require+=( --require lib/libc.so --require lib/libdlprobe.so
                         --require bin/pouch-hello-dlopen )
@@ -961,6 +969,17 @@ DOSBOXCONF
     python3 "$REPO_ROOT/tools/check-expect-forms.py" --self-test \
         && python3 "$REPO_ROOT/tools/check-expect-forms.py" --root "$REPO_ROOT" \
         || { echo "==> expect form check FAILED -- see tools/check-expect-forms.py" >&2
+             exit 1; }
+
+    # joey's stratumd drain reader must never write to the console: an IM-1
+    # episode would park it, and stratumd would block on its full pipe. joey's
+    # boot selftest runs while joey still owns the console, so it cannot see
+    # that; this reads the built joey. Fatal, self-testing, about a second.
+    echo "==> drain reader check (joey's reader cannot reach a console write)"
+    python3 "$REPO_ROOT/tools/check-drain-reader.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-drain-reader.py" --root "$REPO_ROOT" \
+               --elf "$USR_BUILD/joey/joey" --objdump "$LLVM_PREFIX/bin/llvm-objdump" \
+        || { echo "==> drain reader check FAILED -- see tools/check-drain-reader.py" >&2
              exit 1; }
 
     # ERRORS.md principle 6: a syscall argument that does not fit is refused,
@@ -3482,11 +3501,7 @@ build_stratumd() {
     local toolchain="$REPO_ROOT/cmake/Toolchain-aarch64-pouch.cmake"
     local readelf="$LLVM_PREFIX/bin/llvm-readelf"
 
-    if [[ ! -d "$stratum_src" ]]; then
-        echo "==> stratumd: source tree not found at $stratum_src" >&2
-        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
-        exit 1
-    fi
+    stratum_src_ok "$stratum_src" stratumd || exit 1
     if [[ ! -f "$stratum_src/CMakeLists.txt" ]]; then
         echo "==> stratumd: $stratum_src/CMakeLists.txt missing" >&2
         exit 1
@@ -3590,11 +3605,7 @@ build_stratum_host_tools() {
     local stratumd_bin="$host_build/src/cmd/stratumd/stratumd"
     local stratum_fs_bin="$host_build/src/cmd/stratum-fs/stratum-fs"
 
-    if [[ ! -d "$stratum_src" ]]; then
-        echo "==> stratum host tools: source tree not found at $stratum_src" >&2
-        echo "    override with STRATUM_SRC=/path/to/stratum" >&2
-        exit 1
-    fi
+    stratum_src_ok "$stratum_src" "stratum host tools" || exit 1
 
     echo "==> building stratum host tools (mkfs + stratumd + stratum-fs) from $stratum_src"
     stratum_build_dir_fits "$host_build" "$stratum_src"
@@ -3684,11 +3695,6 @@ build_stratum_pool_fixture() {
     # source file is newer than the built stratumd (stratum_host_tools_stale).
     local host_stratumd="$host_build/src/cmd/stratumd/stratumd"
     local host_stratum_fs="$host_build/src/cmd/stratum-fs/stratum-fs"
-    if stratum_host_tools_stale; then
-        build_stratum_host_tools
-    fi
-
-    mkdir -p "$fixtures"
 
     # PRESERVE mode: if THYLACINE_MKFS_PRESERVE=1 AND both files
     # already exist, skip regeneration entirely. The bytes from the
@@ -3697,13 +3703,21 @@ build_stratum_pool_fixture() {
     # pins UUIDs but not the libsodium-randomized keyfile + per-run
     # nonces). Use case: after a build that triggers a content-
     # sensitive bug, save pool.img + system.key and re-run with
-    # PRESERVE=1 to get byte-perfect reproduction.
+    # PRESERVE=1 to get byte-perfect reproduction. It runs no host
+    # tool, so it is decided before they are checked and needs no
+    # Stratum source.
     if [[ "${THYLACINE_MKFS_PRESERVE:-0}" == "1" ]] \
         && [[ -f "$pool_img" ]] && [[ -f "$keyfile" ]]; then
         echo "==> stratum pool fixture: PRESERVED (THYLACINE_MKFS_PRESERVE=1; $(wc -c < "$pool_img" | tr -d ' ') bytes pool.img, $(wc -c < "$keyfile" | tr -d ' ') bytes system.key from prior build)"
         ledger "pool.img + system.key: PRESERVED (THYLACINE_MKFS_PRESERVE=1; the existing key is kept -- rebuild the ramfs to re-bake it)"
         return 0
     fi
+
+    if stratum_host_tools_stale; then
+        build_stratum_host_tools
+    fi
+
+    mkdir -p "$fixtures"
 
     # SEED mode: if THYLACINE_MKFS_SEED is set, pass it through to
     # stratum-mkfs's --seed flag. Pins UUID derivation across runs
@@ -8754,6 +8768,14 @@ python3 "$REPO_ROOT/tools/check-flag-words.py" \
 
 # The free-space floor, before any target writes; `clean` frees space.
 [[ "$target" == clean ]] || disk_floor_check "target '$target'"
+
+# A target that always builds stratumd refuses a source that is not Stratum's tree
+# here, before the kernel and userspace steps run (and before a sysroot rebuild can
+# empty build/pouch) for a build that cannot finish. `pool` refuses on its own path,
+# which PRESERVE skips.
+case "$target" in
+    kernel|all|stratumd) stratum_src_ok "$(stratum_src_dir)" build.sh || exit 1 ;;
+esac
 
 # The memory-protection bits cross the syscall boundary as raw values, and each
 # userspace mirror pins its own literals rather than deriving them: a bit added

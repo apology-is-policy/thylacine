@@ -5,7 +5,7 @@
 // both kernel and userspace consumers (the kernel test framework calls
 // these directly; a future userspace 9P client could too).
 //
-// Wire-format crib (per diod protocol.md + stratum/v2/docs/reference/20-9p.md):
+// Wire-format crib (per diod protocol.md + stratum/docs/reference/20-9p.md):
 //
 //   Header (7 bytes, every message):
 //     [size: u32 LE][type: u8][tag: u16 LE]
