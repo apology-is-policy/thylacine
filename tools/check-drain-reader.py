@@ -33,18 +33,28 @@ ENTRY = 'sd_reader_main'
 ALLOWED = ('SYS_POLL', 'SYS_READ', 'SYS_TORPOR_WAKE', 'SYS_THREAD_EXIT', 'SYS_EXITS')
 REQUIRED = ('SYS_POLL', 'SYS_READ')
 
-FUNC_RE = re.compile(r'^[0-9a-f]+ <([^>]+)>:\s*$')
+FUNC_RE = re.compile(r'^([0-9a-f]+) <([^>]+)>:\s*$')
 INSN_RE = re.compile(r'^\s+([0-9a-f]+):\s+(\S+)\s*(.*?)\s*$')
-TARGET_RE = re.compile(r'<([^>+]+)(\+0x[0-9a-f]+)?>')
+# A direct branch's target is its one bare hexadecimal operand (llvm-objdump may or may not
+# annotate it with <symbol+offset>; the annotation is never trusted).
+BR_TARGET = re.compile(r'(?:^|[\s,])0x([0-9a-f]+)(?=\s|$)')
 MOV_X8_RE = re.compile(r'^[wx]8,\s*#(-?0x[0-9a-f]+|-?\d+)')
 NAMES_X8 = re.compile(r'\b[wx]8\b')
-ADDR_RE = re.compile(r'\b0x([0-9a-f]+)\s+<')
+DIRECT = re.compile(r'^(b|bl|b\.\w+|cbz|cbnz|tbz|tbnz)$')
+INDIRECT = re.compile(r'^(blr|br)(aa|ab|aaz|abz)?$')
+RET = re.compile(r'^ret(aa|ab)?$')
+# Branch forms past the ARMv8.0 floor (FEAT_HBC bc.cond, FEAT_CMPBR cb<cc>): not followed,
+# so refused.
+UNSUPPORTED = re.compile(r'^(bc\.\w+|cb[bh]?(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le))$')
 # Anything that transfers control ends the straight run back from an svc; a call also
 # clobbers x8.
-FLOW = re.compile(r'^(b|bl|br|blr\w*|br\w*|ret\w*|b\.\w+|cbz|cbnz|tbz|tbnz|svc|hvc|smc|eret\w*|brk|udf)$')
+OTHER_FLOW = re.compile(r'^(svc|hvc|smc|eret\w*|brk|udf)$')
 RUN_MAX = 16
-INDIRECT = re.compile(r'^(blr|br)(aa|ab|aaz|abz)?$')
-COND = re.compile(r'^(b\.\w+|cbz|cbnz|tbz|tbnz)$')
+
+
+def is_flow(mn):
+    return bool(DIRECT.match(mn) or INDIRECT.match(mn) or RET.match(mn)
+                or UNSUPPORTED.match(mn) or OTHER_FLOW.match(mn))
 
 
 def syscall_numbers(root):
@@ -60,18 +70,20 @@ def syscall_numbers(root):
 
 
 def parse_functions(text):
+    """start address -> (name, [(address, mnemonic, operands)]). Keyed by address, never by
+    name: two static functions may share one."""
     funcs, cur = {}, None
     for line in text.splitlines():
         m = FUNC_RE.match(line)
         if m:
-            cur = m.group(1)
-            funcs[cur] = []
+            cur = int(m.group(1), 16)
+            funcs[cur] = (m.group(2), [])
             continue
         if cur is None:
             continue
         m = INSN_RE.match(line)
         if m:
-            funcs[cur].append((int(m.group(1), 16), m.group(2), m.group(3)))
+            funcs[cur][1].append((int(m.group(1), 16), m.group(2), m.group(3)))
     return funcs
 
 
@@ -82,7 +94,7 @@ def svc_number(insns, i, targets):
         addr, mn, ops = insns[j]
         if insns[j + 1][0] in targets:
             return None, 'a branch lands between its number and it (at 0x%x)' % insns[j + 1][0]
-        if FLOW.match(mn):
+        if is_flow(mn):
             return None, 'control flow before it with no number loaded (%s %s)' % (mn, ops)
         if NAMES_X8.search(ops):
             m = MOV_X8_RE.match(ops) if mn in ('mov', 'movz') else None
@@ -101,56 +113,60 @@ def check(text, nums):
         return ['the kernel enum lacks %s' % ', '.join(missing)], [], set()
     allowed = {nums[n] for n in ALLOWED}
     funcs = parse_functions(text)
-    if ENTRY not in funcs:
-        return ['%s is not in the disassembly' % ENTRY], [], set()
-    problems, seen, todo, calls = [], [], [ENTRY], set()
+    entry = [a for a, (name, _) in funcs.items() if name == ENTRY]
+    if len(entry) != 1:
+        return (['%s is not in the disassembly' % ENTRY] if not entry else
+                ['%s names %d functions' % (ENTRY, len(entry))]), [], set()
+    problems, seen, todo, calls = [], [], [entry[0]], set()
     while todo:
-        fn = todo.pop()
-        if fn in seen:
+        start = todo.pop()
+        if start in seen:
             continue
-        if fn not in funcs:
-            problems.append('%s is called but not in the disassembly' % fn)
+        seen.append(start)
+        fn, insns = funcs[start]
+        if not insns:
+            problems.append('%s at 0x%x has no instructions' % (fn, start))
             continue
-        seen.append(fn)
-        insns = funcs[fn]
+        lo, hi = insns[0][0], insns[-1][0]
         targets = set()
-        for _, mn, ops in insns:
-            if mn == 'bl' or mn == 'b' or COND.match(mn):
-                t, a = TARGET_RE.search(ops), ADDR_RE.search(ops)
-                if t and a and t.group(1) == fn:
-                    targets.add(int(a.group(1), 16))
-        for i, (_, mn, ops) in enumerate(insns):
+        for addr, mn, ops in insns:
+            if not DIRECT.match(mn):
+                continue
+            m = BR_TARGET.findall(ops)
+            if not m:
+                problems.append('%s: %s at 0x%x with no target address (%s)' % (fn, mn, addr, ops))
+                continue
+            t = int(m[-1], 16)
+            if lo <= t <= hi:
+                targets.add(t)
+            elif t in funcs:
+                todo.append(t)
+            else:
+                problems.append('%s: %s at 0x%x to 0x%x, which starts no function'
+                                % (fn, mn, addr, t))
+        for i, (addr, mn, ops) in enumerate(insns):
             if INDIRECT.match(mn):
                 problems.append('%s: indirect %s %s' % (fn, mn, ops))
-            elif mn in ('hvc', 'smc'):
+            elif RET.match(mn) and ops and ops != 'x30':
+                problems.append('%s: indirect ret %s' % (fn, ops))
+            elif UNSUPPORTED.match(mn):
+                problems.append('%s: unsupported branch form %s %s' % (fn, mn, ops))
+            elif mn in ('hvc', 'smc') or mn.startswith('eret'):
                 problems.append('%s: %s' % (fn, mn))
             elif mn == 'svc':
                 n, why = svc_number(insns, i, targets)
                 if n is None:
                     problems.append('%s: svc at 0x%x whose number is not known: %s'
-                                    % (fn, insns[i][0], why))
+                                    % (fn, addr, why))
                     continue
                 name = by_num.get(n, 'number %d' % n)
                 calls.add(name)
                 if n not in allowed:
                     problems.append('%s: system call %s' % (fn, name))
-            elif mn == 'bl' or mn == 'b' or COND.match(mn):
-                t = TARGET_RE.search(ops)
-                if not t:
-                    if mn == 'bl':
-                        problems.append('%s: bl with no symbol (%s)' % (fn, ops))
-                    continue
-                sym, off = t.group(1), t.group(2)
-                if sym == fn:
-                    continue
-                if off:
-                    problems.append('%s: %s into the middle of %s' % (fn, mn, sym + off))
-                    continue
-                todo.append(sym)
     for r in REQUIRED:
         if r not in calls:
             problems.append('no %s reachable from %s -- this is not the reader' % (r, ENTRY))
-    return problems, seen, calls
+    return problems, [funcs[a][0] for a in seen], calls
 
 
 def run_objdump(objdump, elf):
@@ -188,8 +204,18 @@ def selftest():
                                                          'b.le\t0x400018 <sd_reader_main+0x18>'),
          'a branch lands between'),
         ('an svc with no number at all', good.replace('mov\tw8, #0x1d             // =29', 'nop'), 'no constant number'),
-        ('a callee not in the disassembly', good.replace('bl\t0x400100 <helper>', 'bl\t0x400100 <gone>'), 'gone is called but not'),
-        ('a branch into another function', good.replace('0x400200 <tail>', '0x400208 <tail+0x8>'), 'into the middle of tail+0x8'),
+        ('a callee not in the disassembly', good.replace('bl\t0x400100 <helper>', 'bl\t0x400500 <gone>'), 'to 0x400500, which starts no function'),
+        ('two functions of one name', good.replace('mov\tw8, #0x28', 'mov\tw8, #0x1')
+                                       + fn('helper', 0x400300, ['mov\tw8, #0x28', 'svc\t#0', 'ret']),
+         'system call SYS_PUTS'),
+        ('an unannotated branch, followed', good.replace('b\t0x400200 <tail>', 'b\t0x400200'), None),
+        ('an unannotated branch to a console write', good.replace('b\t0x400200 <tail>', 'b\t0x400200')
+                                                      .replace('mov\tw8, #0x2a', 'mov\tw8, #0x1'),
+         'system call SYS_PUTS'),
+        ('an unannotated branch to nowhere', good.replace('b\t0x400200 <tail>', 'b\t0x400600'), 'to 0x400600, which starts no function'),
+        ('a return through another register', good.replace('\tret\n', '\tret\tx1\n'), 'indirect ret x1'),
+        ('a branch form past the floor', good.replace('b.le\t0x400000 <sd_reader_main>', 'bc.le\t0x400000 <sd_reader_main>'), 'unsupported branch form'),
+        ('a branch into another function', good.replace('0x400200 <tail>', '0x400208 <tail+0x8>'), 'to 0x400208, which starts no function'),
         ('no reader at all', good.replace(ENTRY, 'other_main'), 'not in the disassembly'),
         ('a reader that reads nothing', good.replace('mov\tw8, #0x9 ', 'mov\tw8, #0x28 '), 'no SYS_READ reachable'),
     ]

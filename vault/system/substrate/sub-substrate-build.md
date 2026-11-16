@@ -1008,11 +1008,13 @@ stratumd drain reader must never write to the console, or an IM-1 episode parks
 it and stratumd blocks on its full pipe; joey's boot selftest runs while joey
 still owns the console and cannot see that ([[sub-stratum-boot]]). The check
 disassembles joey with `$LLVM_PREFIX/bin/llvm-objdump`, follows every direct
-call and branch from `sd_reader_main`, and fails unless each system call it
-reaches is on an allowlist by name, the numbers read from the kernel's enum. It
-fails closed on an indirect call, a branch into the middle of a function, a
-call number that is not a constant in the straight run before its `svc`, a
-missing symbol, or a reader in which it finds no poll and no read.
+call and branch from `sd_reader_main` by target address (functions keyed by
+start address, never by name), and fails unless each system call it reaches is
+on an allowlist by name, the numbers read from the kernel's enum. It fails
+closed on an indirect call, branch or return, a branch to an address that
+starts no function, a branch form past the ARMv8.0 floor, a call number that is
+not a constant in the straight run before its `svc`, or a reader in which it
+finds no poll and no read.
 
 ## The audit-trigger row check (2026-10-28)
 
