@@ -428,10 +428,11 @@ The client's rules, each from a rule above it:
   ring per paste, since a shell sits at its prompt for days and cannot pump while a
   foreground command runs, and an accepted line ends the fetch before it runs. A tab or control character also refuses whole: the line
   echoes as it is and counts one column per character. Written and host-tested, the
-  fixture half in `ls-ut-paste`, the real session's half in AS-4f; neither yet booted.
+  fixture half in `ls-ut-paste`, the real session's half in AS-4f. Both passed in the
+  whole-fleet run of 2026-11-13 at 7da0341f4, on main (work/nov03-mm1/fleet4).
 - AS-4f: the rest of AS-4's list, in a real session: paste after edit, tab, focus and
   session change; several sessions; logout. `ls-halcyon-paste-flow`, with Nora and ut
-  over their private rings and a blocking client as the other path. Written, not yet
-  booted. One seat holds one live session, since a second `session on` answers EBUSY,
+  over their private rings and a blocking client as the other path. It passed in the
+  same run (265 s, interaction-qualification image with private rings). One seat holds one live session, since a second `session on` answers EBUSY,
   so several sessions means one after another. The unknown commit is already in
   `ls-halcyon-clipboard-async`. Rendering and input latency under a paste is still owed.
