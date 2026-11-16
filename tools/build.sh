@@ -821,7 +821,11 @@ EOF
     # three must reach the archive (mkcpio --require below), and joey fails
     # a boot that ships the prover without its loader.
     local dynbin
-    local cpio_require=( --require bin/joey )
+    # joey spawns bin/stratumd from this archive to mount the root, so an archive
+    # without it cannot boot -- and the copy below is quiet when the binary is
+    # absent (a sysroot rebuild empties build/pouch; `ramfs` and `go-probes` bake
+    # without building stratumd). Required, so such a bake fails here instead.
+    local cpio_require=( --require bin/joey --require bin/stratumd )
     if [[ -f "$BUILD_DIR/sysroot/lib/libc.so" ]]; then
         cpio_require+=( --require lib/libc.so --require lib/libdlprobe.so
                         --require bin/pouch-hello-dlopen )

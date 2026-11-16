@@ -306,7 +306,11 @@ runs, joined them with thread-model C6); nothing else goes at the top, so no sta
 name can meet one of the kernel's synthetic mount points
 ([[dec-2026-09-25-initrd-bin-directory]]; the flat layout had carried the
 native `env` under the `/env` mount point since G15). The bake always passes
-`--require bin/joey`, and when the sysroot has `libc.so` also `--require
+`--require bin/joey --require bin/stratumd` (joey spawns stratumd from the
+archive to mount the root; the copy of `build/pouch/progs/stratumd` is quiet
+when it is absent, as after a sysroot rebuild empties `build/pouch`, so the
+require is what makes such a bake fail; 2026-11-16), and when the sysroot has
+`libc.so` also `--require
 lib/libc.so --require lib/libdlprobe.so --require bin/pouch-hello-dlopen`:
 `mkcpio.py` re-reads the archive it wrote, and a missing entry deletes the
 archive and fails the build, so no stale `ramfs.cpio` survives for `test.sh` to
