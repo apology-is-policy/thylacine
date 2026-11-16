@@ -739,7 +739,11 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
      op consults the latch, and a registered priv can latch nothing new, since
      it never stages. The registration also drops the file's Larder pages:
      a flush installs them as own-write pages, which skip the version check,
-     and the ring's writes bypass the Larder. Before 2026-10-07 a Loom FSYNC
+     and the ring's writes bypass the Larder. Every registration of a plain
+     file drops them, the holder's or another open's: another open's
+     registration lands the holder's run as own pages too (12.6), and before
+     2026-11-16 it kept them (audit round 5 of vote M15). Before 2026-10-07
+     a Loom FSYNC
      on a staged priv reached the server ahead of the staged bytes. The rest
      of the Larder half of the Loom bypass (section 9's L1c/L1d seam) is
      separate and still open.
@@ -919,7 +923,9 @@ flushed before another open's operation on the file:
   held bytes are older than the change, so they land first. Then the holder
   STOPS staging (its anchor drops, as its own wstat drops it), since a truncate
   or a write from elsewhere leaves its anchor no longer the file's known end,
-  and its later writes go straight through.
+  and its later writes go straight through. The change also pins the file
+  until it has reached the server and dropped what it staled, so no open
+  becomes the holder in between (the pin, below).
 
 The holder's own operations are unchanged: its reads overlay, its fstat
 patches the size, its writes keep 12.2's rules. So writes from two opens land
@@ -930,10 +936,12 @@ and fsync on any descriptor writes back the file's dirty pages, as Linux's
 does. Both only ever flush sooner or stage less.
 
 **The holder registry.** At most one open per client and file stages: the
-holder. A create- or OTRUNC-born open registers when it becomes eligible. If
-another open already holds the file, the new one is not eligible and writes
-through; its OTRUNC open is a changing leg, so the old holder stops staging
-too, and neither stages until the holder's last close. The registry is a fixed
+holder. A create- or OTRUNC-born open registers when it becomes eligible, and
+its anchor is set before its entry is linked, so a leg that finds the entry
+finds the anchor. If another open already holds the file, or a pin stands on
+it, the new one is not eligible and writes through for its life; its OTRUNC
+open is a changing leg, so the old holder stops staging too, and neither
+stages until the holder's last close. The registry is a fixed
 hash keyed by client and qid.path, each bucket under its own spinlock, and the
 entry is the priv's own, or, past its last reference, its closer job's (below). Lock order: a bucket lock, then the holder's
 `wb_lock`. Nothing takes a bucket lock under `wb_lock`, and no wire I/O happens
@@ -945,16 +953,45 @@ lock through `wb_flush_locked`, which waits out a flush already in flight
 (12.2's single-flight). A changing leg on a holder with nothing held drops the
 anchor in place. The holder leaves the registry at its last close once its run
 is gone, or at its last reference, where a run it still holds keeps its place
-as the closer's job.
+as the closer's job. A last close that finds a run while another reference
+stands (a map, a Loom op, a leg) hands the run to a lock-flush job, and the
+holder leaves once that job's flush has ended.
+
+**The pin (votes M24 and M24a, 2026-11-16).** A leg that runs before the
+holder registers is ordered with nothing. Audit round 5 of vote M15 found a
+write that passed its leg while no open held the file, stalled, and reached
+the server after a new holder's flush; the flush had installed its run as own
+pages, which then served bytes the server no longer held, and a truncate
+landing the same way leaves the holder's anchor past the file's end. The same
+order opens when the leg finds a holder that closes before the change lands.
+So every changing operation through an open that is not the file's holder
+pins the file in its leg, under the bucket lock, whether or not it found a
+holder, and keeps the pin until its wire operation has answered and it has
+dropped the attr and pages that operation staled, on every return. A pin is a
+record on the operation's own stack, linked in the bucket beside the entries.
+While any pin on the file stands, an open that would become the holder is
+refused and writes through for its life, as an open that finds a holder does.
+A truncating open's own pin passes to its registration under that same bucket
+lock, so it never refuses itself. The holder's own operations take no pin: its
+`wb_lock` orders them. Linux's analogue is the inode lock that a write and a
+truncating open take.
 
 **What a leg's flush can end in.** Landed: the operation goes on and sees the
 bytes. Refused by the server: as with any failed flush, the run is dropped and
 the error latches on the holder, whose next write, fsync or last close reports
-it; the operation goes on and sees the file without those bytes. Cancelled by
+it; the operation goes on and sees the file without those bytes. An fsync is
+the exception (vote M25, 2026-11-16): an fsync whose leg ran a refused flush,
+or waited one out, returns that error, as Linux reports a writeback error to
+the descriptor whose fsync waited on the writeback, and the holder keeps its
+latch for its own report. A later fsync through a third open, which flushes
+nothing, returns 0. Only a refusal the server answered counts: a flush
+cancelled by a caught note or cut short by a death keeps its run. Cancelled by
 a caught note on the leg's own thread: flush(5) never applied the Twrite, the
 run stays held, and the operation returns `EINTR`. It did not happen, so no
 stat or read answers as if the bytes were not there. A death on the leg's
-thread: the run stays held for the next flusher.
+thread: the run stays held for the next flusher. Either way the operation
+ends there: the fidless cached open fails the open with the leg's error and
+does not fall back to the normal open, whose leg would wait again.
 
 **A stat by name asks again.** The walk-fused getattr (POUNCE) learns which
 file it reached only from the walk. When the leaf is a held file, the leg
@@ -962,6 +999,14 @@ flushes and the stat asks again: the query form walks again, and the bind form
 gives back the fid it bound and walks again. So the size, version and times it
 returns are those after the flush. It asks once more, not until nothing is
 held: bytes staged after the flush are concurrent with the stat.
+
+**A new mapping.** A file mapping's size probe is a stat through its
+descriptor, an observing leg, and the mapping keys its shared Image on the
+version that probe fetched. Before 2026-11-16 the key was the version the
+descriptor was opened at, so a mapping made through a descriptor opened before
+another open's write found the Image from before the write, while a read on
+the same descriptor saw the new bytes (audit round 5 of vote M15). A mapping
+already made keeps its pages, as ever.
 
 **A writer killed in its last close.** Its run goes to a closer as 12.2 says.
 When a map or a Loom op still holds the file, the closer's job holds it too and
@@ -993,14 +1038,20 @@ server (a second session) sees a file as of its last flush: close-to-open
 between clients, as between two NFS clients. Strict mounts stage nothing
 (12.3).
 
-**G1's premise across opens.** Section 13's own-page install takes no gen guard
-because no mutation of the file lands while a flush is in flight. Before this
-section that held only for the flushing open. A changing leg waits out the
-holder's flush, so it now holds for every open on the client.
+**G1's premise across opens.** Section 13's own-page install rests on no
+mutation of the file landing between a flush's freeze and its install. Before
+this section that held only for the flushing open. A changing operation on the
+client either finds the holder, and its leg waits out the holder's flush, or
+pinned the file before the holder registered, which refuses the registration.
+So no change from this client lands inside a holder's flush, and the install's
+guard (13) holds the premise against anything that argument misses.
 
 **Cost.** Each read, write, open, fstat, stat by name and fsync of a plain file
 on a loose cacheable client looks the file up: one bucket lock and an empty
 bucket in the common case, and nothing at all while no open stages anywhere.
+A changing operation through an open that is not the holder also pins and
+unpins, two bucket locks whether or not anything stages, beside the wire
+operation it orders.
 The measured mix -- one writer per file, read after its close -- never meets a
 holder. A program that stats a file while another program writes it pays a
 flush per stat, as an NFS client's `getattr` writes dirty pages back first.
@@ -1031,14 +1082,26 @@ only when the existing page is OWN and ends exactly at the new run's start
 (never a hole, never a mixed cvers/own page); the failed/partial-flush arm
 keeps the fail-safe whole-file drop.
 
-**No populate gen guard on the own install** -- the resurrection class the
-guard closes is a READ-populate racing an invalidate (pre-mutation bytes
-re-installed); an own install's bytes are the writer's just-landed content,
-and no same-file mutation can land concurrently: the caller holds the wb
-flush freeze (`wb_flushers > 0` excludes same-file stagers and orders
-overlapping through-writes behind the flush -- the SA-F1 single-flight). A
-write, a truncate or a wstat through another open waits that freeze out too
-(12.6's changing legs), so the premise holds across the client's opens.
+**The own install's guard (votes M24 and M24a, 2026-11-16).** The read
+populate's guard closes a read racing an invalidate (pre-mutation bytes
+re-installed). An own install's bytes are the writer's just-landed content,
+and until 2026-11-16 it took no guard: no same-file mutation could overtake
+them while the caller held the flush freeze (`wb_flushers > 0` excludes
+same-file stagers and orders overlapping through-writes behind the flush --
+the SA-F1 single-flight). Audit round 5 of vote M15 found a write through
+another open that passed its leg before the holder registered: ordered with
+nothing, it landed after the flush, and the install served the flush's bytes
+as own pages over it. 12.6's pin closes that order; the guard is the second
+layer. The flush snapshots the Larder's generation after freezing its run and
+before sending it: a change whose drop comes before the snapshot reached the
+server before the run did. At the land, under one hold of the Larder lock, the
+flush asks whether any event naming the file (an attr or page drop) landed
+since the snapshot. If one did, the install is skipped and the file's pages
+drop, as a failed flush drops them. If none did, the flush drops the attr and installs
+the run's pages, each page under its own hold and only while no event naming
+the file has landed since that drop; one that has stops the install and drops
+the file's pages. The guard is G4's qid-scoped ring (14): an event on another
+file never skips the install, and a window past the ring drops the pages.
 
 **G1b (range-scoped write-through invalidate).** The measured killer: the
 buildid rewrite (a ~100-byte in-place pwrite cmd/go performs on every built
