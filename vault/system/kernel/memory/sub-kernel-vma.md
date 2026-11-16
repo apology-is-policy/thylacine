@@ -576,7 +576,7 @@ cut and decides every refusal in phase 1 (a refusal after the uninstall costs a
 re-fault; one after a release costs an orphan); that any path freeing a Burrow under
 `as->lock` routes through the deferred free (a FILE Burrow's `spoor_clunk`
 sleeps) and never drops the `out_free` it is handed; and that every new mutator
-takes `vma_lock` — the header will not tell you to.
+takes `as->lock` — the header will not tell you to.
 
 Since B-1a, five more: that `vma_reprotect_precheck_in` refuses exactly the
 set `vma_reprotect_range_in` cannot handle (the second runs the first, so a

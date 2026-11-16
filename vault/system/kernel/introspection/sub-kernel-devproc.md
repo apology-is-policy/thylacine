@@ -998,7 +998,7 @@ is global and taken with IRQs off:
 - the environ read is clamped to 8 KiB per call, and short reads are POSIX-legal
 - every row-formatting loop commits a row only once it wholly fits, so a walk is
   bounded by the **output buffer** rather than by the number of VMAs or threads.
-  A process at the VMA maximum therefore holds `vma_lock` for tens of rows, not
+  A process at the VMA maximum therefore holds `as->lock` for tens of rows, not
   tens of thousands — do not "fix" the truncation by continuing past a full
   buffer without re-deriving that bound.
 

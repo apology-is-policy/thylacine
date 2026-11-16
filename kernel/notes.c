@@ -2098,7 +2098,7 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
                             viv_notemask_to_sigset(notes_interrupted_mask(t), &g_viv_notebits),
                             ctx->regs, ctx->sp, ctx->elr, ctx->spsr);
 
-    // uaccess faults here route through p->vma_lock (acyclic with q->lock) and
+    // uaccess faults here route through p->as->lock (acyclic with q->lock) and
     // the buddy allocator is non-blocking, so holding q->lock across the copy is
     // safe -- the same argument the note-name push makes.
     //
@@ -2116,11 +2116,11 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     //                          running on a makecontext/coroutine stack (the
     //                          obvious use of anonymous mmap) faults HERE.
     //                          Its fill is alloc_pages + install entirely under
-    //                          the already-held vma_lock: no read, no pin, no
+    //                          the already-held as->lock: no read, no pin, no
     //                          slow path (fault.c, the ANON_LAZY case).
     //   BURROW_TYPE_ANON_SHARED  demand-zero shared memory (MAP_SHARED|
     //                          MAP_ANONYMOUS, votes 117 + 119): the same fill
-    //                          under the held vma_lock plus the payer record's
+    //                          under the held as->lock plus the payer record's
     //                          charge, a spinlock -- no read, no pin, no sleep.
     //
     // File-backed is excluded separately and for a different reason: no
@@ -2543,7 +2543,7 @@ again:
     }
 
     // Push the note name into the user-stack frame. uaccess_store_u8
-    // faults route through p->vma_lock (acyclic with q->lock); buddy is
+    // faults route through p->as->lock (acyclic with q->lock); buddy is
     // non-blocking at v1.0; so holding q->lock through uaccess is safe.
     // On failure: re-enqueue at head under the same lock (no race — the
     // queue could not have been filled by others during our hold).

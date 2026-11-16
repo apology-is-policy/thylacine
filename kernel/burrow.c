@@ -1593,7 +1593,7 @@ static int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t len
     (void)burrow_release_lazy_range_in(as, vma, vma->vaddr_start, vma->vaddr_end);
 
     // G-2: a SHARED_IN VMA's teardown uncharges the client's shared-in budget
-    // (paired with burrow_share_into's charge; same p->vma_lock hold, so the
+    // (paired with burrow_share_into's charge; same p->as->lock hold, so the
     // pairing is exact). Covers both the explicit SYS_BURROW_DETACH of a
     // shared VA and the weave-fid clunk unmap.
     if (vma->flags & VMA_FLAG_SHARED_IN)
@@ -1875,13 +1875,13 @@ u32 burrow_image_strip(struct Burrow *v, u32 want) {
 //   weft.tla::ShareBoundedByFlow: free iff both share refs gone).
 //
 //   Lock order (acyclic across Procs). burrow_map requires the CALLER's
-//   dst->vma_lock, then vma_alloc takes v->lock: dst->vma_lock -> v->lock.
-//   Proc A holds A->vma_lock -> v->lock; Proc B holds B->vma_lock -> v->lock.
-//   The vma_locks are distinct per-Proc leaf-ward locks; v->lock is the single
-//   inner lock both reach -- no cycle, no cross-Proc deadlock.
+//   dst->as->lock, then vma_alloc takes v->lock: dst->as->lock -> v->lock.
+//   Proc A holds A->as->lock -> v->lock; Proc B holds B->as->lock -> v->lock.
+//   Space locks are leaf-ward (two sharers of one space take the same one); v->lock
+//   is the single inner lock all reach -- no cycle, no cross-Proc deadlock.
 //
 // PRECONDITIONS:
-//   - The caller MUST hold dst->vma_lock (this installs a VMA in dst -- the
+//   - The caller MUST hold dst->as->lock (this installs a VMA in dst -- the
 //     #713 / RW-1 C-F2 vmas-mutator discipline, like burrow_map).
 //   - The caller MUST guarantee `v` stays alive across the call (a held
 //     handle/mapping ref, OR a higher-level lock excluding a concurrent
@@ -1938,7 +1938,7 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     // mapping. The pages are the SHARER's commit (netd's page_count /
     // tapestryd's DMA pool) -- dst->page_count is deliberately NOT charged;
     // this axis is what bounds a client's cross-Proc pin, including across a
-    // sharer crash (the orphaned-weave leg). Exact under dst->vma_lock (the
+    // sharer crash (the orphaned-weave leg). Exact under dst->as->lock (the
     // precondition). v->size is always a page multiple, and bounded well
     // under u32 pages by BURROW_ATTACH_MAX / KOBJ_DMA_WEAVE_MAX_SIZE.
     u32 npages = (u32)(length / PAGE_SIZE);
@@ -1955,7 +1955,7 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     // Flag the freshly-installed VMA so its teardown (burrow_unmap /
     // vma_drain) uncharges exactly once -- the charge/uncharge pairing rides
     // the VMA, covering every removal path (explicit detach, the weave-fid
-    // clunk unmap, exit drain). We still hold dst->vma_lock, and burrow_map
+    // clunk unmap, exit drain). We still hold dst->as->lock, and burrow_map
     // just inserted the VMA at exactly vaddr, so the lookup cannot miss; a
     // miss here is structural corruption of the vmas list under the held lock.
     struct Vma *vma = vma_lookup(dst, vaddr);
@@ -2043,7 +2043,7 @@ int burrow_mapping_count(const struct Burrow *v) {
 // production caller (SYS_HOSTMEM_REFCOUNT) runs IRQ-masked end-to-end, and masking
 // cannot serialize two CPUs; only v->lock can. Under v->lock every count mutation
 // is excluded, so both reads reflect one instant. The sole caller holds the target
-// Proc's as->lock, and vma_lock/as->lock -> v->lock is the established nesting
+// Proc's as->lock, and as->lock -> v->lock is the established nesting
 // (burrow_map -> vma_alloc -> burrow_acquire_mapping), so this cannot deadlock.
 // Takes v (non-const): it locks. Returns 0 for a NULL/dead Burrow (never a
 // reclaim-safe 1).

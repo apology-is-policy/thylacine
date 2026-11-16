@@ -514,7 +514,7 @@ void test_resource_page_cap_attach_enforced(void) {
 // I-32 FOURTH axis (overcommit, ARCH section 6.5): proc_vma_charge bounds live VMAs
 // at PROC_VMA_MAX -- the DoS a free SYS_BURROW_ATTACH_LAZY reservation would open.
 // Mirrors the page-charge cap test (no 65536 real VMAs; pre-set vma_count near the
-// boundary). proc_vma_charge requires p->as->vma_lock in production for EXACTNESS under
+// boundary). proc_vma_charge requires p->as->lock in production for EXACTNESS under
 // contention; this single-threaded test calls it directly (the __atomic ops are
 // coherent without the lock when no peer races).
 void test_resource_vma_cap(void) {

@@ -454,7 +454,7 @@ static s64  g_rev_read_eof   = -1;   // <0 = no EOF; >=0 = absolute file offset 
                                      // past it returns 0; a straddling read clamps)
 
 // DISTRO D-3 / #190: the mid-fault geometry shift. The FILE slow path drops
-// vma_lock across dev->read precisely so the read can block -- which makes the
+// as->lock across dev->read precisely so the read can block -- which makes the
 // stub read the one deterministic place a test can stand in for "a sibling
 // thread re-shaped the mapping while we slept". Set g_rev_shift_vma to a live
 // VMA and its burrow_offset moves by one page on the next read, exactly as a
@@ -463,7 +463,7 @@ static struct Vma *g_rev_shift_vma = NULL;
 
 // B-1a audit F1: a sibling thread's SYS_BURROW_PROTECT landing while the
 // page-in sleeps. Same stand-in as g_rev_shift_vma -- the stub read runs with
-// vma_lock DROPPED, so it is the one deterministic place a protect can be
+// as->lock DROPPED, so it is the one deterministic place a protect can be
 // interposed between the fault's admission and its install.
 static struct Proc *g_rev_protect_proc = NULL;
 static u64          g_rev_protect_va   = 0;
@@ -724,7 +724,7 @@ void test_demand_page_file_geometry_shift_bails(void) {
     TEST_ASSERT(vma != NULL, "the VMA is findable");
     TEST_EXPECT_EQ((u64)vma->burrow_offset, 0ull, "starts at burrow_offset 0");
 
-    // Arm the shift, then fault. The read runs with vma_lock DROPPED, moves the
+    // Arm the shift, then fault. The read runs with as->lock DROPPED, moves the
     // VMA's burrow_offset by a page, and returns its bytes; the install then
     // finds the faulting VA naming a different slot than the one those bytes
     // belong to.
@@ -1675,7 +1675,7 @@ void test_demand_page_lazy_decommit_refault(void) {
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 2) != NULL, "slot 2 resident");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 3) == NULL, "slot 3 sparse");
 
-    // Decommit the whole 4-page range (under vma_lock, like the syscall path).
+    // Decommit the whole 4-page range (under as->lock, like the syscall path).
     spin_lock(&p->as->lock);
     int drc = burrow_decommit(p, USER_VA, FOUR_PAGES);
     spin_unlock(&p->as->lock);

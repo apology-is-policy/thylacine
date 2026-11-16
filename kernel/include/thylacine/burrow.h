@@ -115,7 +115,7 @@ enum burrow_type {
     // BURROW_TYPE_ANON_LAZY — backing is a `length`-byte ANONYMOUS region whose
     // pages are demand-ZEROED one at a time on first touch. The structural twin of
     // BURROW_TYPE_FILE but SIMPLER: there is no backing file, so the fault arm
-    // allocates + zero-fills + installs RW/XN ENTIRELY under vma_lock (no blocking
+    // allocates + zero-fills + installs RW/XN ENTIRELY under as->lock (no blocking
     // read -> no slow path / no pin / no death-interruptible read). `pages` is NULL
     // (no contiguous alloc_pages chunk); the per-page physical pages live in the
     // pagemap `pm` (the SAME field FILE uses), each slot absent until faulted
@@ -202,7 +202,7 @@ struct Burrow {
     // #847: serializes the two counts below + the dual-counter free decision
     // against concurrent ref/unref/{acquire,release}_mapping from sibling
     // threads of a multi-threaded Proc. Plain spin_lock (process-context only,
-    // never from IRQ -- matches p->vma_lock). KP_ZERO at create inits it
+    // never from IRQ -- matches p->as->lock). KP_ZERO at create inits it
     // unlocked (SPIN_LOCK_INIT == {0}). A leaf lock: burrow_free_internal runs
     // OUTSIDE it. Lock order (with #844): handle-table lock -> v->lock (a
     // handle_get/dup acquire is under the table lock); never the reverse.
@@ -857,10 +857,10 @@ struct AddrSpace *burrow_payer_for_test(struct Burrow *v);
 // At v1.0 P3-Db, burrow_offset is implicitly 0 (the VMA covers the head of
 // the BURROW). Phase 5+ extends with an explicit offset for shared VMOs.
 //
-// PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` -- this
+// PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->as->lock` -- this
 // is a `p->vmas` mutator (via vma_insert), and every vmas mutator + the
-// demand-page reader serialize on vma_lock for multi-thread-Proc SMP safety.
-// Lock order: vma_lock -> buddy zone->lock. (exec_setup is exempt -- single-
+// demand-page reader serialize on as->lock for multi-thread-Proc SMP safety.
+// Lock order: as->lock -> buddy zone->lock. (exec_setup is exempt -- single-
 // threaded by construction.)
 int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 prot);
 
@@ -939,7 +939,7 @@ int burrow_protect_in(struct AddrSpace *as, bool exempt,
 // suspected AEGIS-256/mallocng corruption class). Idempotent on never-faulted-
 // in pages.
 //
-// PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` (a
+// PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->as->lock` (a
 // `p->vmas` mutator; same discipline as burrow_map).
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 #ifdef KERNEL_TESTS
@@ -1065,7 +1065,7 @@ size_t burrow_backing_pages(size_t size);
 // refcount is unchanged.
 //
 // PRECONDITIONS (see kernel/burrow.c for the cross-Proc #847 proof + lock
-// order): the caller MUST hold `dst->vma_lock` (a dst->vmas mutator, the same
+// order): the caller MUST hold `dst->as->lock` (a dst->vmas mutator, the same
 // #713 / RW-1 C-F2 discipline as burrow_map) AND MUST guarantee `v` stays live
 // across the call (a held ref, or a higher-level lock excluding a concurrent
 // teardown to {h:0,m:0} -- the Weft-6 caller serializes the data-fid open

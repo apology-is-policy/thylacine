@@ -74,7 +74,7 @@ session.
 under exactly the corruption it exists for instead of disabling itself.
 
 **The user path** is `vma_lookup` → permission check → resolve backing PA →
-install the PTE, all under `vma_lock`, with one arm that cannot run under a
+install the PTE, all under `as->lock`, with one arm that cannot run under a
 spinlock.
 
 Two properties of that install are load-bearing and invisible. The offset is
@@ -101,14 +101,14 @@ executable.
 
 ## Concurrency
 
-**The whole fast path runs under `Proc.vma_lock`** — lookup, resolve and
+**The whole fast path runs under `AddrSpace.lock`** — lookup, resolve and
 install as one atomic sequence. This is the #713 fix. Before it, the walker
 raced a sibling thread's detach and could install a leaf PTE aliasing a page
 already recycled into kernel memory: a wild kernel pointer appearing inside a
 user address space. The same lock serializes two concurrent faults that would
 otherwise race sub-table construction and orphan one.
 
-Lock order is `vma_lock → burrow lock → buddy`, matching the attach path, so
+Lock order is `as->lock → burrow lock → buddy`, matching the attach path, so
 there is no inversion.
 
 **The ordinary arms take no Burrow reference.** A demand-paged anonymous or lazy
@@ -121,7 +121,7 @@ mapping (and therefore the Burrow) alive.
 **The file arm breaks the lock deliberately**, and the protocol is the
 interesting part of this file:
 
-1. Under `vma_lock`, observe the slot is not resident. Take a Burrow
+1. Under `as->lock`, observe the slot is not resident. Take a Burrow
    **reference** and record the request. The VMA holds a mapping ref, so the
    Burrow is alive *now*, which is what makes taking the ref safe.
 2. Drop the lock. Read from the backing file — a 9P round trip that blocks, and
@@ -175,7 +175,7 @@ RX mapping, with a non-exec-class Burrow as the control.
 
 The pin is what makes step 3 safe against both use-after-free and address
 reuse: the Burrow cannot be freed *or* have its allocator slot recycled under
-us. It is dropped exactly once, outside `vma_lock`, because the last reference
+us. It is dropped exactly once, outside `as->lock`, because the last reference
 may sleep.
 
 **Nothing past the EXITING commit sleeps (thread-model C3).** The FILE miss is

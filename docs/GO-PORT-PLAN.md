@@ -178,7 +178,7 @@ commits sub-ranges as the heap grows. Eager commit breaks this — Go would comm
 2. **The proper fix (small, well-motivated kernel ask):** a **demand-paged anon
    burrow** — make the *page* allocation lazy on fault, exactly as the *PTE*
    path already is. The fault handler (`arch/arm64/fault.c::userland_demand_page`,
-   already under `vma_lock`) already demand-installs PTEs; the change is to
+   already under `as->lock`) already demand-installs PTEs; the change is to
    demand-*allocate* the page there instead of pre-allocating at create. This is
    the natural `mmap(MAP_ANONYMOUS)` semantics, benefits *every* large anon
    mapping (not just Go), and composes with the #65 page-cap (charge on fault).

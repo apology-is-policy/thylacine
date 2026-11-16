@@ -187,7 +187,7 @@ Magazine pages in the stack carry `flags = 0` — deliberately NOT
 `zone->lock` ([[lock-buddy-zone]]) is irqsave and a deep leaf — held
 across split/merge only, never across anything that allocates or
 sleeps. Order: bare-IRQ-mask → zone (magazines), kmem-cache →
-zone (SLUB slab ops), `vma_lock` → zone (demand paging), larder leaf
+zone (SLUB slab ops), `as->lock` → zone (demand paging), larder leaf
 → buddy (page-buffer frees). The #808 boot page-map runs before
 `smp_init` under a full mask, so its block→table demotes race
 nothing.

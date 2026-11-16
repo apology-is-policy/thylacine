@@ -63,7 +63,7 @@ address space and nothing in it; exec is what puts a program there. The
 split is why there is no `exec(2)`: both exec bodies reject a Proc that
 already has mappings, so loading is something that happens to a *fresh* Proc,
 exactly once. Several of exec's simplifying assumptions — single-threaded by
-construction, exempt from the `vma_lock` discipline, no teardown path — are
+construction, exempt from the `as->lock` discipline, no teardown path — are
 that one decision cashed out.
 
 ## Cross-cutting

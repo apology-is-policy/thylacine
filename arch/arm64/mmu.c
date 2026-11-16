@@ -2008,7 +2008,7 @@ u64 mmu_uninstall_pte_calls(void) {
 // letting it write a user-RO page via the direct map would violate I-12 (W^X:
 // the page is RO+X text) AND corrupt the I-36 REVENANT Image cache (shared text
 // pages) -- which is exactly why breakpoints are HW (8a-2), never a software BRK
-// patched into text. LOCK CONTRACT: the caller holds the target's vma_lock (for
+// patched into text. LOCK CONTRACT: the caller holds the target's as->lock (for
 // a coherent VMA/PTE snapshot) and has confirmed the target is fully stopped (no
 // thread of the target runs, so no concurrent fault mutates the tree).
 
