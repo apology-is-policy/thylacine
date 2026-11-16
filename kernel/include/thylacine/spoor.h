@@ -444,6 +444,10 @@ int spoor_stat_native(struct Spoor *c, struct t_stat *out);
 // failure policy -- see image.h's file_limit contract.
 u64 spoor_file_size(struct Spoor *c);
 
+// The same, and the version the stat answered with in *vers_out (untouched on
+// UNKNOWN): a file mapping keys its Image on it (image_lookup_or_create_at).
+u64 spoor_file_size_vers(struct Spoor *c, u32 *vers_out);
+
 // =============================================================================
 // Namespace name retention (#66 -- the Plan 9 Chan.path; I-33). The bridge
 // between the resolver (which knows the walked component) and the per-Spoor

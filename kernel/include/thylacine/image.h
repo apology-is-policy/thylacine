@@ -130,6 +130,15 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
                                       size_t length, bool exec, u64 file_limit,
                                       struct AddrSpace *payer, bool payer_exempt);
 
+// The same, keyed on `key_vers` instead of the Spoor's own qid.vers, which is the
+// version the descriptor was opened at. A file mapping passes the version its
+// size probe fetched (spoor_file_size_vers), so a mapping made after a write on
+// the client finds no Image from before it (LARDER-DESIGN 12.6).
+struct Burrow *image_lookup_or_create_at(struct Spoor *spoor, u64 file_offset,
+                                         size_t length, bool exec, u64 file_limit,
+                                         struct AddrSpace *payer, bool payer_exempt,
+                                         u32 key_vers);
+
 #ifdef KERNEL_TESTS
 // Number of live (used) cache entries. Snapshot under the cache lock.
 int image_cache_live_count_for_test(void);

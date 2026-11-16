@@ -294,6 +294,7 @@ struct larder {
     u64 page_installs;
     u64 page_install_skips;   // gen-guard skips
     u64 page_own_installs;    // G1 write-populate installs (flush-landed own pages)
+    u64 page_own_skips;       // own installs the guard stopped (an event since the freeze)
     u64 page_invalidations;   // pages dropped by own-write invalidate
     u64 page_evictions;
     u64 co_snapshots;         // cached-open snapshots served (fidless opens minted)
@@ -461,10 +462,8 @@ u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
 // slot / LRU victim (reusing its retained buffer).
 // G1 (term-4) write-populate: install the writer's OWN landed bytes at the wb
 // flush. own pages serve WITHOUT the cvers gate (no post-flush cvers is knowable
-// client-side -- Rwrite carries none) and WITHOUT the populate gen guard: the
-// resurrection class the guard closes is a READ-populate racing an invalidate;
-// these bytes are the writer's just-landed content and no same-file mutation can
-// land concurrently (the caller holds the wb flush freeze, wb_flushers > 0).
+// client-side -- Rwrite carries none). This single-page form takes no gen guard;
+// the flush installs through larder_page_install_own_run, which does.
 // page_off == 0 installs/overwrites the page (own, cvers ignored); page_off > 0
 // EXTENDS only an existing OWN page whose valid_len == page_off (the append-chain
 // continuation across cap flushes) -- any other shape is skipped: never a hole,
@@ -474,6 +473,15 @@ u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
 // coupling.
 void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
                              u32 page_off, const u8 *data, u32 len);
+
+// The flush's land (LARDER-DESIGN 13, votes M24/M24a): `seq0` is the gen the
+// flush snapshotted before sending its run [off, off+total) of `buf`. Under one
+// hold, ask whether an event named the file since seq0, and drop its attr; then
+// install each page as own while no event has named the file since that drop. A
+// hit skips the rest and drops every page of the file, as a failed flush does;
+// false then. True when every page went in (a page an OOM skipped included).
+bool larder_page_install_own_run(struct larder *l, u64 seq0, u64 qid_path,
+                                 u64 off, u32 total, const u8 *buf);
 
 void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_index,
                          u32 cvers, const u8 *data, u32 len);

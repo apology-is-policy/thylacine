@@ -98,14 +98,14 @@ static size_t page_round(size_t length) {
 // refuses an executable mapping of any other.
 _Static_assert(sizeof(((struct image_entry *)0)->devno) == sizeof(((struct Spoor *)0)->devno),
                "the Image cache key carries the whole devno");
-static bool key_match(const struct image_entry *e, const struct Spoor *s,
+static bool key_match(const struct image_entry *e, const struct Spoor *s, u32 vers,
                       u64 file_offset, size_t size, bool exec) {
     return e->used &&
            e->exec        == exec &&
            e->dc          == s->dc &&
            e->devno       == s->devno &&
            e->qid_path    == s->qid.path &&
-           e->qid_vers    == s->qid.vers &&
+           e->qid_vers    == vers &&
            e->file_offset == file_offset &&
            e->size        == size;
 }
@@ -138,6 +138,16 @@ static int find_install_slot(void) {
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
                                       size_t length, bool exec, u64 file_limit,
                                       struct AddrSpace *payer, bool payer_exempt) {
+    if (!spoor)
+        return NULL;
+    return image_lookup_or_create_at(spoor, file_offset, length, exec, file_limit,
+                                     payer, payer_exempt, spoor->qid.vers);
+}
+
+struct Burrow *image_lookup_or_create_at(struct Spoor *spoor, u64 file_offset,
+                                         size_t length, bool exec, u64 file_limit,
+                                         struct AddrSpace *payer, bool payer_exempt,
+                                         u32 key_vers) {
     if (!spoor)
         return NULL;
     if (spoor->magic != SPOOR_MAGIC)
@@ -175,7 +185,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     // --- pass 1: search the cache ---
     spin_lock(&g_image_lock);
     for (int i = 0; i < IMAGE_CACHE_MAX; i++) {
-        if (key_match(&g_image[i], spoor, file_offset, size, exec)) {
+        if (key_match(&g_image[i], spoor, key_vers, file_offset, size, exec)) {
             struct Burrow *cached = g_image[i].burrow;
             burrow_ref(cached);              // the caller's handle ref
             g_image[i].lru = ++g_image_clock;
@@ -203,7 +213,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     // --- pass 2: re-search (the create race) + install ---
     spin_lock(&g_image_lock);
     for (int i = 0; i < IMAGE_CACHE_MAX; i++) {
-        if (key_match(&g_image[i], spoor, file_offset, size, exec)) {
+        if (key_match(&g_image[i], spoor, key_vers, file_offset, size, exec)) {
             // Lost the race: a concurrent exec registered the same image first.
             struct Burrow *winner = g_image[i].burrow;
             burrow_ref(winner);              // the caller's handle ref
@@ -243,7 +253,7 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     g_image[slot].dc          = spoor->dc;
     g_image[slot].devno       = spoor->devno;
     g_image[slot].qid_path    = spoor->qid.path;
-    g_image[slot].qid_vers    = spoor->qid.vers;
+    g_image[slot].qid_vers    = key_vers;
     g_image[slot].file_offset = file_offset;
     g_image[slot].size        = size;
     g_image[slot].burrow      = fresh;

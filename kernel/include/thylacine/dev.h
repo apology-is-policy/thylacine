@@ -287,6 +287,10 @@ struct Dev {
     //     stale, OOM, wire failure). Nothing is bound and nothing is revealed
     //     to the caller; sts may be scribbled. The caller proceeds with the
     //     normal walk + open path, whose outcome is the observable one.
+    //   - NULL after dev_walk_failed(-errno): the open must not go on (dev9p:
+    //     a write-behind leg ended by a caught note or a death, LARDER-DESIGN
+    //     12.6), and the caller fails it with that errno. The caller zeroes the
+    //     thread's walk_errno before the call.
     struct Spoor *(*open_cached)(struct Spoor *c, const char *const *names,
                                  const size_t *name_lens, int nname,
                                  struct t_stat *sts);

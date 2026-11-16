@@ -291,6 +291,8 @@ u64 dev9p_wb_flush_sleeps(void);
 u64 dev9p_wb_holder_flushes(void);
 u32 dev9p_wb_holders(void);
 u64 dev9p_wb_leg_waits(void);
+// Sleeps those waits took (every leg wait sleeps, a user thread's included).
+u64 dev9p_wb_leg_sleeps(void);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth

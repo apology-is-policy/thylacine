@@ -269,9 +269,7 @@ bool larder_attr_gen(struct larder *l, u64 qid_path, u64 *gen_out) {
     return known;
 }
 
-void larder_attr_invalidate(struct larder *l, u64 qid_path) {
-    if (!l) return;
-    spin_lock(&l->lock);
+static void attr_invalidate_locked(struct larder *l, u64 qid_path) {
     // Log the event ALWAYS (the file was mutated even if it was not cached -- a
     // concurrent populate of THIS qid that fetched the pre-mutation value must
     // be skipped).
@@ -282,6 +280,12 @@ void larder_attr_invalidate(struct larder *l, u64 qid_path) {
         e->valid = false;
         l->attr_invalidations++;
     }
+}
+
+void larder_attr_invalidate(struct larder *l, u64 qid_path) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    attr_invalidate_locked(l, qid_path);
     spin_unlock(&l->lock);
 }
 
@@ -828,16 +832,10 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
     spin_unlock(&l->lock);
 }
 
-void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
-                             u32 page_off, const u8 *data, u32 len) {
-    if (!l || !data || len == 0) return;
-    if (page_off >= LARDER_PAGE_SIZE) return;
-    if (len > LARDER_PAGE_SIZE - page_off) len = LARDER_PAGE_SIZE - page_off;
-    spin_lock(&l->lock);
-    if (!page_ensure_array_locked(l)) {
-        spin_unlock(&l->lock);
-        return;
-    }
+// Under l->lock, with page_off < LARDER_PAGE_SIZE and len <= the room after it.
+static void page_install_own_locked(struct larder *l, u64 qid_path, u64 page_index,
+                                    u32 page_off, const u8 *data, u32 len) {
+    if (!page_ensure_array_locked(l)) return;
     if (page_off != 0) {
         // Append-chain continuation ONLY: an existing OWN page ending exactly
         // at our start. A non-own boundary page is left as-is (it serves its
@@ -851,7 +849,6 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
             e->ref = true;
             l->page_own_installs++;
         }
-        spin_unlock(&l->lock);
         return;
     }
     struct larder_page_ent *e = page_install_slot_locked(l, qid_path, page_index);
@@ -860,7 +857,6 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
         if (!e->page) {
             page_hash_unlink_locked(l, (s32)(e - l->page));
             page_qhash_unlink_locked(l, (s32)(e - l->page));
-            spin_unlock(&l->lock);
             return;
         }
     }
@@ -872,7 +868,46 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
     e->ref       = true;
     e->own       = true;
     l->page_own_installs++;
+}
+
+void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
+                             u32 page_off, const u8 *data, u32 len) {
+    if (!l || !data || len == 0) return;
+    if (page_off >= LARDER_PAGE_SIZE) return;
+    if (len > LARDER_PAGE_SIZE - page_off) len = LARDER_PAGE_SIZE - page_off;
+    spin_lock(&l->lock);
+    page_install_own_locked(l, qid_path, page_index, page_off, data, len);
     spin_unlock(&l->lock);
+}
+
+bool larder_page_install_own_run(struct larder *l, u64 seq0, u64 qid_path,
+                                 u64 off, u32 total, const u8 *buf) {
+    if (!l || !buf || total == 0) return false;
+    spin_lock(&l->lock);
+    bool hit = inval_hits_locked(l, seq0, qid_path);
+    attr_invalidate_locked(l, qid_path);
+    u64 seq1 = l->gen;               // this drop is the window's floor
+    spin_unlock(&l->lock);
+    u64 ps  = LARDER_PAGE_SIZE;
+    u64 end = off + (u64)total;
+    for (u64 idx = off / ps; !hit && idx <= (end - 1u) / ps; idx++) {
+        u64 s = idx * ps;
+        if (s < off) s = off;
+        u64 e2 = (idx + 1u) * ps;
+        if (e2 > end) e2 = end;
+        spin_lock(&l->lock);
+        hit = inval_hits_locked(l, seq1, qid_path);
+        if (!hit)
+            page_install_own_locked(l, qid_path, idx, (u32)(s - idx * ps),
+                                    buf + (s - off), (u32)(e2 - s));
+        spin_unlock(&l->lock);
+    }
+    if (!hit) return true;
+    spin_lock(&l->lock);
+    l->page_own_skips++;
+    spin_unlock(&l->lock);
+    larder_page_invalidate(l, qid_path);
+    return false;
 }
 
 void larder_page_invalidate(struct larder *l, u64 qid_path) {

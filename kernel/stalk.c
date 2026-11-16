@@ -1547,12 +1547,20 @@ restart:
             // -- this path has no quarry-cross) discards the cached open and
             // falls back to the normal walk, whose split/cross machinery owns
             // the crossing. A NULL return reveals nothing: the observable
-            // outcome is the normal path's.
+            // outcome is the normal path's -- unless the Dev recorded a reason
+            // (dev_walk_failed), which ends the open with it.
             // ================================================================
             if (amode == STALK_OPEN && omode == 0 && final_run &&
                 parent->dev->open_cached) {
+                current_thread()->walk_errno = 0;
                 struct Spoor *co = parent->dev->open_cached(
                         parent, (const char *const *)names, lens, nrun, sts);
+                if (!co && current_thread()->walk_errno != 0) {
+                    // The Dev ended the operation (a write-behind leg's caught
+                    // note or death, LARDER-DESIGN 12.6): no fallback.
+                    err = current_thread()->walk_errno;
+                    goto fail;
+                }
                 if (co) {
                     bool co_mount = false;
                     for (int j = 0; j < nrun; j++) {

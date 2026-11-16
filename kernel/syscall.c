@@ -2197,11 +2197,16 @@ int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
 // BURROW_FILE_LIMIT_UNKNOWN when the Dev cannot answer -- the CALLER owns the
 // failure policy (exec admits unknown for the immutable baked ramfs; the
 // guest-facing phenotype mmap arm refuses it).
-u64 spoor_file_size(struct Spoor *c) {
+u64 spoor_file_size_vers(struct Spoor *c, u32 *vers_out) {
     struct t_stat st;
     if (spoor_stat_native(c, &st) != 0)
         return BURROW_FILE_LIMIT_UNKNOWN;
+    if (vers_out) *vers_out = st.qid_vers;
     return st.size;
+}
+
+u64 spoor_file_size(struct Spoor *c) {
+    return spoor_file_size_vers(c, NULL);
 }
 
 // Inner — kernel-side core (the #37 *_for_proc testable shape): resolve `hraw`
@@ -7286,7 +7291,10 @@ static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
     // hostile near-2^64 size, which the predicate also excludes -- is refused
     // outright; only exec (kernel-driven, over the immutable baked ramfs) may
     // admit an unknown size, and that policy lives at ITS call site.
-    u64 file_limit = spoor_file_size(sp);
+    // The probe's version keys the Image (LARDER-DESIGN 12.6): the descriptor's
+    // own is from its open, older than a write on this client since.
+    u32 vers = sp->qid.vers;
+    u64 file_limit = spoor_file_size_vers(sp, &vers);
     if (!burrow_file_limit_known(file_limit)) {
         spoor_clunk(sp);
         return -(s64)T_E_IO;
@@ -7297,9 +7305,9 @@ static s64 mmap_file_body(struct Proc *p, struct Spoor *sp, u64 length,
     // consumes NOTHING on a NULL return. Hand it a FRESH ref so our own stays
     // ours to drop, exactly as map_file_backed does.
     spoor_ref(sp);
-    struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec,
-                                              file_limit, p->as,
-                                              proc_resource_exempt(p));
+    struct Burrow *b = image_lookup_or_create_at(sp, offset, (size_t)length, exec,
+                                                 file_limit, p->as,
+                                                 proc_resource_exempt(p), vers);
     if (!b) {
         spoor_clunk(sp);                 // the fresh ref it did not consume
         spoor_clunk(sp);                 // ours
@@ -7541,7 +7549,8 @@ static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
         // read legitimately zero-fills.) NOTE this branch has no producer on
         // the measured rootfs (#195: every arm-2 request is RW), so only unit
         // tests and a future -z separate-code toolchain reach it.
-        u64 fx_limit = spoor_file_size(sp);
+        u32 fx_vers = sp->qid.vers;  // the probe's, as the arm above keys it
+        u64 fx_limit = spoor_file_size_vers(sp, &fx_vers);
         if (!burrow_file_limit_known(fx_limit)) {
             spoor_clunk(sp);
             return -(s64)T_E_IO;
@@ -7549,9 +7558,9 @@ static s64 mmap_fixed_file_body(struct Proc *p, struct Spoor *sp, u64 addr,
         // image_lookup_or_create CONSUMES a Spoor ref on success and none on
         // NULL, so hand it a fresh one and keep ours to drop.
         spoor_ref(sp);
-        b = image_lookup_or_create(sp, offset, (size_t)length,
-                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit,
-                                   p->as, proc_resource_exempt(p));
+        b = image_lookup_or_create_at(sp, offset, (size_t)length,
+                                      (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit,
+                                      p->as, proc_resource_exempt(p), fx_vers);
         if (!b) {
             spoor_clunk(sp);             // the fresh ref it did not consume
             spoor_clunk(sp);             // ours
