@@ -15,9 +15,10 @@ multi-thread Proc's address space genuinely concurrent. The rule is total:
 **every mutator of the `vmas` list and the demand-page reader hold it.** A
 walk that skips it is reading a list another Thread may be splicing.
 
-Two exemptions, both by construction rather than by argument: the exec setup path
-and the teardown drain run single-threaded, before any peer exists or after all
-have gone.
+One exemption, by construction rather than by argument: the exec setup path runs
+single-threaded, before any peer exists. The teardown drain used to be the second;
+since G-3 it takes the lock too, so a weft reap racing it serializes instead of
+draining under it.
 
 **It is per-ADDRESS-SPACE, not per-Proc**, since the L-1 extraction moved it off
 `struct Proc` — and that is not a rename. Under `rfork(RFPROC|RFMEM)` and after a
@@ -47,9 +48,13 @@ may legitimately hold tens of thousands of regions, so every consumer bounds its
 page per call, and the `/proc/<pid>/maps` render commits whole rows and stops when
 its output buffer fills — which bounds the walk by the *buffer*, not by the region
 count. Removing that truncation without re-deriving the bound turns a diagnostic
-read into a multi-millisecond non-preemptible hold. `addrspace_clone` is the one
-consumer that does **not** bound its walk (three passes, linear in region count)
-and is recorded as a seam on [[sub-kernel-addrspace]].
+read into a multi-millisecond non-preemptible hold. Three holders do **not** bound
+their walk by a buffer: `addrspace_clone` (three passes, linear in region count;
+a seam on [[sub-kernel-addrspace]]), the last owner's drain (`vma_drain_in`, linear
+in region count plus each mapping's release), and the weft reaper's force-reclaim,
+which unmaps a whole weave -- thousands of pages, each uninstall waiting on a
+barrier. None of them runs under the table lock, and a `mem` copy that meets one
+waits outside the hold (DEBUG-FS-DESIGN 3.2).
 
 Nothing that sleeps may run under it. The demand-page path that *does* block —
 faulting a file-backed page in over 9P — is structured to do its blocking read

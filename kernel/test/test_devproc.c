@@ -2803,7 +2803,7 @@ void test_devproc_debug_mem(void) {
 static struct Proc      *g_mb_target;
 static struct AddrSpace *g_mb_holding;
 static u32  g_mb_busy_left, g_mb_walks, g_mb_drops, g_mb_waits;
-static bool g_mb_held_masked, g_mb_drop_masked, g_mb_lift_stop;
+static bool g_mb_held_masked, g_mb_drop_masked, g_mb_lift_stop, g_mb_unlink;
 static int  g_mb_drop_refs, g_mb_wait_refs;
 
 static void mb_found(struct Proc *target) {
@@ -2821,6 +2821,7 @@ static void mb_dropped(struct AddrSpace *as) {
     g_mb_drop_refs = addrspace_ref_count(as);
     if (g_mb_lift_stop) g_mb_target->debug_stop_req = 0;   // a resume in the gap
     if (g_mb_holding == as) { g_mb_holding = NULL; spin_unlock(&as->lock); }
+    if (g_mb_unlink) proc_test_unlink(g_mb_target);         // gone in the gap
 }
 
 static void mb_waited(struct AddrSpace *as) {
@@ -2829,11 +2830,13 @@ static void mb_waited(struct AddrSpace *as) {
 }
 
 void test_devproc_mem_waits_outside_the_hold(void) {
-    // control, busy once, busy always, stop lifted in the gap, busy once on a write
-    enum { LEGS = 5 };
-    static const u32  busy[LEGS] = { 0, 1, 100, 1, 1 };
-    static const bool lift[LEGS] = { false, false, false, true, false };
-    static const bool wr[LEGS]   = { false, false, false, false, true };
+    // control, busy once, busy always, stop lifted in the gap, busy once on a write,
+    // gone in the gap
+    enum { LEGS = 6 };
+    static const u32  busy[LEGS] = { 0, 1, 100, 1, 1, 1 };
+    static const bool lift[LEGS] = { false, false, false, true, false, false };
+    static const bool wr[LEGS]   = { false, false, false, false, true, false };
+    static const bool gone[LEGS] = { false, false, false, false, false, true };
     long got[LEGS];
     u32  walks[LEGS], drops[LEGS], waits[LEGS];
     bool held_masked[LEGS], drop_masked[LEGS], bytes_ok[LEGS], stranded[LEGS];
@@ -2866,6 +2869,7 @@ void test_devproc_mem_waits_outside_the_hold(void) {
         tgt->debug_stop_req = 1;
         g_mb_busy_left   = busy[l];
         g_mb_lift_stop   = lift[l];
+        g_mb_unlink      = gone[l];
         g_mb_walks       = 0;
         g_mb_drops       = 0;
         g_mb_waits       = 0;
@@ -2883,6 +2887,7 @@ void test_devproc_mem_waits_outside_the_hold(void) {
         else if (wr[l]) got[l] = devproc.write(mem, wbuf, 64, (s64)VA);
         else            got[l] = devproc.read(mem, buf, 64, (s64)VA);
         devproc_mem_test_set_hooks(NULL, NULL, NULL);
+        if (gone[l]) proc_test_link(tgt);
         // A walk that took the lock and then did not report it busy would leave
         // it held, and the next leg's take would never return.
         stranded[l] = g_mb_holding != NULL;
@@ -2947,6 +2952,11 @@ void test_devproc_mem_waits_outside_the_hold(void) {
     TEST_ASSERT(bytes_ok[4], "write: the bytes landed");
     TEST_ASSERT(untainted_before_write, "premise: the target was untainted before the write");
     TEST_ASSERT(tainted, "write: the target carries the debug taint");
+
+    TEST_EXPECT_EQ((long)drops[5], 1L, "gone in the gap: one drop");
+    TEST_EXPECT_EQ((long)waits[5], 1L, "gone in the gap: the wait ran before the re-walk");
+    TEST_EXPECT_EQ((long)walks[5], 1L, "gone in the gap: the re-walk does not find the pid");
+    TEST_EXPECT_EQ(got[5], -1L, "gone in the gap: the read answers -1, not EBUSY");
 }
 
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a

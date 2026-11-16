@@ -235,7 +235,8 @@ wait point; a third hook reads the pin after the wait, before the unpin. Busy on
 copies on the second walk, the space pinned at the drop and still after the wait, and
 interrupts unmasked at the wait -- the same probe under the hold reads masked, the
 control; busy always answers EBUSY after eight walks and seven waits; a stop lifted in
-the gap is refused by the second walk's gate with the -1; a retried write lands and taints; every
+the gap is refused by the second walk's gate with the -1, and a target gone in the gap
+answers -1 too (each try starts from -1, so a busy try leaves nothing behind); a retried write lands and taints; every
 leg's pins are dropped. Not witnessed: the wait itself, and a pin taken after the
 walk instead of inside it -- each needs a second CPU's holder or reaper).
 Every seal

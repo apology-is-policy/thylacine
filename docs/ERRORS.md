@@ -908,11 +908,14 @@ for an unlinked file's fid among them, except its `EBADF`, which reads
 ### The debug memory file (operator vote 134, 2026-11-16)
 
 Operator vote 134 (audit round 40 F5; DEBUG-FS-DESIGN 3.2). A read or write of
-`/proc/<pid>/mem` answers the bytes moved (0 for a hole), -T_E_ACCES for every
-authority refusal (the 2026-10-06 rule), -T_E_BUSY when the target address
-space's lock was busy on all eight tries of the copy (vote 132's trylock and
-wait), and the bare -1 for a target that is gone, not ALIVE, not stopped or held
-by another ctl. EBUSY says only that the copy did not get the lock: the target
+`/proc/<pid>/mem` answers the bytes moved (0 for a hole, for a write to a
+read-only page and for a read of an execute-only page), -T_E_ACCES for every
+authority refusal (the 2026-10-06 rule, DEBUG-FS-DESIGN 3), -T_E_BUSY when the
+target address space's lock was busy on all eight tries of the copy (vote 132's
+trylock and wait), and the bare -1 for a target that is gone, not ALIVE or not
+stopped. It asks no debug-owner question: any caller with the authority may read
+or write a target somebody else holds stopped, which is why a write stamps the
+debug taint itself. EBUSY says only that the copy did not get the lock: the target
 was found stopped on every try, and a retry may succeed. Linux sleeps on the mm
 lock and answers -EIO only when a fatal signal ends the wait; 9front sleeps on the
 segment lock. Neither gives this answer.

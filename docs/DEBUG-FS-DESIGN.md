@@ -123,7 +123,7 @@ Enforcement: the two-axis gate at each debug read/write site (the
 OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); every `/proc` authority refusal --
 this gate, kproc, either seal, the I-26 kill gate, the owner-or-hostowner reads and
 the none wall -- answers `EACCES`, as `/ctl/kernel-base` and `/ctl/kstack` do, ERRORS.md's binding rule for a permission denial
-(2026-10-06; it answered a bare -1 before, which pouch and Go read as `EPERM`), while
+(2026-10-06; it answered a bare -1 before, which Go read as `EPERM` and pouch as `EIO`), while
 a target that is gone, not ALIVE, not stopped, or held by another ctl stays the
 generic -1, and a `mem` copy that found the target space's lock busy on all eight
 tries (3.2) answers `EBUSY` (operator vote 134); the stopped-only guard on mem/reg access; HW

@@ -2256,7 +2256,7 @@ static bool devproc_target_fully_stopped(struct Proc *target) {
 // The hold never waits for the target space's lock, which a sharing (RFMEM)
 // sibling's fork holds across a whole clone (DEBUG-FS-DESIGN 3.2): a walk that
 // finds it busy pins the space, and the caller waits outside and walks again.
-// After this many walks the read answers as if the target were not stopped.
+// After this many busy walks the copy answers EBUSY (vote 134).
 #define DEBUG_MEM_TRIES  8u
 
 struct devproc_mem_ctx {
@@ -2295,8 +2295,7 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     struct AddrSpace *as = target->as;
     if (!spin_trylock(&as->lock)) {
         addrspace_pin(as);
-        m->busy   = as;
-        m->result = -1;
+        m->busy = as;
         return 1;
     }
     m->result = m->is_write
@@ -2329,7 +2328,8 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
         .result     = -1,
     };
     for (u32 tries = 1; ; tries++) {
-        m.busy = NULL;
+        m.busy   = NULL;
+        m.result = -1;   // a walk that never finds the pid answers -1, whatever the last try left
         proc_for_each(devproc_mem_walk_cb, &m);
         struct AddrSpace *busy = m.busy;
         if (!busy) return m.result;   // -T_E_ACCES refused, -1 not-found / not stopped; else bytes moved (0 = a hole at off)
