@@ -49,7 +49,9 @@
 #      copy fails leaves the source and the destination as they were and removes only its own
 #      copy: an unreadable file over an existing one (vote M19), and a read-only tree holding an
 #      unreadable file, whose copy keeps the owner's 0700 until the whole copy is done (round 2
-#      F11), so it can be removed.
+#      F11), so it can be removed. The app's record shows the copy reach each entry from its
+#      directory's handle, and examine the directory it made from the handle its creation returned
+#      (round 4).
 #
 # Uses the --config ci image (a serial-console login). Every capture ends at the delimiter after
 # it, and the guest's output is upper-cased, so the echoed command line can never match it.
@@ -147,6 +149,17 @@ proc app_wait {re secs phase} {
 proc app_walks {name} {
     set got [regexp -all -inline -line -- "walk \[^\n\]*'[string map {. \\.} $name]'\[^\n\]*" [app_log]]
     return [expr {[llength $got] ? [join $got "; "] : "none"}]
+}
+# The number of lines the app's record holds: lines numbered from here on came after this point.
+proc log_mark {} {
+    return [regexp -all {\n} [app_log]]
+}
+# The lines of the app's record numbered `from` up to (not including) `to`, or to its end when
+# `to` is end, that match `re`.
+proc log_matches {re from to} {
+    set lines [split [app_log] "\n"]
+    set last [expr {$to eq "end" ? "end" : $to - 1}]
+    return [lsearch -all -inline -regexp [lrange $lines $from $last] $re]
 }
 # The number of the first or last line of the app's record matching `re`, or -1: what came first.
 proc log_line {re which} {
@@ -520,12 +533,27 @@ on_mac [expr {[read_file $::I/over.txt] eq "inbox over words\n"}] "inbox/over.tx
 on_mac [file exists $::W/unreadable.txt] "work/unreadable.txt, the source, is still there"
 # A read-only tree whose copy fails part way: the copy's directory stays the owner's 0700 until a
 # whole copy is finished, so mv can remove it (round 2 F11).
+set m10e [log_mark]
 lassign [tool_status mv "mv /mnt/mac/folders/work/locked /mnt/mac/folders/inbox/locked" leg10e "a read-only tree holding an unreadable file moved between shares"] st why
 if {$st == 0 || $why ne "cannot open '/mnt/mac/folders/work/locked/unreadable.txt' for reading: permission denied"} {
     lc_fail "a read-only tree holding an unreadable file gave status $st, '$why' -- not a copy refused at that file's open"
 }
 lc_step "status $st: $why"
 on_mac [expr {![file exists $::I/locked]}] "inbox/locked was never made"
+# From the app's record: once mv made its temporary directory in inbox, the kernel's walk to the
+# new name was the only one before the copy of the first entry, the directory examined from the
+# handle its creation returned; a stat by path walks to it once more.
+set tmp {walk 'folders/inbox' \['\.mv-[0-9]+-[0-9]+'\] -> 1 of 1}
+set lines [split [app_log] "\n"]
+set t0 [lsearch -regexp [lrange $lines $m10e end] $tmp]
+set e0 [lsearch -regexp [lrange $lines $m10e end] {walk 'folders/work/locked' \['[^']+'\]}]
+set tw [expr {$t0 >= 0 && $e0 > $t0 ? [llength [log_matches $tmp [expr {$m10e + $t0}] [expr {$m10e + $e0}]]] : -1}]
+on_mac [expr {$tw == 1}] "mv examined the directory it made from the handle its creation returned (walks to it before the first entry was copied: $tw)"
+# mv examined work/locked from work's handle, and the copy began from it, each walking to it
+# once; the entries below came from locked's own handle. A copy by path walks to locked again to
+# list it and for each entry. The source stays (the copy failed), so no removal walks to it.
+set lw [llength [log_matches {walk 'folders/work' \['locked'\]} $m10e end]]
+on_mac [expr {$lw == 2}] "mv's copy reached work/locked's entries from its handle (walks to locked: $lw)"
 on_mac [expr {[read_file $::W/locked/ok.txt] eq "ok in a locked tree\n" && [file exists $::W/locked/unreadable.txt]}] "work/locked keeps both its files"
 on_mac [expr {![mv_left $::W] && ![mv_left $::I]}] "no .mv- name is left in work or inbox"
 lc_pass "ls-mac-folders: mv and cp refuse one file through two shares, mv refuses a service, and a failed move leaves the source and the destination as they were and nothing of its own"
