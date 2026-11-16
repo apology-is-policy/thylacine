@@ -104,6 +104,7 @@ pub fn is_dir<P: AsRef<Path>>(path: P) -> bool {
 // =============================================================================
 
 use self::file::Leaf;
+use crate::handle::{Handle, Rights};
 use alloc_crate::string::String;
 
 /// Default POSIX mode for a directory created via `create_dir`: `rwxr-xr-x`.
@@ -129,6 +130,13 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 /// [`create_dir`] with the permission bits given (under the umask), as
 /// `mkdir(2)` takes them.
 pub fn create_dir_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
+    create_dir_open(path, mode).map(|_| ())
+}
+
+/// [`create_dir_mode`], keeping the directory: a reading open of the very
+/// directory this call created, so a caller asks what it made of the handle
+/// rather than of whatever the path names by then.
+pub fn create_dir_open<P: AsRef<Path>>(path: P, mode: u32) -> Result<File> {
     // #50: one SYS_OPEN_CREATE with DMDIR replaces the split + parent-T_OPATH
     // + t_walk_create dance. The kernel's own leaf rows match this function's
     // documented ones exactly: a root / `.` / `..` leaf answers EEXIST (the
@@ -151,12 +159,12 @@ pub fn create_dir_mode<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
         )
     };
     let fd = Error::from_syscall_return(rc)?;
-    // mkdir does not keep the new directory open; close the returned fd.
-    // SAFETY: fd is a live KOBJ_SPOOR handle this Proc just received.
-    unsafe {
-        let _ = crate::t_close(fd);
-    }
-    Ok(())
+    // fd is a live KOBJ_SPOOR handle this Proc just received and nothing else
+    // owns; the rights are the hint every open here records.
+    Ok(File::from_raw_handle(Handle::from_raw(
+        fd as i32,
+        Rights::READ | Rights::WRITE | Rights::TRANSFER,
+    )))
 }
 
 /// Remove the file `path` (a non-directory). Mirrors `std::fs::remove_file`.

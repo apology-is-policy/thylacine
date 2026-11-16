@@ -5,10 +5,16 @@
 // io::copy. Recursion skips "." / ".." (fs::read_dir yields them).
 //
 // File identity is (dev, qid path) from a stat that follows links, as the
-// opens do -- or, when links are not followed, from one that does not, and
-// each file and directory is then opened without following a final link and
-// checked to be the entry that stat found, so a link swapped in during the
-// copy cannot lead it out of the tree. A destination that IS its source is
+// opens do. When links are not followed, the walk goes by descriptor, as
+// rmtree's does: each entry is examined through a navigation handle that does
+// not follow a final link, opened relative to its directory's handle (the top
+// operand by its path), a directory's entries are read from a reading open of
+// its own handle ("."), and a file is opened relative to its directory without
+// following a final link and checked to be the entry examined. No entry is
+// reached by a path walked again from the top, so a link swapped in during the
+// copy, for a file or for a directory already listed, cannot lead it out of
+// the tree. A directory the copy creates is examined through the handle its
+// creation returned, so it is the one made. A destination that IS its source is
 // refused before the truncating open could empty it, wherever in a tree it
 // occurs; a directory met again below itself (a symlink cycle), or the
 // destination tree met inside the source, is not descended. Keeping attributes
@@ -39,7 +45,7 @@ use alloc::vec::Vec;
 use libthyla_rs::env;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, File, FileTimes, Metadata, OpenOptions, Path, ReadDir};
-use libthyla_rs::{eprintln, io, println, T_OREAD};
+use libthyla_rs::{eprintln, io, println, T_ONOFOLLOW, T_OPATH, T_OREAD};
 
 /// How a copy behaves, and the tool its diagnostics name.
 pub struct Opts {
@@ -111,6 +117,14 @@ struct Walk {
     done: Done,
 }
 
+/// Where a source entry is found: by its path (the top operand, and every
+/// entry when links are followed), or by name in its directory's handle.
+#[derive(Clone, Copy)]
+enum At<'a> {
+    Path,
+    In(&'a File, &'a str),
+}
+
 /// Copy `src` to `dst`, a file or a whole directory tree (the caller decides
 /// whether a directory may be copied), printing a diagnostic for each failure;
 /// false if any. A failed entry does not stop its siblings.
@@ -126,7 +140,7 @@ pub fn copy_tracked(src: &str, dst: &str, o: &Opts, done: &mut Done) -> bool {
         made: Vec::new(),
         done: Done::default(),
     };
-    let walked = copy_one(src, dst, o, &mut w);
+    let walked = copy_one(src, dst, At::Path, o, &mut w);
     let finished = finish(&w.made, walked, o);
     w.done.copied.sort_unstable();
     w.done.copied.dedup();
@@ -134,22 +148,29 @@ pub fn copy_tracked(src: &str, dst: &str, o: &Opts, done: &mut Done) -> bool {
     walked && finished
 }
 
-fn copy_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
-    let stat = if o.no_deref {
-        File::open_link(src).and_then(|f| f.metadata())
+fn copy_one(src: &str, dst: &str, at: At, o: &Opts, w: &mut Walk) -> bool {
+    // Not following links, the entry is examined through a navigation handle
+    // that does not follow a final link; a directory's entries are found from
+    // that handle.
+    let examined = if o.no_deref {
+        let nav = match at {
+            At::Path => File::open_link(src),
+            At::In(dir, name) => dir.open_at(name, T_OPATH | T_ONOFOLLOW),
+        };
+        nav.and_then(|f| Ok((f.metadata()?, Some(f))))
     } else {
-        fs::metadata(src)
+        fs::metadata(src).map(|m| (m, None))
     };
-    match stat {
-        Ok(m) if m.is_symlink() => {
+    match examined {
+        Ok((m, _)) if m.is_symlink() => {
             eprintln!(
                 "{}: cannot copy symbolic link '{}': creating a link is not supported",
                 o.tool, src
             );
             false
         }
-        Ok(m) if m.is_dir() => copy_dir(src, dst, &m, o, w),
-        Ok(m) => copy_file(src, dst, &m, o, w),
+        Ok((m, nav)) if m.is_dir() => copy_dir(src, dst, &m, nav.as_ref(), o, w),
+        Ok((m, _)) => copy_file(src, dst, &m, at, o, w),
         Err(e) => {
             eprintln!("{}: cannot stat '{}': {}", o.tool, src, e);
             false
@@ -157,7 +178,14 @@ fn copy_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
     }
 }
 
-fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool {
+fn copy_dir(
+    src: &str,
+    dst: &str,
+    m: &Metadata,
+    nav: Option<&File>,
+    o: &Opts,
+    w: &mut Walk,
+) -> bool {
     let id = id_of(m);
     if w.ancestors.is_empty() {
         w.done.src_top = Some(id);
@@ -177,26 +205,17 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
         return false;
     }
     // Kept attributes widen the mode at the end; until then, and if that is
-    // refused, only the owner reaches the copy.
-    let made = if o.preserve {
-        fs::create_dir_mode(dst, 0o700)
-    } else {
-        fs::create_dir(dst)
-    };
-    let created = match made {
-        Ok(()) => true,
-        Err(Error::Exists) if !o.excl => false,
+    // refused, only the owner reaches the copy. A directory created here is
+    // examined through the handle its creation returned; an existing
+    // destination may be a link to the directory to fill.
+    let mode = if o.preserve { 0o700 } else { 0o755 };
+    let (created, stat) = match fs::create_dir_open(dst, mode) {
+        Ok(d) => (true, d.metadata()),
+        Err(Error::Exists) if !o.excl => (false, fs::metadata(dst)),
         Err(e) => {
             eprintln!("{}: cannot create directory '{}': {}", o.tool, dst, e);
             return false;
         }
-    };
-    // An entry created new is asked without following a link; an existing
-    // destination may be a link to the directory to fill.
-    let stat = if o.excl {
-        File::open_link(dst).and_then(|f| f.metadata())
-    } else {
-        fs::metadata(dst)
     };
     let dm = match stat {
         Ok(dm) => dm,
@@ -229,7 +248,7 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
 
     w.ancestors.push(id);
     let mut ok = true;
-    match list(src, id, o) {
+    match list(src, nav, o) {
         Some(entries) => {
             for ent in entries {
                 match ent {
@@ -238,7 +257,11 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
                         if name == "." || name == ".." {
                             continue;
                         }
-                        if !copy_one(&join(src, name), &join(dst, name), o, w) {
+                        let at = match nav {
+                            Some(dir) => At::In(dir, name),
+                            None => At::Path,
+                        };
+                        if !copy_one(&join(src, name), &join(dst, name), at, o, w) {
                             ok = false;
                         }
                     }
@@ -263,24 +286,15 @@ fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool 
     ok
 }
 
-/// The entries of the directory `src`, whose identity is `id`. When links are
-/// not followed, a final link is not, and what the open finds must be that
-/// directory: a link or another entry swapped in after the stat is refused.
-fn list(src: &str, id: Id, o: &Opts) -> Option<ReadDir> {
-    let listed = if o.no_deref {
-        File::open_nofollow(src).and_then(|f| {
-            let same = id_of(&f.metadata()?) == id;
-            Ok(same.then(|| ReadDir::from_file(f)))
-        })
-    } else {
-        fs::read_dir(src).map(Some)
+/// The entries of the directory `src`; when links are not followed, from a
+/// reading open of its navigation handle ("."), the directory examined itself.
+fn list(src: &str, nav: Option<&File>, o: &Opts) -> Option<ReadDir> {
+    let listed = match nav {
+        Some(dir) => dir.open_at(".", T_OREAD).map(ReadDir::from_file),
+        None => fs::read_dir(src),
     };
     match listed {
-        Ok(Some(entries)) => Some(entries),
-        Ok(None) => {
-            eprintln!("{}: '{}' changed during the copy; not copied", o.tool, src);
-            None
-        }
+        Ok(entries) => Some(entries),
         Err(e) => {
             eprintln!("{}: cannot read directory '{}': {}", o.tool, src, e);
             None
@@ -288,7 +302,7 @@ fn list(src: &str, id: Id, o: &Opts) -> Option<ReadDir> {
     }
 }
 
-fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool {
+fn copy_file(src: &str, dst: &str, m: &Metadata, at: At, o: &Opts, w: &mut Walk) -> bool {
     if !o.excl {
         if let Ok(dm) = fs::metadata(dst) {
             // -n: never overwrite an existing destination (skip silently).
@@ -301,10 +315,10 @@ fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool
             }
         }
     }
-    let opened = if o.no_deref {
-        File::open_nofollow(src)
-    } else {
-        File::open(src)
+    let opened = match at {
+        At::In(dir, name) => dir.open_at(name, T_OREAD | T_ONOFOLLOW),
+        At::Path if o.no_deref => File::open_nofollow(src),
+        At::Path => File::open(src),
     };
     let mut r = match opened {
         Ok(r) => r,

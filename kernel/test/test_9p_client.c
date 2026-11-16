@@ -2749,47 +2749,60 @@ void test_9p_client_loom_readdir_names(void) {
 // chain as an error reply does, so the NOP linked after it is cancelled with
 // one -ECANCELED CQE, not run.
 void test_9p_client_loom_readdir_refusal_cancels_chain(void) {
-    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
-                              loom_readdir_name_responder, NULL);
-    TEST_EXPECT_EQ(rc, 0, "loopback init (named-dirent responder)");
-    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
-                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
-    TEST_EXPECT_EQ(rc, 0, "client init");
+    int rc_lb = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                                 loom_readdir_name_responder, NULL);
+    int rc_cl = rc_lb == 0
+        ? p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                         p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf))
+        : -1;
     const u8 uname[] = {'r','o','o','t'}; const u8 aname[] = {'/'};
-    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
-                   0, "handshake");
-
-    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
-    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16, false);
-    TEST_ASSERT(l != NULL, "loom_create");
+    int rc_hs = rc_cl == 0
+        ? p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0)
+        : -1;
+    struct Spoor *sp = rc_hs == 0 ? dev9p_attach_client(&g_client, 0) : NULL;
+    struct Loom *l = sp ? loom_create(8, 16, false) : NULL;
     rights_t rt = RIGHT_READ;
-    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+    // On success the ring adopts sp's reference; a refusal leaves it here.
+    int reg = l ? loom_register_handles(l, &sp, &rt, 1) : -1;
 
-    struct Burrow *b; u8 *bkva;
-    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
-    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
-    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
-    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    struct Burrow *b = NULL;
+    int n = -1;
+    u64 tail = 0, flight = 0, ud0 = 0, ud1 = 0;
+    s64 r0 = 0, r1 = 0;
+    if (reg == 0) {
+        u8 *bkva;
+        loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+        struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
-    static const u8 bad[] = {'a','/','b'};
-    g_lrd_name = bad; g_lrd_name_len = sizeof(bad);
-    cl_stage_rw(l, 0, LOOM_OP_READDIR, /*handle=*/0, /*offset=*/0, /*count=*/64,
-                /*bidx=*/0, /*buf_off=*/0, 0xF2C0000000000001ULL);
-    sqes[0].flags = LOOM_SQE_LINK;
-    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, 0, 0, 0xF2C0000000000002ULL);
-    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
-    int n = loom_enter(l, 2, /*min_complete=*/2, 0);
-    u64 tail = l->cq_tail, flight = l->async_inflight;
-    u64 ud0 = cqes[0].user_data, ud1 = cqes[1].user_data;
-    s64 r0 = (s64)cqes[0].result, r1 = (s64)cqes[1].result;
+        static const u8 bad[] = {'a','/','b'};
+        g_lrd_name = bad; g_lrd_name_len = sizeof(bad);
+        cl_stage_rw(l, 0, LOOM_OP_READDIR, /*handle=*/0, /*offset=*/0, /*count=*/64,
+                    /*bidx=*/0, /*buf_off=*/0, 0xF2C0000000000001ULL);
+        sqes[0].flags = LOOM_SQE_LINK;
+        cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, 0, 0, 0xF2C0000000000002ULL);
+        __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+        n = loom_enter(l, 2, /*min_complete=*/2, 0);
+        tail = l->cq_tail; flight = l->async_inflight;
+        ud0 = cqes[0].user_data; ud1 = cqes[1].user_data;
+        r0 = (s64)cqes[0].result; r1 = (s64)cqes[1].result;
+    }
 
-    // The fixtures go back before any assert: a red leg leaves none behind.
-    burrow_unref(b);
-    loom_unref(l);
-    p9_client_destroy(&g_client);
-    p9_loopback_destroy(&g_loopback);
+    // The fixtures go back before any assert, the setup's included: a red leg
+    // leaves none behind.
+    if (b) burrow_unref(b);
+    if (reg != 0 && sp) spoor_clunk(sp);
+    if (l) loom_unref(l);
+    if (rc_cl == 0) p9_client_destroy(&g_client);
+    if (rc_lb == 0) p9_loopback_destroy(&g_loopback);
 
+    TEST_EXPECT_EQ(rc_lb, 0, "loopback init (named-dirent responder)");
+    TEST_EXPECT_EQ(rc_cl, 0, "client init");
+    TEST_EXPECT_EQ(rc_hs, 0, "handshake");
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    TEST_ASSERT(l != NULL, "loom_create");
+    TEST_EXPECT_EQ(reg, 0, "register dev9p handle");
     TEST_EXPECT_EQ(n, 2, "two SQEs consumed");
     TEST_EXPECT_EQ(tail, (u64)2, "two CQEs");
     TEST_EXPECT_EQ(ud0, 0xF2C0000000000001ULL, "CQE0 = the READDIR");

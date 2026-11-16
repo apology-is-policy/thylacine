@@ -7,7 +7,7 @@ surface: [sub-kernel-larder, sub-kernel-ninep-dev9p]
 opened-by: chg-2026-07-09-larder-l1e
 tracker: ""
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-11-15
 ---
 **Owed**: an explicit attach-time cacheability capability. The Larder
 engages only for a `cacheable` client — a per-`p9_client` flag latched
@@ -28,4 +28,9 @@ for a future server that speaks POUNCE but streams — no such server
 exists in the v1.0 set (Stratum, netd; corvus is byte-mode, no Larder;
 `/proc` `/ctl` `/env` `/dev` are native Devs). Any NEW dev9p-served
 server must be checked against this proxy before deployment — that check
-is what this seam exists to force.
+is what this seam exists to force. The latch stands for one more property
+than the cache's (2026-11-15, audit round 4 of M15, F5): a `Tfsync` that
+commits the whole pool on whichever fid carries it, because `dev9p_fsync`
+syncs a loose cached open whose name is gone through the start the open
+kept. The check covers it: a server that walks with Twalkgetattr but syncs
+only the fid's own file breaks the proxy too.

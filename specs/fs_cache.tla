@@ -126,6 +126,12 @@
 (*                                 (NoWrongRead counterexample); its flush   *)
 (*                                 puts the older content back (NoLostStage, *)
 (*                                 with NoWrongRead left out).               *)
+(*   fs_cache_buggy_skip_keeps_entry.cfg                                     *)
+(*                                 BUGGY_SKIP_KEEPS_ENTRY + external writer  *)
+(*                                 -- an open whose populate the gen guard   *)
+(*                                 discards keeps the entry from before it   *)
+(*                                 and trusts it (audit round 4 of M15, F4): *)
+(*                                 NoStalePastRevalidation counterexample.   *)
 (*                                                                         *)
 (*   The staging cfgs run two opens (Opens = {o1, o2}), the rest one. Vote  *)
 (*   M23 (LARDER-DESIGN 12.6): a file's held bytes are the CLIENT's, so a    *)
@@ -158,6 +164,12 @@
 (*   readdir content-version needs a per-child revalidation mechanism, a     *)
 (*   v1.x item, not a dirent-format snapshot). This spec models only the     *)
 (*   content-version-bearing populate.                                      *)
+(*                                                                         *)
+(*   A populate may be discarded. The impl fetches, then installs under the *)
+(*   gen guard, which skips a fill an invalidation event of the file may     *)
+(*   have overtaken -- or any fill, once the window outruns the event ring   *)
+(*   (larder.h G4). Why a skip happens is beneath this model; that one can   *)
+(*   happen at any open, and what becomes of the entry then, is OpenSkipped. *)
 (*                                                                         *)
 (*   Open revalidates; reads within an episode do not. `Open` is the sole   *)
 (*   `cvers`-check point (close-to-open); `Read` serves a valid entry        *)
@@ -257,10 +269,14 @@ CONSTANTS
                             \*   of its own may serve the cache while ANOTHER
                             \*   open holds a stage: the observing legs of vote
                             \*   M23 missing (audit round 4 of M15, F1).
-    BUGGY_PEER_WRITE_UNORDERED \* BOOLEAN -- TRUE: a write-through by one open
+    BUGGY_PEER_WRITE_UNORDERED, \* BOOLEAN -- TRUE: a write-through by one open
                             \*   may land while another open's stage is held:
                             \*   the changing legs of vote M23 missing, so the
                             \*   older stage lands after the newer write.
+    BUGGY_SKIP_KEEPS_ENTRY  \* BOOLEAN -- TRUE: an open whose populate the gen
+                            \*   guard discards keeps the entry from before it,
+                            \*   which a stat through the open then serves
+                            \*   (audit round 4 of M15, F4).
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
@@ -282,6 +298,7 @@ ASSUME /\ Capacity \in Nat
        /\ BUGGY_PEER_WRITE_UNORDERED \in BOOLEAN
        \* The peer legs exist only where something stages.
        /\ ((BUGGY_PEER_SKIPS_STAGED \/ BUGGY_PEER_WRITE_UNORDERED) => EnableStaging)
+       /\ BUGGY_SKIP_KEEPS_ENTRY \in BOOLEAN
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
@@ -370,6 +387,24 @@ Open(f) ==
              /\ validated' = [validated EXCEPT ![f] = TRUE]
           \/ /\ ~is_hit                        \* miss or stale: drop + refetch
              /\ Refetch(f, fresh)
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
+
+(***************************************************************************)
+(* OpenSkipped(f) -- an Open whose populate the gen guard discards (larder.c  *)
+(* larder_attr_install): the fetched value may be older than an invalidation  *)
+(* event this client saw, so it is not installed. The CORRECT path drops f's  *)
+(* entry with it -- the entry may be older than this open, and nothing may be *)
+(* trusted past an open's revalidation. BUGGY_SKIP_KEEPS_ENTRY keeps it and   *)
+(* the open trusts it (the attr serve asks no version): a stale entry passes  *)
+(* for revalidated. Enabled at any time, as the ring can overflow on another  *)
+(* file's events alone.                                                       *)
+(***************************************************************************)
+OpenSkipped(f) ==
+    /\ IF BUGGY_SKIP_KEEPS_ENTRY
+         THEN /\ cache'     = cache
+              /\ validated' = [validated EXCEPT ![f] = cache[f].valid]
+         ELSE /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
+              /\ validated' = [validated EXCEPT ![f] = FALSE]
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read>>
 
 (***************************************************************************)
@@ -512,6 +547,7 @@ FlushClose(f, o) ==
 Next ==
     \E f \in Files :
         \/ Open(f)
+        \/ OpenSkipped(f)
         \/ ExternalWrite(f)
         \/ Evict(f)
         \/ \E o \in Opens :

@@ -2648,6 +2648,8 @@ struct test_case g_tests[] = {
                                        test_larder_downgrade_guards_raced_populate,
                                                                            false, NULL },
     { "larder.gen_scope_qid",          test_larder_gen_scope_qid,          false, NULL },
+    { "larder.skipped_fill_drops_the_entry",
+                                       test_larder_skipped_fill_drops_the_entry, false, NULL },
     { "larder.forget_all",             test_larder_forget_all,             false, NULL },
     { "larder.forget_one_slot_per_key", test_larder_forget_one_slot_per_key, false, NULL },
     { "larder.forget_full_page_table", test_larder_forget_full_page_table, false, NULL },

@@ -430,6 +430,17 @@ fn a_folder_is_read_and_written_as_the_mac_user_and_reports_the_attacher() {
     )
     .ok(P9_RUNLINKAT);
     assert!(!d.0.join("sub").exists());
+    // Each unlink is recorded, refused or not, in order: a move's removal of its source is told
+    // apart from a look at it.
+    let log = c.logged();
+    let at = |line: &str| {
+        log.find(line)
+            .unwrap_or_else(|| panic!("no [{line}] in {log}"))
+    };
+    let full = at("unlink 'folders/work/sub' -> errno 39");
+    let isdir = at("unlink 'folders/work/sub' -> errno 21");
+    let gone = at("unlink 'folders/work/sub' -> ok");
+    assert!(full < isdir && isdir < gone, "out of order in {log}");
 }
 
 #[test]

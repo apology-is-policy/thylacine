@@ -56,7 +56,9 @@
 //       and installs only if `gen` is unchanged. A populate that raced an
 //       invalidate is skipped (a harmless missed fill -- the next access
 //       refetches), so the install linearizes cleanly and the spec's atomic Open
-//       is realized. `gen` is global (any invalidate blocks any concurrent
+//       is realized. A skipped ATTR fill also drops the key's entry, which may
+//       be older than the open that fetched (the attr serve asks no version):
+//       the spec's OpenSkipped. `gen` is global (any invalidate blocks any concurrent
 //       populate); over-conservative but sound, and the target workload is
 //       in-flight depth 1 (serial RPCs) so skips are rare. A per-key gen is a
 //       v1.x refinement if a concurrent workload ever thrashes the fill.

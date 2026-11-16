@@ -1564,7 +1564,12 @@ static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
     // stays non-cacheable, so its consuming reads are never page-cached. This runs
     // BEFORE any read of a walked file (a file is resolved via walk_attrs first),
     // so the gate is settled before the read path consults it. Monotonic false ->
-    // true; a benign one-word race (concurrent walks both latch true).
+    // true; a benign one-word race (concurrent walks both latch true). The latch
+    // also stands for this server's Tfsync committing the whole pool whichever
+    // fid carries it: dev9p_fsync syncs a loose cached open whose name is gone
+    // through the start it kept. A server that walks with Twalkgetattr but syncs
+    // only the fid's own file needs the explicit capability LARDER-DESIGN 3.3
+    // names.
     __atomic_store_n(&src_priv->client->cacheable, true, __ATOMIC_RELAXED);
 
     w->nqid = (int)nwqid;

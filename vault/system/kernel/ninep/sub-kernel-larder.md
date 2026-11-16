@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-02
+updated: 2026-11-15
 ---
 ## Purpose
 
@@ -59,7 +59,10 @@ lazily-allocated array + page buffer.
   0 RPC-free.
 - `larder_attr_install` — Open/Refetch: install `{attr, cvers}` iff no
   invalidation event named this qid since `seq0` (the G4-scoped gen
-  guard); upgrades a `perm_only` entry to full. It also takes the inode
+  guard); upgrades a `perm_only` entry to full. A skipped fill drops the
+  key's entry too (2026-11-15, audit round 4 of M15, F4): it may be older
+  than the open whose fetch was skipped, and `attr_serve` asks no version,
+  so a kept entry would answer for the file as it was before that open. It also takes the inode
   generation (`gen`, NULL when the server's answer left it out); every install
   overwrites what the entry knew, so NULL forgets.
 - `larder_attr_gen` (B-3h3, 2026-11-02) — the generation the entry for this qid
@@ -175,7 +178,12 @@ own-write could commit + invalidate. Installing the stale RPC result
 would RESURRECT a value the invalidate already dropped (unbounded
 staleness — the I-38 violation class). So: a monotonic `gen` bumped by
 EVERY invalidation event, captured BEFORE the RPC (`seq0`), re-checked at
-install; a raced populate is skipped (a harmless missed fill).
+install; a raced populate is skipped (a missed fill). A skipped ATTR fill
+drops the key's entry as well (the spec's `OpenSkipped`): the attr serve
+trusts an entry without its version, so an entry older than the skipped
+open must not outlive it. A page is served only at the reading open's
+version and a dentry promises no open-time revalidation, so their skips
+leave what is there.
 
 G4 scopes the guard per-file: each event logs its staled qid in the
 128-slot `inval_qid` ring (slot = seq % ring); an install skips IFF its
@@ -446,7 +454,7 @@ leaf_perm_only / HARD-SOFT tagging), [[chg-2026-07-14-term4-close]].)
 
 ## Tests
 
-`kernel/test/test_larder.c` — 32 registered `larder.*` cases driving the
+`kernel/test/test_larder.c` — 37 registered `larder.*` cases driving the
 mechanism directly: the attr battery (`install_serve` / `serve_miss` /
 `invalidate` / `gen_guard_skips_raced_install` [the resurrection close] /
 `root_qid_zero` / `overwrite_wins` / `eviction_bounded`), the dentry
@@ -461,7 +469,9 @@ the page battery (`page_serve` / `page_serve_miss` / `page_offset` /
 discrimination proof] / `page_gen_guard` / `page_overwrite` /
 `page_bounded` / `page_destroy_frees`), the term-4 additions
 (`attr_downgrade_perm_only` / `downgrade_guards_raced_populate` /
-`gen_scope_qid` [own-key skips, unrelated admits, overflow fail-safes]),
+`gen_scope_qid` [own-key skips, unrelated admits, overflow fail-safes],
+`skipped_fill_drops_the_entry` [both causes of a skip drop the entry there;
+an unskipped fill replaces it]),
 and `pages_snapshot_gen_witness` (the B1 F1 interleave: coverage
 re-satisfied by a third actor, the witness fails it, a fresh capture
 serves). The policy-level integration proofs (`dev9p.page_cache_serve_

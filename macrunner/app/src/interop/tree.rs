@@ -1174,6 +1174,22 @@ impl Session {
     }
 
     fn unlinkat(&mut self, tag: u16, a: TunlinkatArgs<'_>) -> Result<usize, u32> {
+        // In order with the walks, renames and syncs: a move removes its source only once its
+        // copy is synced, renamed into place and the destination's directory synced.
+        let name = self.named(a.dfid, Some(a.name));
+        let removed = self.unlink_entry(&a);
+        self.log(&format!(
+            "unlink {name} -> {}",
+            match &removed {
+                Ok(()) => String::from("ok"),
+                Err(e) => format!("errno {e}"),
+            }
+        ));
+        removed?;
+        build_runlinkat(&mut self.reply, tag).map_err(|_| E_IO)
+    }
+
+    fn unlink_entry(&self, a: &TunlinkatArgs<'_>) -> Result<(), u32> {
         if a.flags & !P9_UNLINK_AT_REMOVEDIR != 0 {
             return Err(E_INVAL);
         }
@@ -1184,8 +1200,7 @@ impl Session {
         if !rmdir && folder::is_dir(&folder::fstatat(dir.as_raw_fd(), a.name)?) {
             return Err(E_ISDIR);
         }
-        folder::unlinkat(dir.as_raw_fd(), a.name, rmdir)?;
-        build_runlinkat(&mut self.reply, tag).map_err(|_| E_IO)
+        folder::unlinkat(dir.as_raw_fd(), a.name, rmdir)
     }
 
     // ------------------------------------------------------------------------------------------

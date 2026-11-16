@@ -9,9 +9,10 @@
 // written is followed, its directory emptied, and the link itself refused as
 // not a directory. The walk goes by descriptor (coreutils::rmtree): each
 // directory is opened relative to its parent and emptied relative to itself,
-// so a link swapped in mid-walk cannot steer it elsewhere. The first failure
-// ends an operand and is said once. An operand that names no entry of a
-// directory ("/", or one ending in "." or "..") is refused.
+// so a link swapped in mid-walk cannot steer it elsewhere. Each entry that
+// cannot be removed is said with its own path and the walk goes on, as POSIX
+// rm and Plan 9's do; the status is then 1. An operand that names no entry of
+// a directory ("/", or one ending in "." or "..") is refused.
 
 #![no_std]
 #![no_main]

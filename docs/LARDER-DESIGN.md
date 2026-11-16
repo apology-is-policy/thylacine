@@ -229,7 +229,13 @@ is resolved via `walk_attrs` before it is read). The proxy is not identical to t
 true property (a future server that speaks POUNCE but streams, or a
 content-versioned FS without POUNCE, would need an explicit attach-time capability
 — a clean v1.x add), but it is sound for the v1.0 server set (Stratum, netd) and
-fail-safe in the direction that matters. This is the only non-Stratum dev9p client
+fail-safe in the direction that matters. The latch stands for one more property of
+the server, beyond the cache's: a `Tfsync` takes an unopened fid and commits the
+whole pool whichever fid carries it (Stratum's), which `dev9p_fsync` relies on to
+sync a loose cached open whose name no longer reaches its file, through the start
+the open kept (FID-LIFECYCLE cached open; 2026-11-15, audit round 4 of M15, F5). A
+server that speaks POUNCE but syncs only the fid's own file needs the same explicit
+capability. (The Mac app refuses the fused walk, so `/mnt/mac` never latches.) This is the only non-Stratum dev9p client
 at v1.0 — corvus is a byte-mode SrvConn (not dev9p), so it has no Larder; `/proc`
 / `/ctl` / `/env` / `/dev` are native kernel Devs (not dev9p), so they bypass the
 Larder entirely.
@@ -1121,6 +1127,15 @@ requires an own-write to THAT file, and its invalidate logs that qid.
 Ring-log correctness: for a window n <= RING, slot `s % RING` (s in the window)
 was last written by seq s itself -- a later same-residue writer would exceed
 gen -- so the scan sees exactly the in-window events.
+
+A skipped ATTR fill also drops the key's entry (2026-11-15, audit round 4 of
+M15, F4; `fs_cache.tla` `OpenSkipped` and its `buggy_skip_keeps_entry` cfg).
+The entry there may be older than the open whose fetch was skipped, and
+`larder_attr_serve` answers an fstat or a stat by name without asking the
+entry's version, so a kept entry answered for the file as it was before that
+open -- under another writer, a stat staler than the open's own revalidation.
+A page is served only at the reading open's version, and a dentry promises no
+open-time revalidation, so their skips leave what is there.
 
 ### What this does NOT change
 

@@ -1998,6 +1998,7 @@ void test_larder_page_destroy_frees(void);
 void test_larder_attr_downgrade_perm_only(void);
 void test_larder_downgrade_guards_raced_populate(void);
 void test_larder_gen_scope_qid(void);
+void test_larder_skipped_fill_drops_the_entry(void);
 
 void test_dev9p_registered(void);
 void test_dev9p_qid_type_from_wire(void);

@@ -16,6 +16,7 @@ cfgs:
   - "fs_cache_buggy_populate_unflushed.cfg -- buggy: own-page install decoupled from the err==0 full-land arm (the G1 coupling counterexample)"
   - "fs_cache_buggy_peer_skips_staged.cfg -- buggy: a read through another open serves the cache while one open holds a stage (vote M23's observing legs; audit round 4 of M15, F1)"
   - "fs_cache_buggy_peer_unordered.cfg -- buggy: a write through another open lands ahead of the holder's older stage (vote M23's changing legs)"
+  - "fs_cache_buggy_skip_keeps_entry.cfg -- buggy: an open whose populate the gen guard discards keeps and trusts the entry from before it (audit round 4 of M15, F4)"
 gate: "Pre-commit re-run for ANY change to the Larder serve/populate/invalidate discipline or the write-behind staging/flush protocol (spec-first re-enabled for this surface at L1b)."
 created: 2026-07-31
 updated: 2026-11-15
@@ -27,7 +28,9 @@ bytes. Opens are named (vote M23): a stage belongs to one open and holds the
 token it staged, and the model's `Read` by another open stands for every
 observing leg (open, read, fstat, fsync, stat by name). Deliberately beneath
 the model: page granularity and alignment,
-the byte-exact overlay split, budgets, gen-guard scoping (G4), the
+the byte-exact overlay split, budgets, why the gen guard skips a fill (G4's
+scoping, the ring; that a populate may be discarded at any open, and what
+becomes of the entry, is in the model: `OpenSkipped`), the
 downgrade refinement (G3 — removed from the model sketch as unsound when
 ground truth showed Stratum bumps no parent cvers on child mutations),
 and the dir-fid cache (fids are identity, not content).
@@ -41,6 +44,7 @@ and the dir-fid cache (fids are identity, not content).
 | `OwnWrite` | the per-mutation invalidate sets (write/create/wstat/rename/unlink/OTRUNC) |
 | `Refetch` | the gen-guarded installs after each RPC |
 | `StageWrite` / `FlushClose` | `wb_write_prepare` / `wb_flush_locked` (+ the G1 own-install on FlushClose) |
+| `OpenSkipped` (audit round 4 of M15, F4) | `larder_attr_install`'s gen-guard skip, which drops the key's entry with the fill |
 | `Read(f, o)`'s `PeersClear` (vote M23) | `wb_holder_flush`'s observing legs: dev9p open / open_cached / read / stat_native / fsync, and walk_attrs_pass (the serve skips a held leaf; a wire answer re-asks once) |
 | `OwnWrite(f, o)`'s `PeersClear` | `wb_holder_flush`'s changing legs: dev9p write / OTRUNC open / wstat_native / loom_register (land, then drop the holder's anchor) |
 | `StageWrite(f, o)`'s `PeersClear`, `OneHolder` | `wb_register` at the eligibility gates (one entry per client and qid.path); the hand-off job keeps the entry until its release (`wb_close_swap`) |

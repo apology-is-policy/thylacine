@@ -1184,22 +1184,26 @@ void test_dev9p_create_file(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
     struct Spoor *nc = spoor_clone(root);
-    TEST_ASSERT(nc != NULL, "clone target");
-
-    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);   // clone-walk
-    TEST_ASSERT(w != NULL, "clone-walk gave nc its own fid");
-    walkqid_free(w);
+    struct Walkqid *w = nc ? dev9p.walk(root, nc, NULL, 0) : NULL;   // clone-walk
+    bool walked = w != NULL;
+    if (w) walkqid_free(w);
 
     g_create_flags = 0xDEADBEEFu;
-    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    struct Spoor *opened = walked ? dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u)
+                                  : NULL;
     u32 flags = g_create_flags;
-    TEST_ASSERT(opened == nc,                  "create(file) returns the Spoor");
-    TEST_ASSERT((nc->flag & COPEN) != 0,       "COPEN set after Tlcreate");
-    TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77,
-                    "qid taken from the Rlcreate response");
+    bool copen = nc && (nc->flag & COPEN) != 0;
+    u64 qpath = nc ? nc->qid.path : 0;
 
-    spoor_clunk(nc);
+    // The fixtures go back before any assert: a red one leaves none behind.
+    if (nc) spoor_clunk(nc);
     teardown(root);
+
+    TEST_ASSERT(nc != NULL, "clone target");
+    TEST_ASSERT(walked, "clone-walk gave nc its own fid");
+    TEST_ASSERT(opened == nc,                  "create(file) returns the Spoor");
+    TEST_ASSERT(copen,                         "COPEN set after Tlcreate");
+    TEST_EXPECT_EQ(qpath, (u64)0x77,           "qid taken from the Rlcreate response");
     // Round 3 F11: every create the kernel asks is exclusive.
     TEST_EXPECT_EQ((u64)flags, (u64)(01u | 0200u), "the Tlcreate asks O_WRONLY | O_EXCL");
 }
@@ -3773,10 +3777,9 @@ void test_dev9p_cached_open(void) {
 
     // Pages absent -> the RPC-free hint misses; NO wire op is spent.
     g_wga_seen = 0; g_lopen_seen = 0; g_clunk_seen = 0;
-    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
-                                         lens, 1, sts);
-    TEST_ASSERT(co == NULL, "no pages cached -> hint miss -> NULL");
-    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "a hint miss costs no wire op");
+    struct Spoor *miss = dev9p.open_cached(root, (const char *const *)names,
+                                           lens, 1, sts);
+    u32 miss_wga = g_wga_seen;
 
     // Install the covering page: content [0, 0x200) at cvers 0 (the canonical
     // responder's fresh version).
@@ -3791,85 +3794,124 @@ void test_dev9p_cached_open(void) {
     // the fid the open keeps unopened: operator vote 20), no Tlopen, the fresh
     // records in sts, the budget charged.
     g_wga_seen = 0; g_wga_newfid = P9_NOFID;
-    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
-    TEST_ASSERT(co != NULL, "cached-open mints the Spoor");
-    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "exactly one wire op (the fresh query)");
-    TEST_EXPECT_EQ((u64)g_lopen_seen, 0ull, "no Tlopen");
-    TEST_ASSERT((co->flag & COPEN) != 0, "the Spoor is opened");
-    TEST_EXPECT_EQ(co->qid.path, 0x20ull, "the leaf qid");
-    struct dev9p_priv *cp = dev9p_priv_of(co);
-    TEST_ASSERT(cp != NULL && cp->cached_open, "cached_open priv");
-    TEST_ASSERT(cp->fid != P9_NOFID && cp->fid == g_wga_newfid && cp->fid_owned,
-                "it keeps the fid its walk bound");
-    TEST_EXPECT_EQ((u64)cp->co_rfid, (u64)P9_NOFID, "and no read fid until a lock asks");
-    TEST_EXPECT_EQ(sts[0].qid_path, 0x20ull, "fresh sts filled for the post-scan");
-    TEST_EXPECT_EQ(sts[0].size, 0x200ull, "fresh leaf size");
-    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x200ull, "budget charged");
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    u32 co_wga = g_wga_seen, co_lopen = g_lopen_seen;
+    struct dev9p_priv *cp = co ? dev9p_priv_of(co) : NULL;
+    bool co_opened = co && (co->flag & COPEN) != 0;
+    u64 co_qpath = co ? co->qid.path : 0;
+    bool co_priv = cp != NULL && cp->cached_open;
+    bool co_fid_kept = cp && cp->fid != P9_NOFID && cp->fid == g_wga_newfid && cp->fid_owned;
+    u32 co_rfid = cp ? cp->co_rfid : 0;
+    u64 sts_qpath = sts[0].qid_path, sts_size = sts[0].size;
+    u64 charged = dev9p_co_budget_used() - budget0;
 
-    // Reads serve the snapshot: full, sliced, EOF at + past size.
+    // Every leg below needs the Spoor; each is captured and asserted after the
+    // fixtures are back, in this order, so a red one leaves none behind.
     u8 buf[0x260];
-    long r = dev9p.read(co, buf, (long)sizeof(buf), 0);
-    TEST_EXPECT_EQ((u64)r, 0x200ull, "read serves the full snapshot");
-    bool bytes_ok = true;
-    for (u32 i = 0; i < 0x200; i++)
-        if (buf[i] != data[i]) { bytes_ok = false; break; }
-    TEST_ASSERT(bytes_ok, "snapshot bytes verbatim");
-    r = dev9p.read(co, buf, 50, 100);
-    TEST_EXPECT_EQ((u64)r, 50ull, "sliced read");
-    TEST_ASSERT(buf[0] == data[100] && buf[49] == data[149], "slice bytes");
-    r = dev9p.read(co, buf, 64, 0x200);
-    TEST_EXPECT_EQ((u64)r, 0ull, "read at size -> EOF");
-    r = dev9p.read(co, buf, 64, 5000);
-    TEST_EXPECT_EQ((u64)r, 0ull, "read past size -> EOF");
+    long r_full = -1, r_slice = -1, r_at = -1, r_past = -1;
+    bool bytes_ok = false, slice_ok = false;
+    u64 st1 = 1, st1_size = 0, st1_qid = 0, st2 = 1, st2_size = 0;
+    s64 wsr = -1;
+    u32 kept = P9_NOFID, ws_kept = P9_NOFID, fs_kept = P9_NOFID, setattr_fid = 0, ga_asked = 0;
+    s64 fsr = -1;
+    u32 fs_seen = 0, fs_fid = 0;
+    bool w_rej = false, rd_rej = false, walk_rej = false, wa_rej = false;
+    bool dw_rej = false, dwa_rej = false;
+    int why_walk = 0, why_wa = 0;
+    u32 clunk_seen = 0, clunk_fid = 0;
+    u64 budget_after = 0;
+    if (cp) {
+        // Reads serve the snapshot: full, sliced, EOF at + past size.
+        r_full = dev9p.read(co, buf, (long)sizeof(buf), 0);
+        bytes_ok = true;
+        for (u32 i = 0; i < 0x200; i++)
+            if (buf[i] != data[i]) { bytes_ok = false; break; }
+        r_slice = dev9p.read(co, buf, 50, 100);
+        slice_ok = buf[0] == data[100] && buf[49] == data[149];
+        r_at = dev9p.read(co, buf, 64, 0x200);
+        r_past = dev9p.read(co, buf, 64, 5000);
 
-    // fstat and a wstat address the kept fid, as any open's do (vote 20). The
-    // walk installed the leaf's attrs, so fstat answers from the Larder.
-    struct t_stat st;
-    TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fstat answers");
-    TEST_EXPECT_EQ(st.size, 0x200ull, "fstat size");
-    TEST_EXPECT_EQ(st.qid_path, 0x20ull, "fstat qid");
-    g_setattr_fid = P9_NOFID;
-    TEST_EXPECT_EQ((s64)dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL), 0ll,
-                   "a wstat on a cached-open fd succeeds");
-    TEST_EXPECT_EQ((u64)g_setattr_fid, (u64)cp->fid, "on the kept fid");
-    // The wstat dropped the leaf's attrs: fstat asks the server through the
-    // kept fid, and reports the snapshot's size, which the reads serve.
-    u32 ga0 = g_tgetattr_seen;
-    TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fstat after the wstat");
-    TEST_EXPECT_EQ(g_tgetattr_seen, ga0 + 1u, "asks the server");
-    TEST_EXPECT_EQ(st.size, 0x200ull, "with the snapshot's size, not the server's 0x100");
-    // A read-only fsync reaches the server (vote M22): what the open read may
-    // sit uncommitted there.
-    g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
-    s64 fsr = (s64)dev9p.fsync(co, 0);
-    u32 fs_seen = g_tfsync_seen, fs_fid = g_tfsync_fid, fs_kept = cp->fid;
-    TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
-    TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");
-    TEST_ASSERT(dev9p.walk(co, NULL, names, 1) == NULL,
-                "walk FROM a cached open rejected");
-    TEST_ASSERT(dev9p.walk_attrs(co, NULL, names, lens, 1, sts) == NULL,
-                "walk_attrs FROM a cached open rejected");
-    int co_why = 0;
-    TEST_ASSERT(dev_walk(co, NULL, names, 1, &co_why) == NULL, "and through the wrapper");
-    TEST_EXPECT_EQ(co_why, T_E_INVAL, "a walk from a cached open is no miss");
-    TEST_ASSERT(dev_walk_attrs(co, NULL, names, lens, 1, sts, &co_why) == NULL,
-                "and the fused one");
-    TEST_EXPECT_EQ(co_why, T_E_INVAL, "and neither is that");
+        // fstat and a wstat address the kept fid, as any open's do (vote 20).
+        // The walk installed the leaf's attrs, so fstat answers from the Larder.
+        struct t_stat st;
+        st1 = (u64)dev9p.stat_native(co, &st);
+        st1_size = st.size; st1_qid = st.qid_path;
+        g_setattr_fid = P9_NOFID;
+        wsr = (s64)dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL);
+        setattr_fid = g_setattr_fid;
+        ws_kept = cp->fid;
+        // The wstat dropped the leaf's attrs: fstat asks the server through the
+        // kept fid, and reports the snapshot's size, which the reads serve.
+        u32 ga0 = g_tgetattr_seen;
+        st2 = (u64)dev9p.stat_native(co, &st);
+        ga_asked = g_tgetattr_seen - ga0;
+        st2_size = st.size;
+        // A read-only fsync reaches the server (vote M22): what the open read may
+        // sit uncommitted there.
+        g_tfsync_seen = 0; g_tfsync_fid = P9_NOFID;
+        fsr = (s64)dev9p.fsync(co, 0);
+        fs_seen = g_tfsync_seen; fs_fid = g_tfsync_fid; fs_kept = cp->fid;
+        w_rej = dev9p.write(co, "x", 1, 0) < 0;
+        rd_rej = dev9p.readdir(co, buf, 64, 0) < 0;
+        walk_rej = dev9p.walk(co, NULL, names, 1) == NULL;
+        wa_rej = dev9p.walk_attrs(co, NULL, names, lens, 1, sts) == NULL;
+        dw_rej = dev_walk(co, NULL, names, 1, &why_walk) == NULL;
+        dwa_rej = dev_walk_attrs(co, NULL, names, lens, 1, sts, &why_wa) == NULL;
 
-    // Close: one Tclunk, of the kept fid, and the budget released.
-    u32 kept = cp->fid;
-    g_clunk_seen = 0; g_clunk_fid_n = 0;
-    spoor_clunk(co);
-    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "close sends one Tclunk");
-    TEST_EXPECT_EQ((u64)g_clunk_fids[0], (u64)kept, "of the kept fid");
-    (void)p9_client_reader_pump_ready(&g_client);
-    TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "budget uncharged at close");
+        // Close: one Tclunk, of the kept fid, and the budget released.
+        kept = cp->fid;
+        g_clunk_seen = 0; g_clunk_fid_n = 0;
+        spoor_clunk(co);
+        clunk_seen = g_clunk_seen; clunk_fid = g_clunk_fids[0];
+        (void)p9_client_reader_pump_ready(&g_client);
+        budget_after = dev9p_co_budget_used();
+    } else if (co) {
+        spoor_clunk(co);
+    }
+    if (miss) spoor_clunk(miss);
 
     larder_destroy(l);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
 
-    // The fsync leg is asserted with the fixtures back: a red one leaves none behind.
+    TEST_ASSERT(miss == NULL, "no pages cached -> hint miss -> NULL");
+    TEST_EXPECT_EQ((u64)miss_wga, 0ull, "a hint miss costs no wire op");
+    TEST_ASSERT(co != NULL, "cached-open mints the Spoor");
+    TEST_EXPECT_EQ((u64)co_wga, 1ull, "exactly one wire op (the fresh query)");
+    TEST_EXPECT_EQ((u64)co_lopen, 0ull, "no Tlopen");
+    TEST_ASSERT(co_opened, "the Spoor is opened");
+    TEST_EXPECT_EQ(co_qpath, 0x20ull, "the leaf qid");
+    TEST_ASSERT(co_priv, "cached_open priv");
+    TEST_ASSERT(co_fid_kept, "it keeps the fid its walk bound");
+    TEST_EXPECT_EQ((u64)co_rfid, (u64)P9_NOFID, "and no read fid until a lock asks");
+    TEST_EXPECT_EQ(sts_qpath, 0x20ull, "fresh sts filled for the post-scan");
+    TEST_EXPECT_EQ(sts_size, 0x200ull, "fresh leaf size");
+    TEST_EXPECT_EQ(charged, 0x200ull, "budget charged");
+    TEST_EXPECT_EQ((u64)r_full, 0x200ull, "read serves the full snapshot");
+    TEST_ASSERT(bytes_ok, "snapshot bytes verbatim");
+    TEST_EXPECT_EQ((u64)r_slice, 50ull, "sliced read");
+    TEST_ASSERT(slice_ok, "slice bytes");
+    TEST_EXPECT_EQ((u64)r_at, 0ull, "read at size -> EOF");
+    TEST_EXPECT_EQ((u64)r_past, 0ull, "read past size -> EOF");
+    TEST_EXPECT_EQ(st1, 0ull, "fstat answers");
+    TEST_EXPECT_EQ(st1_size, 0x200ull, "fstat size");
+    TEST_EXPECT_EQ(st1_qid, 0x20ull, "fstat qid");
+    TEST_EXPECT_EQ(wsr, 0ll, "a wstat on a cached-open fd succeeds");
+    TEST_EXPECT_EQ((u64)setattr_fid, (u64)ws_kept, "on the kept fid");
+    TEST_EXPECT_EQ(st2, 0ull, "fstat after the wstat");
+    TEST_EXPECT_EQ(ga_asked, 1u, "asks the server");
+    TEST_EXPECT_EQ(st2_size, 0x200ull, "with the snapshot's size, not the server's 0x100");
+    TEST_ASSERT(w_rej, "write rejected");
+    TEST_ASSERT(rd_rej, "readdir rejected");
+    TEST_ASSERT(walk_rej, "walk FROM a cached open rejected");
+    TEST_ASSERT(wa_rej, "walk_attrs FROM a cached open rejected");
+    TEST_ASSERT(dw_rej, "and through the wrapper");
+    TEST_EXPECT_EQ(why_walk, T_E_INVAL, "a walk from a cached open is no miss");
+    TEST_ASSERT(dwa_rej, "and the fused one");
+    TEST_EXPECT_EQ(why_wa, T_E_INVAL, "and neither is that");
+    TEST_EXPECT_EQ((u64)clunk_seen, 1ull, "close sends one Tclunk");
+    TEST_EXPECT_EQ((u64)clunk_fid, (u64)kept, "of the kept fid");
+    TEST_EXPECT_EQ(budget_after, budget0, "budget uncharged at close");
     TEST_EXPECT_EQ((u64)fsr, 0ull, "fsync on a read-only cached open");
     TEST_EXPECT_EQ((u64)fs_seen, 1ull, "sends one Tfsync");
     TEST_EXPECT_EQ((u64)fs_fid, (u64)fs_kept, "on the kept fid");

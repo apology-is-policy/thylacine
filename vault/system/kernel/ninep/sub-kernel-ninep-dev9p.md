@@ -956,7 +956,11 @@ Legs: `dev9p.lock_close_order`, `dev9p.wb_last_close_with_holder`,
 - **The cacheability latch**: every serve/populate path gates on
   `cacheable`; the latch is set ONLY by a successful Twalkgetattr. A
   future POUNCE-speaking-but-streaming server breaks the proxy — that
-  needs an explicit capability (recorded v1.x).
+  needs an explicit capability (recorded v1.x). So does one whose
+  `Tfsync` syncs only the fid's own file: the latch also stands for a
+  whole-pool commit on any fid, which `dev9p_fsync` relies on to sync a
+  loose cached open whose name is gone through its start (audit round 4
+  of M15, F5).
 - **Read the non-support latch as a CLASS.** Non-support is the majority and the
   default; a new native server is non-supporting unless someone implements
   the op. Any statement here that names one server is wrong the moment a

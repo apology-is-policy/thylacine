@@ -919,3 +919,58 @@ void test_larder_gen_scope_qid(void) {
                 "an over-wide window fail-safes to skip");
     larder_destroy(&g_larder);
 }
+
+// A skipped attr fill drops the entry already there: the open whose fetch was
+// skipped must not be answered with the file as it was before it. Both causes
+// of a skip: the evidence lost (a window wider than the ring), and an event
+// naming the key, the entry there by then installed after that event.
+void test_larder_skipped_fill_drops_the_entry(void) {
+    larder_reset();
+    struct t_stat older = mk_stat(0644);
+    struct t_stat newer = mk_stat(0600);
+    struct t_stat out = mk_stat(0);
+    u64 s0 = 0;
+
+    // (a) the evidence lost.
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 21, 1, &older, NULL);
+    bool had_a = larder_attr_serve(&g_larder, 21, &out, &s0);
+    u32 mode_a = out.mode;
+    u64 seq0 = larder_gen_snapshot(&g_larder);
+    for (u64 i = 0; i < (u64)LARDER_INVAL_RING + 1u; i++)
+        larder_attr_invalidate(&g_larder, 30000 + i);    // all unrelated
+    u64 skips0 = g_larder.attr_install_skips;
+    larder_attr_install(&g_larder, seq0, 21, 2, &newer, NULL);
+    u64 skips_a = g_larder.attr_install_skips - skips0;
+    out = mk_stat(0);
+    bool served_a = larder_attr_serve(&g_larder, 21, &out, &s0);
+    u32 served_mode_a = out.mode;
+
+    // (b) an event naming the key, then a fill from after it, then the skip.
+    seq0 = larder_gen_snapshot(&g_larder);
+    larder_attr_invalidate(&g_larder, 22);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 22, 1, &older, NULL);
+    out = mk_stat(0);
+    bool had_b = larder_attr_serve(&g_larder, 22, &out, &s0);
+    larder_attr_install(&g_larder, seq0, 22, 2, &newer, NULL);
+    out = mk_stat(0);
+    bool served_b = larder_attr_serve(&g_larder, 22, &out, &s0);
+    u32 served_mode_b = out.mode;
+
+    // (c) the control: a fill that is not skipped replaces the entry.
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 23, 1, &older, NULL);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 23, 2, &newer, NULL);
+    out = mk_stat(0);
+    bool served_c = larder_attr_serve(&g_larder, 23, &out, &s0);
+    u32 served_mode_c = out.mode;
+    larder_destroy(&g_larder);
+
+    TEST_ASSERT(had_a && mode_a == 0644, "the entry from before the open is served");
+    TEST_EXPECT_EQ(skips_a, 1ull, "the over-wide window skips the fill");
+    TEST_ASSERT(!served_a, "the skipped fill dropped the entry from before it");
+    TEST_EXPECT_EQ((u64)served_mode_a, 0ull, "nothing served for the lost-evidence skip");
+    TEST_ASSERT(had_b, "a fill after the key's event is served");
+    TEST_ASSERT(!served_b, "a skip for the key's event drops the entry too");
+    TEST_EXPECT_EQ((u64)served_mode_b, 0ull, "nothing served for the key's-event skip");
+    TEST_ASSERT(served_c, "an unskipped fill is served");
+    TEST_EXPECT_EQ((u64)served_mode_c, 0600ull, "the unskipped fill replaced the entry");
+}

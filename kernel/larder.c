@@ -227,7 +227,15 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
     // THIS qid since the seq0 snapshot -> the fetched value may be stale
     // relative to that event (the resurrection close, larder.h note (2)). An
     // unrelated qid's event no longer discards this fill.
+    // The entry goes with the fill: it may be older than the open whose fetch
+    // this was, and the serve trusts an entry without asking its version, so a
+    // kept one would answer for the file as it was before that open.
     if (inval_hits_locked(l, seq0, qid_path)) {
+        struct larder_attr_ent *old = attr_find_locked(l, qid_path);
+        if (old) {
+            attr_hash_unlink_locked(l, (s32)(old - l->attr));
+            old->valid = false;
+        }
         l->attr_install_skips++;
         spin_unlock(&l->lock);
         return;
