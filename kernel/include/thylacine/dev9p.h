@@ -294,6 +294,15 @@ u64 dev9p_wb_leg_waits(void);
 // Sleeps those waits took (every leg wait sleeps, a user thread's included).
 u64 dev9p_wb_leg_sleeps(void);
 
+// The holder registry's test hooks (votes M24, M24a): the pins standing on
+// (cl, path) now; a static pin linked or unlinked by hand; a static entry with
+// no holder, as a closer job carrying a run is; and the release a failed test
+// needs, which unlinks every entry and pin of cl and returns how many.
+u32  dev9p_wb_pins(struct p9_client *cl, u64 path);
+void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on);
+void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on);
+u32  dev9p_wb_test_purge(struct p9_client *cl);
+
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth
 // of live runs. Balanced add/subtract pairs only; never in production paths.

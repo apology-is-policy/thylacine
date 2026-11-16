@@ -3485,7 +3485,13 @@ static struct Spoor *loom_walk_sub(struct Spoor *root, u32 *out_fid) {
     struct Spoor *nc = spoor_clone(root);
     if (!nc) return NULL;
     struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
-    if (!w) { spoor_clunk(nc); return NULL; }
+    if (!w || w->nqid != 1) {
+        // Unbound, the clone shares root's priv: detach it, never clunk it.
+        if (w) walkqid_free(w);
+        nc->aux = NULL;
+        spoor_unref(nc);
+        return NULL;
+    }
     walkqid_free(w);
     struct p9_client *cl; u32 fid;
     if (dev9p_client_fid(nc, &cl, &fid) != 0) { spoor_clunk(nc); return NULL; }

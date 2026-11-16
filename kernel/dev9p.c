@@ -855,6 +855,84 @@ static void wb_unregister(struct dev9p_priv *p) {
     wb_reg_leave(&p->wb_reg);
 }
 
+#ifdef KERNEL_TESTS
+u32 dev9p_wb_pins(struct p9_client *cl, u64 path) {
+    struct wb_reg_bucket *b = wb_reg_bucket_of(cl, path);
+    u32 n = 0;
+    spin_lock(&b->lock);
+    for (struct wb_pin *q = b->pins; q; q = q->next)
+        if (q->cl == cl && q->path == path) n++;
+    spin_unlock(&b->lock);
+    return n;
+}
+
+static struct wb_pin       g_wb_test_pin;
+static struct dev9p_wb_reg g_wb_test_job;
+
+void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on) {
+    if (on == g_wb_test_pin.linked) return;
+    struct wb_reg_bucket *b = on ? wb_reg_bucket_of(cl, path)
+                                 : wb_reg_bucket_of(g_wb_test_pin.cl, g_wb_test_pin.path);
+    spin_lock(&b->lock);
+    if (on) wb_pin_link_locked(b, &g_wb_test_pin, cl, path);
+    else    wb_pin_unlink_locked(b, &g_wb_test_pin);
+    spin_unlock(&b->lock);
+}
+
+void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
+    if (!on) {
+        wb_reg_leave(&g_wb_test_job);
+        return;
+    }
+    if (__atomic_load_n(&g_wb_test_job.linked, __ATOMIC_ACQUIRE)) return;
+    struct wb_reg_bucket *b = wb_reg_bucket_of(cl, path);
+    spin_lock(&b->lock);
+    g_wb_test_job.cl     = cl;
+    g_wb_test_job.holder = NULL;
+    g_wb_test_job.path   = path;
+    g_wb_test_job.next   = b->head;
+    b->head              = &g_wb_test_job;
+    __atomic_store_n(&g_wb_test_job.linked, true, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
+    spin_unlock(&b->lock);
+}
+
+// A test that fails with a holder registered leaks the open, and its entry
+// outlives the client it names: a fixture reinitialised at the same address
+// would find a holder. Only the predecessor's link is rewritten for a pin, which
+// may be on a returned stack; the test pin is static.
+u32 dev9p_wb_test_purge(struct p9_client *cl) {
+    u32 n = 0;
+    for (u32 i = 0; i < WB_REG_BUCKETS; i++) {
+        struct wb_reg_bucket *b = &g_wb_reg[i];
+        spin_lock(&b->lock);
+        struct dev9p_wb_reg **pp = &b->head;
+        while (*pp) {
+            struct dev9p_wb_reg *e = *pp;
+            if (e->cl != cl) { pp = &e->next; continue; }
+            *pp     = e->next;
+            e->next = NULL;
+            __atomic_store_n(&e->linked, false, __ATOMIC_RELEASE);
+            __atomic_fetch_sub(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
+            n++;
+        }
+        struct wb_pin **qq = &b->pins;
+        while (*qq) {
+            struct wb_pin *q = *qq;
+            if (q->cl != cl) { qq = &q->next; continue; }
+            *qq = q->next;
+            if (q == &g_wb_test_pin) {
+                q->next   = NULL;
+                q->linked = false;
+            }
+            n++;
+        }
+        spin_unlock(&b->lock);
+    }
+    return n;
+}
+#endif // KERNEL_TESTS
+
 // Waiting out a run on its way to a closer (12.6), which no leg can flush: a
 // closer job carries it, or a holder whose last reference has gone is handing
 // it on. A closer retries a refused run for about a second and a hung server

@@ -389,7 +389,7 @@ static bool wbc_open(struct wbc *w) {
     struct Spoor *nc = spoor_clone(w->root);
     if (!nc) return false;
     struct Walkqid *wq = dev9p.walk(w->root, nc, NULL, 0);
-    if (!wq) { spoor_clunk(nc); return false; }
+    if (!wq) { nc->aux = NULL; spoor_unref(nc); return false; }   // it shares root's priv
     walkqid_free(wq);
     w->f = dev9p.create(nc, "wbfile", 1 /*OWRITE*/, 0644u, 1000u);
     if (!w->f) { spoor_clunk(nc); return false; }
@@ -1208,8 +1208,10 @@ static struct Spoor *pw_open_peer(struct wbc *w) {
     const char *names[1] = { "wbfile" };
     struct Walkqid *wq = dev9p.walk(w->root, nc, names, 1);
     if (!wq || wq->nqid != 1) {
+        // Unbound, the clone shares root's priv: detach it, never clunk it.
         if (wq) walkqid_free(wq);
-        spoor_clunk(nc);
+        nc->aux = NULL;
+        spoor_unref(nc);
         return NULL;
     }
     walkqid_free(wq);
@@ -1294,6 +1296,63 @@ void test_p9_closer_peer_waits_out_a_handed_off_run(void) {
     TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
     TEST_EXPECT_EQ((u64)(s64)pcc, 0ull, "the peer closes");
+}
+
+// LARDER-DESIGN 12.6: a holder's last descriptor closes staged on a thread that
+// may not wait while another reference keeps the open (a map, a Loom op), so a
+// closer job does its flush. Once that job has landed the run the open leaves
+// the registry, though its last reference has not gone: another open of the
+// file may hold it meanwhile.
+void test_p9_closer_lock_flush_job_leaves_the_registry(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    u32 holders0 = dev9p_wb_holders();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    bool started = false, handed = false, early_clunk = true;
+    u32  holders_open = 0, holders_job = 0;
+    struct srv_rec rec_job = {0};
+    if (opened) {
+        holders_open = dev9p_wb_holders();
+        spoor_ref(w.f);                  // what a map or a Loom op holds
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, wbc_drop, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_wbc_thread));
+            handed = test_dying_done(&g_wbc_thread);
+            if (handed) test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE) >= 1 &&
+                              closer_quiet());
+        holders_job = dev9p_wb_holders();
+        rec_job     = g_rec_a;
+        early_clunk = srv_clunked(&g_rec_a, w.fid);
+        spoor_clunk(w.f);                // the last reference
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    u32 holders_end = dev9p_wb_holders();
+    bool clunked = opened && srv_clunked(&g_rec_a, w.fid);
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_EXPECT_EQ((u64)holders_open, (u64)holders0 + 1ull, "the create-born open holds the file");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_ASSERT(handed, "its last close returned without the server");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "and reports nothing lost");
+    TEST_EXPECT_EQ((u64)rec_job.nwrite, 1ull, "a closer job wrote the run");
+    TEST_EXPECT_EQ((u64)rec_job.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec_job.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_ASSERT(!early_clunk, "the fid stays bound: another reference keeps the open");
+    TEST_EXPECT_EQ((u64)holders_job, (u64)holders0,
+                   "the open left the registry once its run landed, before its last reference");
+    TEST_ASSERT(clunked, "the last reference clunks the fid");
+    TEST_EXPECT_EQ((u64)holders_end, (u64)holders0, "and the registry is as it was");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors, "nothing lost");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
 }
 
 // An exits() close sets no group_exit_msg, so its first kill wins the CAS; the

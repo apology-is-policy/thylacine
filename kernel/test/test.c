@@ -872,6 +872,8 @@ struct test_case g_tests[] = {
     { "image.bypass_takes_a_payer", test_image_bypass_takes_a_payer, false, NULL },
     { "image.distinct_qid_distinct_entry", test_image_distinct_qid_distinct_entry, false, NULL },
     { "image.qid_vers_bump_new_entry",    test_image_qid_vers_bump_new_entry,    false, NULL },
+    { "image.mapping_keys_on_the_probe_version",
+                                       test_image_mapping_keys_on_the_probe_version, false, NULL },
     { "image.devno_full_width_distinct_entry", test_image_devno_full_width_distinct_entry, false, NULL },
     { "image.distinct_offset_distinct_entry", test_image_distinct_offset_distinct_entry, false, NULL },
     { "image.exec_discriminates_key",       test_image_exec_discriminates_key,       false, NULL },
@@ -3055,6 +3057,19 @@ struct test_case g_tests[] = {
                                        test_dev9p_m23_interrupted_leg_keeps_the_run, false, NULL },
     { "dev9p.m23_cached_open_of_a_held_file_falls_back",
                                        test_dev9p_m23_cached_open_of_a_held_file_falls_back, false, NULL },
+    { "dev9p.m23_cached_open_interrupted_fails",
+                                       test_dev9p_m23_cached_open_interrupted_fails, false, NULL },
+    { "dev9p.m23_server_eintr_is_a_refusal",
+                                       test_dev9p_m23_server_eintr_is_a_refusal, false, NULL },
+    { "dev9p.m23_leg_wait_sleeps",     test_dev9p_m23_leg_wait_sleeps, false, NULL },
+    { "dev9p.m24_change_pins_the_file",
+                                       test_dev9p_m24_change_pins_the_file, false, NULL },
+    { "dev9p.m24_pin_refuses_a_holder",
+                                       test_dev9p_m24_pin_refuses_a_holder, false, NULL },
+    { "dev9p.m24_guard_skips_the_own_install",
+                                       test_dev9p_m24_guard_skips_the_own_install, false, NULL },
+    { "dev9p.m25_peer_fsync_reports_a_refused_run",
+                                       test_dev9p_m25_peer_fsync_reports_a_refused_run, false, NULL },
     { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },
@@ -3115,6 +3130,8 @@ struct test_case g_tests[] = {
                                        test_p9_closer_close_job_retries_a_refused_write, false, NULL },
     { "p9_closer.peer_waits_out_a_handed_off_run",
                                        test_p9_closer_peer_waits_out_a_handed_off_run, false, NULL },
+    { "p9_closer.lock_flush_job_leaves_the_registry",
+                                       test_p9_closer_lock_flush_job_leaves_the_registry, false, NULL },
     { "p9_closer.first_kill_forces_exits_close",
                                        test_p9_closer_first_kill_forces_exits_close, false, NULL },
     { "p9_closer.kill_in_final_close_keeps_exit",
@@ -3973,6 +3990,15 @@ void test_run_all(void) {
             uart_puts("NP-FIXTURE ");
             if (!current_test->failed)
                 test_fail("test left the dev9p readiness fixture up (see NP-FIXTURE)");
+        }
+
+        // And the write-behind holder registry: a test that fails with a holder
+        // registered on the dev9p suite's shared client leaves an entry naming
+        // it, and the next test's fixture, at the same address, finds a holder.
+        if (test_dev9p_wb_release()) {
+            uart_puts("WB-REGISTRY ");
+            if (!current_test->failed)
+                test_fail("test left a write-behind holder registered (see WB-REGISTRY)");
         }
 
         // And the 9P client suite's shared client: a test that fails before its

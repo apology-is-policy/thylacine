@@ -201,6 +201,37 @@ void test_image_qid_vers_bump_new_entry(void) {
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
 }
 
+// LARDER-DESIGN 12.6 (a new mapping): a file mapping keys its Image on the
+// version its size probe fetched, not the descriptor's open-time one, so a
+// mapping made after a write on the client finds no Image from before it. Here
+// the probe said 2 through a descriptor opened at 1: keyed on the descriptor's
+// own version the lookup misses; keyed on the probe's again it hits (the
+// control, one variable away).
+void test_image_mapping_keys_on_the_probe_version(void) {
+    image_cache_evict_idle_for_test();
+    struct Burrow *b1 = image_lookup_or_create_at(mk_spoor(0xD000, 1), 0, PAGE_SIZE, /*exec=*/true,
+                                                  BURROW_FILE_LIMIT_UNKNOWN, NULL, false, 2u);
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor(0xD000, 1), 0, PAGE_SIZE, /*exec=*/true,
+                                               BURROW_FILE_LIMIT_UNKNOWN, NULL, false);
+    struct Burrow *b3 = image_lookup_or_create_at(mk_spoor(0xD000, 1), 0, PAGE_SIZE, /*exec=*/true,
+                                                  BURROW_FILE_LIMIT_UNKNOWN, NULL, false, 2u);
+    bool all  = b1 != NULL && b2 != NULL && b3 != NULL;
+    bool miss = b2 != b1;
+    bool hit  = b3 == b1;
+    int  live = image_cache_live_count_for_test();
+    if (b1) burrow_unref(b1);
+    if (b2) burrow_unref(b2);
+    if (b3) burrow_unref(b3);
+    image_cache_evict_idle_for_test();
+    int  left = image_cache_live_count_for_test();
+
+    TEST_ASSERT(all, "all three mapped");
+    TEST_ASSERT(miss, "keyed on the descriptor's own version, it misses the probe-keyed Image");
+    TEST_ASSERT(hit, "keyed on the probe's version again, it hits (control)");
+    TEST_EXPECT_EQ(live, 2, "two entries");
+    TEST_EXPECT_EQ(left, 0, "cleaned");
+}
+
 // devno-u64: two device instances 2^32 apart with the same qid are two files.
 // A 32-bit key served the second the first's cached pages (an I-1 alias). The
 // control, one variable away: the same wide devno again HITS its own entry.
