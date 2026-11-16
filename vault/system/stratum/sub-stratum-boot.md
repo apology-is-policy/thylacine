@@ -333,13 +333,13 @@ sink or not:
 
 1. Frozen while 64 KiB arrive, then the bytes stop: the reader's line must
    come after the quiet spell. That line takes the reserve and ends the ring
-   on a newline, so one line more, still frozen, joins a gap behind it (one
+   on a newline, so one extra line, still frozen, joins a gap behind it (one
    it opens, or one a quiet close mid-burst left open) and puts nothing in
    the ring; that gap's line (the reader's after the thaw, or the printer's
    at EOF) must not start with a newline. The settle must not call the frozen
-   ring caught up, both before that line, with no gap open (so only the ring's
-   unprinted bytes can say no; skipped, and the PASS line says so, when a quiet
-   close mid-burst left a gap open), and after it.
+   ring caught up, both before the extra line, with no gap open (so only the
+   ring's unprinted bytes can say no; skipped, and the PASS line says so, when
+   a quiet close mid-burst left a gap open), and after it, with its gap open.
 2. Frozen with no quiet timer: thawed, the ring is printed with the gap still
    open, and the settle must not call that caught up; frozen again at EOF,
    with the gap's line not yet printed, it must not either. Exactly one line,
@@ -408,12 +408,12 @@ before the read that takes its bytes out of the pipe, so a chunk is always
 in one place the settle looks: still in the pipe, woken and not yet handled,
 in the ring not yet printed, or counted in an open gap. With no printer, the
 settle is the ring's consumer and prints what it holds, up to the head it
-sees at each park and at most a ring's worth (16 KiB) in all, then the last
-gap's line; it can, because joey returns only before it gives the console up,
+sees at each park and at most a ring's worth (16 KiB) and one write in all,
+then the last gap's line; it can, because joey returns only before it gives the console up,
 so no episode can park it. It gives up after 100 parks, so a daemon that
 keeps writing, or a console an episode holds, holds the end of the boot for
 about a second, and with no printer for at most the console time of the
-16 KiB more.
+16 KiB and one write more.
 
 **The attach opts into loose cache mode, and the premise is written down.**
 `T_ATTACH_9P_LOOSE` on the SYSTEM mount asserts: this pool's block device

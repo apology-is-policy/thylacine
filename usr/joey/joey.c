@@ -6837,7 +6837,7 @@ static void sd_printer_main(void *arg) {
 // pipe, woken and not yet handled, in the ring not yet printed, or counted in an open
 // gap. Bounded, so a daemon that keeps writing, or a console an episode holds, cannot
 // hold the end of the boot: SD_SETTLE_PARKS parks, and with no printer at most a ring's
-// worth printed here.
+// worth and one write printed here, then the last gap's line.
 #define SD_SETTLE_PARK_MS 10
 #define SD_SETTLE_QUIET 3
 #define SD_SETTLE_PARKS 100
@@ -6898,8 +6898,8 @@ static void sd_drain_settle(void) {
 // build checks that instead (tools/check-drain-reader.py). Four legs:
 //   1. frozen, the bytes stop: the reader's line after the quiet spell; one line more
 //      joins a gap behind that line's newline (one it opens, or one a quiet close
-//      mid-burst left open); the settle must not call the frozen ring caught up, with no
-//      gap open before that line, or with the gap after it.
+//      mid-burst left open); the settle must not call the frozen ring caught up, before
+//      the extra line (no gap open) or after it (its gap open).
 //   2. frozen, no quiet timer: the ring printed with the gap still open, and EOF with
 //      the gap's line not yet printed, are both not caught up; exactly one line, the
 //      printer's, at EOF, written in pieces.

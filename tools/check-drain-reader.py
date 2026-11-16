@@ -292,6 +292,29 @@ def selftest():
                           'tbz\tw0, #0x3, 0x400000 <sd_reader_main>',
                           'tbnz\tw0, #0x3, 0x400000 <sd_reader_main>',
                           'bic\tx0, x0, x1')]
+    # A last call falls through unless its callee provably never returns: a leaf that
+    # returns, and a callee whose last instruction is a call that returns, both fall through.
+    cases += [
+        ('a last call to a leaf that returns, then a console write',
+         good.replace('\tret\n', '\tbl\t0x400300 <leaf>\n')
+         + fn('next', 0x400024, ['mov\tw8, #0x1', 'svc\t#0', 'ret'])
+         + fn('leaf', 0x400300, ['mov\tw0, #0x0', 'ret']),
+         'system call SYS_PUTS'),
+        ('a last call to a callee ending on a poll, then a console write',
+         good.replace('\tret\n', '\tbl\t0x400300 <leaf>\n')
+         + fn('next', 0x400024, ['mov\tw8, #0x1', 'svc\t#0', 'ret'])
+         + fn('leaf', 0x400300, ['mov\tw8, #0x1d', 'svc\t#0'])
+         + fn('leaf2', 0x400308, ['ret']),
+         'system call SYS_PUTS'),
+    ]
+    # Every conditional branch form is a branch: one landing between a number and its svc
+    # leaves the number unknown.
+    cases += [('a %s landing in between' % form,
+               good.replace('b.le\t0x400000 <sd_reader_main>',
+                            form + '\t' + ops + ' 0x400018 <sd_reader_main+0x18>'),
+               'a branch lands between')
+              for form, ops in (('cbz', 'x0,'), ('cbnz', 'x0,'), ('tbz', 'w0, #0x3,'),
+                                ('tbnz', 'w0, #0x3,'))]
     bad = 0
     for name, text, want in cases:
         problems, reached, _ = check(text, nums)
