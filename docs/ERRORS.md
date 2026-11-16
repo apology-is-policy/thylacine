@@ -115,7 +115,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
 | `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation; an image with a W+X segment or an executable stack, from `execve` and `SYS_SPAWN_FULL_ARGV`, operator vote 33; `SYS_POSTNOTE` to a Proc that is not the caller's child, which Pouch's `kill` and the phenotype's report as `EPERM`; a file mapping of a descriptor not open for reading, as Linux's `mmap`, where one naming nothing or opened `O_PATH` is `EBADF`, natively and in the phenotype -- audit round 32, operator vote 116) |
 | `T_E_FAULT`     | 14    | `EFAULT`     | Bad address (uaccess fault on user VA) |
-| `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention; mount-busy) |
+| `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention, e.g. `/proc/<pid>/mem` after its eight busy tries; mount-busy) |
 | `T_E_EXIST`     | 17    | `EEXIST`     | Already exists (mount over existing point; create-excl) |
 | `T_E_NODEV`     | 19    | `ENODEV`     | The backing endpoint disappeared (the Loom device-gone terminal CQE; MENAGERIE §10); also a file mapping of a file whose Dev backs none (`Dev.may_back_mapping` unset: Linux's answer for a driver with no mmap; operator vote 113), except that the Linux phenotype maps `/dev/zero` as anonymous memory, as Linux does (vote 115) |
 | `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed from the `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory. Eight producers. Four share that rule: `stalk`'s real-component gate (#79); `stalk`'s `.`/`..` gate, since both are path components and the position they resolve in must be a directory too (#81); `stalk`'s trailing-slash gate, where the separator asserts the whole path names a directory (#82, POSIX 4.13 — three sites, since two success exits skip the quarry); and the single-hop `SYS_WALK_OPEN` / `SYS_WALK_CREATE` handlers, on both the source's type and a source Dev with no `.walk` slot (#80, #81). The `.`/`..` gate reads the tip UNCROSSED and the trailing-slash gate the quarry CROSSED — they ask different questions (where resolution stands vs what the path names), see `docs/reference/104-stalk.md`. The fifth is `SYS_MOUNT`'s Plan 9 `Emount` (ARCH §9.6.1, operator votes 2026-09-25, as Linux answers a bind of a file over a directory): the source's directory-ness differs from the mount point's, or a mount without `MREPL` names a point that is not a directory. `SYS_MOUNT`'s other refusals are still `-1`, and that includes a trailing `/` on a point that is not a directory: `stalk`'s trailing-slash gate refuses the path before the type check runs, and a resolution failure is `-1` in this call. The last three are the Linux phenotype's (VIVARIUM): a trailing `/` on an `unlinkat` without `AT_REMOVEDIR` or on either `renameat` path, `getdents64` on a descriptor that is not a directory, and `openat` with `O_DIRECTORY` on a file |
@@ -904,3 +904,15 @@ caught note ends answers -T_E_INTR (Linux phenotype only until ARCH 8.8.3's
 item 11c). A server's errno crosses by value inside [-4095,-2], -T_E_STALE
 for an unlinked file's fid among them, except its `EBADF`, which reads
 -T_E_IO.
+
+### The debug memory file (operator vote 134, 2026-11-16)
+
+Operator vote 134 (audit round 40 F5; DEBUG-FS-DESIGN 3.2). A read or write of
+`/proc/<pid>/mem` answers the bytes moved (0 for a hole), -T_E_ACCES for every
+authority refusal (the 2026-10-06 rule), -T_E_BUSY when the target address
+space's lock was busy on all eight tries of the copy (vote 132's trylock and
+wait), and the bare -1 for a target that is gone, not ALIVE, not stopped or held
+by another ctl. EBUSY says only that the copy did not get the lock: the target
+was found stopped on every try, and a retry may succeed. Linux sleeps on the mm
+lock and answers -EIO only when a fatal signal ends the wait; 9front sleeps on the
+segment lock. Neither gives this answer.
