@@ -435,10 +435,13 @@ The client's rules, each from a rule above it:
   over their private rings and a blocking client as the other path. It passed in the
   same run (265 s, interaction-qualification image with private rings). One seat holds one live session, since a second `session on` answers EBUSY,
   so several sessions means one after another. The unknown commit is already in
-  `ls-halcyon-clipboard-async`. Rendering and input latency under a paste are recorded, not
-  judged (HALCYON-INTERACTION 12), by `ls-halcyon-paste-latency`: halcyond's test builds say
-  one line per typing burst, from a key entering a tile's input queue to the present after the
-  program's answer, every frame's render and present, and the loop's longest busy stretch;
-  the probe reads each readable process's dispatches over a silent window. It runs on the
-  paste image and on a control image without the interaction work, so the record has a
-  before and an after. The run fails only on a record that is missing or does not add up.
+  `ls-halcyon-clipboard-async`. Rendering and input latency under a paste are to be recorded,
+  not judged (HALCYON-INTERACTION 12), by `ls-halcyon-paste-latency`: halcyond's test builds
+  say one line per typing burst (the first output after a key, a lower bound under a backlog;
+  the settle from the last key to the present after the last output; every frame's render and
+  present; the loop's longest busy stretch) and, while idle, why the loop woke; the probe reads
+  each readable process's and thread's dispatches over a silent window. It runs on the paste
+  image and on a control image without the interaction work, for a before and an after, and
+  fails only on a record that is missing or does not add up. Its first run found an idle
+  halcyond waking about 110 times a second in both images (OPEN-BUGS 2026-11-17T11:10Z); the
+  numbers are owed by a run on the round-44 close.

@@ -282,12 +282,15 @@ struct SessionTile {
     sync_late_said: bool,
     #[cfg(feature = "test-mode")]
     sync_cut_said: bool,
-    /// The latency record's first unanswered key (monotonic ns, 0 = none)
-    /// and whether the program has written since it (test builds).
+    /// The latency record's first unanswered key (monotonic ns, 0 = none),
+    /// whether the program has written since it, and whether it has written
+    /// since this tile's last present inside a burst (test builds).
     #[cfg(feature = "test-mode")]
     lat_key_ns: u64,
     #[cfg(feature = "test-mode")]
     lat_echoed: bool,
+    #[cfg(feature = "test-mode")]
+    lat_out: bool,
     /// H-4d: the Helix-modal transcript mode (HALCYON.md 4): Esc leaves
     /// Insert for Normal, where the cursor walks the rows and `w`/`b` walk
     /// the obj runs; Enter opens the run's verb menu; `i` returns.
@@ -462,6 +465,8 @@ impl SessionTile {
             lat_key_ns: 0,
             #[cfg(feature = "test-mode")]
             lat_echoed: false,
+            #[cfg(feature = "test-mode")]
+            lat_out: false,
             mode: Mode::Insert,
             flat: Vec::new(),
             flat_seq: u64::MAX,
@@ -1081,11 +1086,14 @@ impl SessionTile {
     /// Kill + reap the child so it never lingers as a zombie, then let the
     /// Queue an encoded key record for the tile's kaua-term (delivered by
     /// `drain_down`). Bounded: past the cap the NEWEST keys drop, said once.
-    fn queue_key(&mut self, bytes: &[u8]) {
-        if !self.down.push_key(bytes) && !self.drop_said {
+    /// Whether the queue took it.
+    fn queue_key(&mut self, bytes: &[u8]) -> bool {
+        let taken = self.down.push_key(bytes);
+        if !taken && !self.drop_said {
             self.drop_said = true;
             say!("halcyond: session tile input dropped (its terminal is not draining)");
         }
+        taken
     }
 
     /// Queue the geometry record: never dropped, delivered before any
@@ -1986,8 +1994,14 @@ pub fn run(home: Option<String>) -> i64 {
     let mut init_spawned = false;
     #[cfg(feature = "test-mode")]
     let mut lat = halcyond::latency::Latency::new();
+    #[cfg(feature = "test-mode")]
+    let mut idle = halcyond::latency::IdleTally::new();
 
     loop {
+        #[cfg(feature = "test-mode")]
+        if !lat.is_open() {
+            idle.iteration();
+        }
         // The atlas bound, between frames: every tile re-lays its visible
         // blocks each pass and the chrome/status/menu surfaces look their
         // glyphs up afresh on repaint, so an eviction here costs one frame's
@@ -2244,7 +2258,14 @@ pub fn run(home: Option<String>) -> i64 {
             #[cfg(feature = "test-mode")]
             if ok {
                 let now = libthyla_rs::time::monotonic_ns();
+                if !lat.is_open() {
+                    idle.presented();
+                }
                 lat.frame(frame_start, now);
+                if t.lat_out {
+                    lat.output_presented(now);
+                    t.lat_out = false;
+                }
                 if t.lat_key_ns != 0 && t.lat_echoed {
                     lat.answered(t.lat_key_ns, now);
                     t.lat_key_ns = 0;
@@ -2342,16 +2363,20 @@ pub fn run(home: Option<String>) -> i64 {
                             } else if let Some(kev) = map_key(e.code, e.rune, e.mods, e.value) {
                                 wire_out.clear();
                                 encode_input(&Input::Key(kev), &mut wire_out);
-                                t.queue_key(&wire_out);
+                                let taken = t.queue_key(&wire_out);
                                 #[cfg(feature = "test-mode")]
-                                {
+                                if taken {
                                     let now = libthyla_rs::time::monotonic_ns();
                                     if t.lat_key_ns == 0 {
                                         t.lat_key_ns = now;
                                         t.lat_echoed = false;
                                     }
                                     lat.key(now);
+                                } else {
+                                    lat.dropped();
                                 }
+                                #[cfg(not(feature = "test-mode"))]
+                                let _ = taken;
                             }
                         }
                         TEV_PTR_MOVE => {
@@ -3008,6 +3033,7 @@ pub fn run(home: Option<String>) -> i64 {
                 for t in tiles.values_mut() {
                     t.lat_key_ns = 0;
                     t.lat_echoed = false;
+                    t.lat_out = false;
                 }
             }
             lat.waiting(now);
@@ -3015,8 +3041,23 @@ pub fn run(home: Option<String>) -> i64 {
             libhalcyon::motion::fold_timeout(timeout, due)
         };
         let polled = unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) };
+        // Test builds: while no burst is open, why the loop woke.
         #[cfg(feature = "test-mode")]
-        lat.woke(libthyla_rs::time::monotonic_ns());
+        {
+            let now = libthyla_rs::time::monotonic_ns();
+            lat.woke(now);
+            if lat.is_open() {
+                idle.reset();
+            } else if polled >= 0 {
+                let n_up = up_leaves.len();
+                let ring_ready = fds[0].revents != 0;
+                let up_ready = fds[1..1 + n_up].iter().any(|f| f.revents != 0);
+                let other_ready = fds[1 + n_up..].iter().any(|f| f.revents != 0);
+                if let Some(line) = idle.polled(now, polled, ring_ready, up_ready, other_ready) {
+                    say!("{}", line);
+                }
+            }
+        }
         if polled < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
@@ -3071,8 +3112,13 @@ pub fn run(home: Option<String>) -> i64 {
             match t.ingest(&mut inbuf, &mut places) {
                 Ingested::Live => {
                     #[cfg(feature = "test-mode")]
-                    if t.lat_key_ns != 0 {
-                        t.lat_echoed = true;
+                    {
+                        if t.lat_key_ns != 0 {
+                            t.lat_echoed = true;
+                        }
+                        if lat.is_open() {
+                            t.lat_out = true;
+                        }
                     }
                     if !ingest_announced {
                         ingest_announced = true;

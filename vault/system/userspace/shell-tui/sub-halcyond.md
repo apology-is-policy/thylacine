@@ -492,35 +492,48 @@ broke the host-test build).
 
 ### The latency record (test builds)
 
-`test-mode` also feeds `latency.rs` (lib, host-tested, its own mutants) from the
-session loop, so a test build records rendering and input latency instead of a
-still image being called smooth (HALCYON-INTERACTION 12; AS-4f). A BURST opens
-at the first key the TEV_KEY path hands a tile's input queue (`queue_key`; the
+`test-mode` also feeds `latency.rs` (lib; compiled only for host tests and
+test-mode builds, `#[cfg(any(test, feature = "test-mode"))]`; host-tested with
+its own mutants) from the session loop, so a test build records rendering and
+input latency instead of a still image being called smooth (HALCYON-INTERACTION
+12; AS-4f). A BURST opens at the first key a tile's input queue accepts
+(`queue_key` returns whether it took the key; a refused key counts `dropped`; the
 menu's command text is not a key) and nothing else opens one, so an idle session
-records nothing and gains no wake. Per tile the first unanswered key is stamped;
-the program's next output (`Ingested::Live`) marks it echoed and the tile's next
-successful present answers it: that span is key-to-present, and later keys before
-the answer ride with it. Every render + present while a burst is open is a frame
-sample; busy is the stretch from the wait's return to the next wait; wakes count
-the wait's returns. The burst ends 600 ms after its last key or answer with no
-key owed, or 5 s after it whatever is owed (owed keys are counted `unanswered` and
-forgotten), and says one line:
-`halcyond: latency: keys=K answered=A unanswered=U key-to-present-us p50= p99= max= frames=F frame-us p50= p99= max= busy-max-us= wakes= span-ms= over=`.
+records no burst. A key, an answer, or a present after program output keeps it
+open; it ends 600 ms after the last of those with no tile owed an answer, 5 s
+after whatever is owed, or 30 s after it opened (`cut=1`). Per tile the first
+unanswered key is stamped; the program's next output (`Ingested::Live`) marks it
+echoed and the tile's next successful present answers it: `first-output`, from
+the key entering the queue to that present. That output may answer an OLDER key,
+so under a backlog first-output is a lower bound, not input latency. `settle` is
+the burst's last key to the present after its last program output (any tile):
+when the screen caught up with everything typed, backlog included. Every render +
+present while a burst is open is a frame sample; busy is the wait's return to the
+next wait; wakes count the wait's returns. `owed-tiles` counts tiles, not keys: a
+key riding behind an answered one is not checked one by one. The line:
+`halcyond: latency: keys= dropped= answered= owed-tiles= first-output-us p50= p99= max= settle-us= frames= frame-us p50= p99= max= busy-max-us= wakes= span-ms= cut= over=`.
 While a burst is open its end is folded into the loop's wait, the only change the
-record makes to the loop. What it measures is halcyond's segment: from the key
-entering the queue to tapestryd answering the present (libtapestry's present is
-synchronous). tapestryd's routing from the device and its compose to scanout are
-outside it; how long an event sits unread before the loop takes it is bounded by
-busy-max. The device-side stamp would need a timestamp in the tevent, whose `tick`
-is the display clock on a version-pinned wire (TAPESTRY 18.4). The first output
-after a key is its answer, so a program printing on its own answers early: the
-scenario types into idle programs. `TEST_LEVERS=n` strips it with the levers (the
-line's format is absent from a stripped binary, checked by content). The idle
-half is outside halcyond: `kaua-term-probe --paste-latency wakes` reads
-`/proc/<pid>/sched` (owner or CAP_HOSTOWNER, so halcyond and the panes'
-programs, not tapestryd) around a silent window. `ls-halcyon-paste-latency` runs
-both on the paste image and on a control image without the interaction work, and
-fails only on a record that is missing or does not add up.
+record makes to the loop. The segment measured starts when halcyond queues the
+key: tapestryd's routing from the device is outside it, and an event can sit
+unread across the tail of one busy stretch and the head of the next (at most
+twice busy-max). A device-side stamp would need a timestamp in the tevent, whose
+`tick` is the display clock on a version-pinned wire (TAPESTRY 18.4).
+
+While no burst is open the loop keeps an idle tally (`IdleTally`): iterations,
+poll returns by cause (timeout, the ring, an up-pipe, anything else) and presents,
+said as `halcyond: idle wakes: polls=1000 ms= ...` once per thousand polls -- never
+in minutes for a session that wakes a few times a second. The other idle half is
+outside halcyond: `kaua-term-probe --paste-latency wakes` reads
+`/proc/<pid>/sched` in one read (the kernel renders it afresh per read; owner or
+CAP_HOSTOWNER, so halcyond and the panes' programs, not tapestryd) around a
+silent window and says each process's and each waking thread's dispatches.
+`ls-halcyon-paste-latency` runs both on the paste image and on a control image
+without the interaction work (checked against halcyond's own interaction line),
+says every number as an `LS-CI RECORD:` line in the transcript (lc_step reaches
+only the steps file), and fails only on a record that is missing or does not add
+up. Its first run (2026-11-17, 8fe41cb57) measured an idle halcyond at about 110
+dispatches a second in both images while every other process read +0
+(OPEN-BUGS 2026-11-17T11:10Z).
 
 ### The console data flow
 
