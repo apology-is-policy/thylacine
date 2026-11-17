@@ -69,7 +69,7 @@ use alloc::string::String;
 
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    t_close, t_open, t_read, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_read, t_setsid, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
     Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
@@ -484,6 +484,57 @@ fn cursor_demo(root: i64) -> i64 {
     0
 }
 
+/// Vote 136 (#880): the determinism gate's negative leg. It runs as the
+/// battery's CHILD, because a process-group leader cannot setsid and the
+/// battery is one under ut's job control. One conn, one variable: the probe
+/// is admitted while this process is in the console-owning session it
+/// inherited, then setsid moves it to a session of its own and the same
+/// conn's writes are refused (tapestryd reads the peer fresh per write).
+/// `tick` tells the gates apart: admitted with the mode off it answers
+/// E_INVAL, refused it answers E_PERM.
+fn not_console_owner(root: i64) -> i64 {
+    let probe = "probe-screen 0 0";
+    let rc = raw_ctl(root, probe);
+    if rc != probe.len() as i64 {
+        say!(
+            "tapestry-battery: FAIL console-owner gate: '{}' in the console session rc {} want {}",
+            probe,
+            rc,
+            probe.len()
+        );
+        return 1;
+    }
+    let sid = unsafe { t_setsid() };
+    if sid <= 0 {
+        say!("tapestry-battery: FAIL console-owner gate: setsid rc {}", sid);
+        return 1;
+    }
+    for cmd in [probe, "test-mode on", "tick"] {
+        let rc = raw_ctl(root, cmd);
+        if rc != -1 {
+            say!(
+                "tapestry-battery: FAIL console-owner gate: '{}' outside the console session rc {} want -1 (E_PERM)",
+                cmd,
+                rc
+            );
+            return 1;
+        }
+    }
+    // A refusal that had applied the write would read `test-mode on`.
+    if !read_file(root, "ctl")
+        .unwrap_or_default()
+        .contains("test-mode off")
+    {
+        say!("tapestry-battery: FAIL console-owner gate: the refused `test-mode on` applied (ctl does not read test-mode off)");
+        return 1;
+    }
+    say!(
+        "battery: console-owner gate OK: probe admitted in the console session; probe, test-mode on and tick refused in session {}",
+        sid
+    );
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // The driver session (layout ops are compositor-global; surfaces stay
@@ -512,6 +563,11 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if libthyla_rs::env::args().any(|arg| arg == b"--cursor-demo") {
         let verdict = cursor_demo(root);
+        unsafe { t_close(root); }
+        return verdict;
+    }
+    if libthyla_rs::env::args().any(|arg| arg == b"--not-console-owner") {
+        let verdict = not_console_owner(root);
         unsafe { t_close(root); }
         return verdict;
     }
@@ -811,8 +867,9 @@ pub extern "C" fn rs_main() -> i64 {
     // discriminating pair: the write is REFUSED (rc -1) AND the pane's
     // `status` file -- an ungated read -- still says `resting` afterwards
     // (a refusal that had applied the write would read `err`). The
-    // positive control one variable away is this same conn's ungated
-    // verbs (probe-screen above, test-mode below), which succeed. The
+    // positive control one variable away is this same conn's determinism
+    // verbs (probe-screen above, test-mode below), which succeed: the
+    // battery runs in the console-owning session (vote 136). The
     // positive twin of the write is halcyond's (ls-halcyon).
     {
         let path = alloc::format!("pane/{}/status", pa.id);
@@ -2245,6 +2302,30 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         say!("battery: workspace 1 returned with its tile; the empty workspace vanished");
+    }
+
+    // Vote 136 (#880): every determinism verb above was admitted because this
+    // process runs in the console-owning session; the child proves the other
+    // half -- the same verbs refused once it has left that session.
+    match libthyla_rs::process::Command::new("/bin/tapestry-battery")
+        .arg("--not-console-owner")
+        .spawn()
+    {
+        Ok(mut child) => match child.wait() {
+            Ok(st) if st.success() => {}
+            Ok(st) => {
+                say!("tapestry-battery: FAIL console-owner gate: the child exited {}", st.raw());
+                return 1;
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL console-owner gate: wait {:?}", e);
+                return 1;
+            }
+        },
+        Err(e) => {
+            say!("tapestry-battery: FAIL console-owner gate: spawn {:?}", e);
+            return 1;
+        }
     }
 
     unsafe { t_close(root) };

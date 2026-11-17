@@ -923,7 +923,10 @@ DEADLINE arm judges both.
 Open after that review:
 
 - `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
-  every image carries the levers (the #880 strip-for-production class). Of the
+  every image but production carries the levers; the production build
+  (`TEST_LEVERS=n`, vote 136) compiles them out, and build.sh fails it if
+  `lictor: test levers compiled in` -- which a test-mode Lictor says after
+  `broker posted` -- is still in the binary ([[sub-substrate-build]]). Of the
   armings a compositor can send, `TestArmLatch` and `TestArmChained` need their
   word on the kernel's command line, read by Lictor. `ArmScanoutDisableRefusal`,
   the compositor's self-test lever, is in every build and needs none; it is

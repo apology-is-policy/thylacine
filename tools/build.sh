@@ -1388,6 +1388,48 @@ build_userspace() {
             *) echo "THYLACINE_READINESS_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
         esac
         ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${hi_features[@]+"${hi_features[@]}"} )
+        # TEST_LEVERS (BUILD-CONFIG-DESIGN.md 4.2, vote 136, #880): the display
+        # stack's test levers live behind each crate's `test-mode` feature,
+        # which is a DEFAULT feature, so the workspace build above always has
+        # them. n rebuilds the three crates without default features; one
+        # invocation, so lictor's library is resolved without test-mode for
+        # tapestryd too (no workspace member takes these crates with default
+        # features -- caps-probe and corvus take lictor default-features =
+        # false).
+        local lever_bins=(tapestryd halcyond lictor) levers
+        case "${THYLACINE_TEST_LEVERS:-1}" in
+            1) levers=1 ;;
+            0) levers=0
+               local strip_features=tapestryd/guest,halcyond/guest,lictor/backend
+               [[ "${THYLACINE_INTERACTION_QUALIFICATION:-0}" == 1 ]] && strip_features+=,halcyond/interaction-qualification
+               echo "==> Stripping the test levers (TEST_LEVERS=n): ${lever_bins[*]} without test-mode"
+               ( cd "$REPO_ROOT/usr" && cargo build --release $verbose -p tapestryd -p halcyond -p lictor \
+                     --no-default-features --features "$strip_features" ) || return 1 ;;
+            *) echo "THYLACINE_TEST_LEVERS must be 0 or 1" >&2; return 1 ;;
+        esac
+        # The verdict, by content, both ways: each crate says this line at
+        # startup from code under its test-mode feature. A stripped build that
+        # still carries it did not strip; a default build that lacks it would
+        # make the stripped build's absence prove nothing.
+        local lever_line="test levers compiled in" lb lf
+        for lb in "${lever_bins[@]}"; do
+            lf="$USR_RS_BUILD/$USR_RS_TARGET/release/$lb"
+            if [[ ! -f "$lf" ]]; then
+                echo "TEST_LEVERS: $lf was not built" >&2; return 1
+            fi
+            if grep -a -q -F "$lever_line" "$lf"; then
+                if (( levers == 0 )); then
+                    echo "TEST_LEVERS=n: $lb still carries '$lever_line' -- the strip did not take" >&2; return 1
+                fi
+            elif (( levers == 1 )); then
+                echo "TEST_LEVERS=y: $lb lacks '$lever_line' -- the production check would prove nothing" >&2; return 1
+            fi
+        done
+        if (( levers == 1 )); then
+            ledger "test levers: COMPILED IN (TEST_LEVERS=y; ${lever_bins[*]} each carry '$lever_line')"
+        else
+            ledger "test levers: STRIPPED (TEST_LEVERS=n; none of ${lever_bins[*]} carries '$lever_line')"
+        fi
         echo "==> Userspace Rust built under $USR_RS_BUILD"
         ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true
     else

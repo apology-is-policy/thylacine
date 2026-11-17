@@ -689,6 +689,22 @@ the fail-probe (the burned-retry decider), the #230 second-monitor per-slot
 isolation, and the #224 refinement of the in-tree refusal.
 
 
+## The compositor's console-owner gate witness
+
+`ls-gfx-panes` asserts tapestryd's determinism gate (operator vote 136, #880;
+[[sub-tapestryd]]) just before the battery's PASS line. The battery spawns
+itself as `tapestry-battery --not-console-owner`, because a process-group
+leader cannot `setsid` and the battery is one under ut's job control. The child
+probes the screen while it is still in the console-owning session it inherited,
+then calls `setsid` and writes the probe, `test-mode on` and `tick` again on the
+same conn. The probe must be admitted the first time and all three refused the
+second, and the ctl read must still say `test-mode off`. `tick` separates the
+gates: admitted with the mode off it answers E_INVAL, refused it answers E_PERM.
+The scenario waits for two lines from two processes: tapestryd's refusal line,
+which shows which gate fired, and the child's verdict line. They can arrive in
+either order, so one regex alternation collects both, because two separate
+arms could consume one of them unseen.
+
 ## Session media and backend verification
 
 Instrument accepts `LS_CI_GFX_ACCEL` explicitly; historical runs made before

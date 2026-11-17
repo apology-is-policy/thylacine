@@ -107,7 +107,7 @@ use libthyla_rs::{
     t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TDmaSeg, TSrvPeerInfo,
     T_DMA_MAP_PA_SCATTERED, T_GID_SYSTEM, T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE,
     T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
-    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    T_SRV_PEER_FLAG_CONSOLE_OWNER, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 use tapestryd::skein::{self, Seg};
 use tapestryd::va::VaWindow;
@@ -16218,6 +16218,10 @@ pub struct Conn {
     peer_principal: u32,
     /// Layout mutations landed in the current service pass.
     layout_verbs: u32,
+    /// A determinism verb from this conn has been refused and said so: the
+    /// refusal is logged once per conn, so a refused client cannot flood
+    /// the console by repeating it.
+    determinism_refusal_said: bool,
     /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
     /// (/srv/warp) -- set by which listener accepted it (Warp-2c). One Conn
     /// type for both; the qid spaces are disjoint, so a warp conn simply
@@ -16331,6 +16335,7 @@ impl Conn {
             peer_stripes,
             peer_principal,
             layout_verbs: 0,
+            determinism_refusal_said: false,
             root,
             version_done: false,
             msize: SRV_MSIZE,
@@ -19324,15 +19329,34 @@ impl Conn {
         info.alive == 1 && (info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
     }
 
-    /// The ONLY intentionally-ungated global-ctl verbs (SA-1): the section
-    /// 18.6 determinism surface, which a NON-renderer (the in-guest
-    /// battery) must drive in test builds and which is #880-feature-
-    /// stripped to E_OPNOTSUPP in production. The gate is a DENYLIST of
-    /// exactly this set, not an allowlist of the known authority prefixes
-    /// -- so every FUTURE global verb (gaps/chord/a typo) is gated BY
-    /// CONSTRUCTION, realizing the scripture's "a new global verb defaults
-    /// to GATED" (an allowlist would silently ungate a verb added without
-    /// touching the gate line).
+    /// Vote 136 (#880; TAPESTRY.md 18.6): may this conn's LIVE peer drive
+    /// the determinism verbs? `test-mode on` stalls every surface's clock
+    /// and `probe-screen` reads the composed screen, so only the console
+    /// renderer or the person at the keyboard may: a peer whose session
+    /// owns the console AND whose principal is a user principal. The
+    /// console-owner axis is keyed on the SESSION, so the principal half is
+    /// what refuses a SYSTEM or `none` process inside the console session.
+    /// Read fresh per write via t_srv_peer, like peer_is_renderer;
+    /// fail-closed on any error.
+    fn peer_may_drive_determinism(&self) -> bool {
+        let mut info = TSrvPeerInfo::default();
+        if unsafe { t_srv_peer(self.handle, &mut info) } != 0 {
+            return false;
+        }
+        info.alive == 1
+            && ((info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
+                || ((info.flags & T_SRV_PEER_FLAG_CONSOLE_OWNER) != 0
+                    && principal_is_session(info.principal_id)))
+    }
+
+    /// The section 18.6 determinism verbs: judged by
+    /// peer_may_drive_determinism, not by the renderer gate, because the
+    /// in-guest battery (the logged-in user's program, not the renderer)
+    /// drives them.
+    fn is_determinism_ctl(s: &str) -> bool {
+        s == "test-mode on" || s == "test-mode off" || s == "tick" || s.starts_with("probe-screen ")
+    }
+
     /// The pane-tree actor this conn is, for this write (per write:
     /// revocation-correct for the renderer axis, like the global-ctl gate;
     /// the principal axis is immutable so its cache is sound).
@@ -19372,12 +19396,15 @@ impl Conn {
         Ok(())
     }
 
+    /// The ONLY intentionally-ungated global-ctl verb (SA-1): `release`,
+    /// whose F2 arm already limits it to the caller's own surfaces. The
+    /// gate is a DENYLIST of exactly this set, not an allowlist of the
+    /// known authority prefixes -- so every FUTURE global verb (gaps/chord/
+    /// a typo) is gated BY CONSTRUCTION, realizing the scripture's "a new
+    /// global verb defaults to GATED" (an allowlist would silently ungate a
+    /// verb added without touching the gate line).
     fn is_ungated_ctl(s: &str) -> bool {
-        s == "test-mode on"
-            || s == "test-mode off"
-            || s == "tick"
-            || s.starts_with("release")
-            || s.starts_with("probe-screen ")
+        s.starts_with("release")
     }
 
     /// The leaf id of a WELL-FORMED tile-status verb (`tag <id> status
@@ -19622,7 +19649,22 @@ impl Conn {
         let session_motion_verb = s.starts_with("motion ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
-        if !Self::is_ungated_ctl(s)
+        // Vote 136: the determinism verbs meet their own gate, judged before
+        // any arm runs -- so a refused caller sees E_PERM in every build,
+        // never the stripped build's E_OPNOTSUPP.
+        if Self::is_determinism_ctl(s) {
+            if !self.peer_may_drive_determinism() {
+                if !self.determinism_refusal_said {
+                    self.determinism_refusal_said = true;
+                    say!(
+                        "tapestryd: determinism verb refused: conn {} (principal {}) is neither the console renderer nor the console owner",
+                        self.conn_id,
+                        self.peer_principal
+                    );
+                }
+                return Err(p9::E_PERM);
+            }
+        } else if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
@@ -19872,11 +19914,11 @@ impl Conn {
             }
             // Warp-C C-3: the composed screen's PIXEL ORACLE -- read one
             // texel of the screen back and say it. Test-mode only (a
-            // client-triggered sync round trip; #880 strip class), ungated
-            // like the other determinism verbs (the in-guest battery is not
-            // the renderer), rate-limited per tick. Not gated on
-            // `test_mode` being ON: the battery's pixel stages run before it
-            // enters determinism mode.
+            // client-triggered sync round trip; #880 strip class), behind
+            // the determinism gate above (vote 136: renderer or console
+            // owner), rate-limited per tick. Not gated on `test_mode` being
+            // ON: the battery's pixel stages run before it enters
+            // determinism mode.
             if let Some(rest) = s.strip_prefix("probe-screen ") {
                 let mut it = rest.split_ascii_whitespace();
                 let x: u32 = it

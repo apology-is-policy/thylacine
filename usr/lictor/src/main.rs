@@ -58,6 +58,10 @@ impl Driver for Lictor {
         unsafe { t_close(srv); }
         if listener < 0 { lictor::backend::diagnostic("lictor: listener post refused\n"); return Err(Error::Hardware); }
         lictor::backend::diagnostic("lictor: broker posted\n");
+        // build.sh's TEST_LEVERS verdict greps the built binary for this
+        // line's text: present here, absent from a production build.
+        #[cfg(feature = "test-mode")]
+        lictor::backend::diagnostic("lictor: test levers compiled in (the test-mode feature; never in a production build)\n");
         // Narrowed hardware drivers are leaves. Warden starts the DMA-only
         // compositor after this readiness signal and stamps its kernel role.
         libthyla_rs::io::stdout().write_all(b"READY\n").map_err(|_| Error::Hardware)?;

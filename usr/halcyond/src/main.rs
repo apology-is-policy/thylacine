@@ -250,6 +250,11 @@ pub extern "C" fn rs_main() -> i64 {
         say!("halcyond: FAIL system mono face (cornucopia subset)");
         return 1;
     }
+    // build.sh's TEST_LEVERS verdict greps the built binary for this line's
+    // text: present here, absent from a production build. Ahead of the
+    // session branch, so both renderer paths say it.
+    #[cfg(feature = "test-mode")]
+    say!("halcyond: test levers compiled in (the test-mode feature; never in a production build)");
     if libthyla_rs::env::args()
         .operands()
         .any(|a| a == b"--session")

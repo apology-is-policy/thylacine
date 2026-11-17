@@ -668,6 +668,28 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the workspace return/vanish leg failed" }
     timeout { lc_fail "the workspace return never reported" }
 }
+# Vote 136 (#880): the determinism gate's negative leg. The battery's child
+# leaves the console-owning session (setsid) and its probe-screen, test-mode on
+# and tick are refused. Two processes print here -- tapestryd's refusal line
+# names WHICH gate fired, the child's line is the verdict -- in either order, so
+# ONE regex alternation collects them (two arms could consume one line unseen).
+set gate_refused 0
+set gate_ok 0
+while {!($gate_refused && $gate_ok)} {
+    expect {
+        -re {(tapestryd: determinism verb refused: conn [0-9]+ \(principal [0-9]+\) is neither the console renderer nor the console owner)|(battery: console-owner gate OK)|(tapestry-battery: FAIL[^\r\n]*)} {
+            if {$expect_out(1,string) ne ""} {
+                set gate_refused 1
+            } elseif {$expect_out(2,string) ne ""} {
+                set gate_ok 1
+            } else {
+                lc_fail "the console-owner gate leg failed: $expect_out(3,string)"
+            }
+        }
+        timeout { lc_fail "the console-owner gate leg never reported (refusal line $gate_refused, verdict $gate_ok)" }
+    }
+}
+lc_pass "panes: the determinism verbs are refused outside the console-owning session (vote 136)"
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the declare control" }
@@ -698,5 +720,5 @@ lc_pass "panes: winsize restored fullscreen after the battery (#55 live across r
 scale_legs $boot_scale
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + console-owner gate + collapse)"
 exit 0

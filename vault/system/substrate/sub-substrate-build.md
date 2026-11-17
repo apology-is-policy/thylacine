@@ -107,6 +107,28 @@ release default, and `build.sh` builds that kernel into
 ([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
 the export.
 
+The compile-group `TEST_LEVERS` bool (operator vote 136, #880), default on and
+off only in `configs/production.config`, has the environment shim
+`THYLACINE_TEST_LEVERS`. The display stack's test levers live behind the
+`test-mode` cargo feature of tapestryd, halcyond and lictor, and that feature
+is a default one, so the workspace `cargo build` always carries them. With
+`TEST_LEVERS=n` build.sh rebuilds the three crates in one more invocation,
+`-p tapestryd -p halcyond -p lictor --no-default-features --features
+tapestryd/guest,halcyond/guest,lictor/backend` (plus
+`halcyond/interaction-qualification` when that is on). One invocation, so
+lictor's library resolves without `test-mode` inside tapestryd too; no
+workspace member takes the three with default features (caps-probe and corvus
+take lictor `default-features = false`). Then, in every build, a verdict by
+content: each crate says `test levers compiled in` at startup from code under
+the feature, so build.sh greps the three binaries for that text and fails a
+stripped build that still carries it, and a default build that lacks it,
+because a missing marker would make the stripped build's absence prove
+nothing. The ledger records which held, and `check-production.sh --all` fails
+unless the production build's ledger says `test levers: STRIPPED`, so a build
+that skipped the Rust step cannot pass having checked nothing.
+`test-build-config.sh` pins that only production sets n and that both values
+export.
+
 The compile-group `READINESS_QUAL` bool, default off and in no preset, has the
 environment shim `THYLACINE_READINESS_QUALIFICATION`; the Rust build maps it to
 `kaua-term-probe/readiness-qualification` and logs it. The feature turns on

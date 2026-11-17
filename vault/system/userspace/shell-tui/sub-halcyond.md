@@ -479,7 +479,11 @@ LIB is pure logic over injected bytes -- zero syscalls, host-tested
 (`cargo test -p halcyond --lib --no-default-features`); the BIN
 (`required-features = ["guest"]`) owns the syscalls, the Surface, and the event
 loop. The `test-mode` feature (default on) gates the renderer's test levers
-(the `#wedge` internal verb -- THE GATE's wedged-owner proof). Each bin module
+(the `#wedge` internal verb -- THE GATE's wedged-owner proof). The production
+build (`TEST_LEVERS=n`, vote 136) compiles it out; a test-mode halcyond says
+`halcyond: test levers compiled in` at startup, ahead of the session branch so
+both renderer paths say it, and build.sh's verdict keys on that text in the
+binary ([[sub-substrate-build]]). Each bin module
 (`chromeset` / `menuset` / `statusset` / `session` / `main`) is the syscalling
 twin of a lib module and nothing else (the H-3b-4 split: both halves in the lib
 broke the host-test build).

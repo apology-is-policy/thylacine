@@ -923,10 +923,43 @@ arithmetic so `x + w > surface_w` cannot wrap. Validate-all-then-act is
 the same discipline as ptyfs's ctl grammar, for the same reason.
 
 **The global-ctl authority gate is default-deny**: `is_ungated_ctl` is a
-denylist of exactly the determinism verbs, so every *future* global verb
-is gated by construction. An allowlist would silently ungate a verb
-added without touching the gate line. That inversion is the design and
-must survive any edit.
+denylist of exactly `release` (its F2 arm already limits it to the
+caller's own surfaces), so every *future* global verb is gated by
+construction. An allowlist would silently ungate a verb added without
+touching the gate line. That inversion is the design and must survive
+any edit.
+
+**The determinism verbs have a gate of their own** (operator vote 136,
+#880; TAPESTRY.md 18.6). `test-mode on`, `test-mode off`, `tick` and
+`probe-screen` (`is_determinism_ctl`) admit a conn only if
+`peer_may_drive_determinism` holds: the live peer is the console
+renderer, or its session owns the console (`SRV_PEER_FLAG_CONSOLE_OWNER`)
+and its principal is a user principal. `test-mode on` stalls every
+surface's FRAME clock and `probe-screen` reads the composed screen, so
+the person at the keyboard is the narrowest party that still includes
+the in-guest battery, which runs from the logged-in shell. The flag is
+keyed on the session, which is why the principal half exists: it
+refuses a SYSTEM or `none` process inside the console session. No
+user-reachable path puts one there today (spawning as `none` needs
+CAP_SET_IDENTITY, and spawn cannot stamp SYSTEM at all), so that half
+is reviewed, not witnessed: no runtime leg constructs it. The
+peer is read fresh per write, like `peer_is_renderer`, and the check
+runs before any verb arm, so a refused caller sees E_PERM in every
+build and never learns the build shape from the stripped build's
+E_OPNOTSUPP. The first refusal on a conn says `tapestryd: determinism
+verb refused: conn N (principal P) is neither the console renderer nor
+the console owner`, once per conn (`determinism_refusal_said`), so a
+refused client cannot flood the console. The witness is
+tapestry-battery's `--not-console-owner` child in `ls-gfx-panes`: the
+probe is admitted, the child calls `setsid`, and the same conn's probe,
+`test-mode on` and `tick` are refused while the ctl read stays at
+`test-mode off`.
+
+A build with the `test-mode` feature says `tapestryd: test levers
+compiled in` just after `serving`. build.sh's `TEST_LEVERS` verdict keys
+on that text in the binary: present in every image but production,
+absent from the production build, which compiles the feature out
+([[sub-substrate-build]]).
 
 ## Error paths
 
@@ -1059,17 +1092,17 @@ construction: one IRQ wait per GPU command.
   bound enforced 360 lines earlier, which is how the ambiguity arose;
   `tools/check-invariants.py` now fails the build if that registry drifts
   again.)
-- **The fenced lane's test hold ships in production.** The crate's
-  default features include `test-mode`, no build passes
-  `--no-default-features`, and `/srv/warp`'s `ctl` is mode 0666 — so the
-  verb that stalls a context's fence completions is reachable by any
-  client. The design answer was not to gate the caller but to make the
+- **The fenced lane's test hold is in every image but production.** The
+  crate's default features include `test-mode`; only the production
+  build (`TEST_LEVERS=n`, vote 136) passes `--no-default-features`. In
+  the images that keep it, `/srv/warp`'s `ctl` is mode 0666, so the verb
+  that stalls a context's fence completions is reachable by any client.
+  The design answer there was not to gate the caller but to make the
   power proportionate: a client may hold only **its own** context's
   fences, which it could already achieve by simply not reading them. An
   earlier revision held globally, which was an unprivileged box-wide
-  denial of service. Worth knowing that identity deliberately cannot
-  separate the prover from an attacker here — the in-guest test battery
-  is an ordinary unprivileged client *by design*.
+  denial of service. Until vote 136 no build stripped the feature, so
+  this hold shipped in production too.
 - The abandonment bound is 30 s of wall clock, which means a genuinely
   hung host renderer strands a context's backings for that long before
   anything is reclaimed, and leaks them permanently if the device never

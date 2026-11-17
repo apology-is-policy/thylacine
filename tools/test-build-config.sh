@@ -158,7 +158,10 @@ echo "== T-show-writes-nothing: --show-config prints the config, never the recor
 # build/ is never at stake.
 shtmp="$(mktemp -d)"
 mkdir -p "$shtmp/tools" "$shtmp/build"
-cp tools/build.sh tools/build-config.sh "$shtmp/tools/"
+# Every file build.sh sources before it resolves the config comes too: a
+# missing one kills the copy before --show-config, and both checks below read
+# as failures of the thing they test.
+cp tools/build.sh tools/build-config.sh tools/stratum-src.sh "$shtmp/tools/"
 cp -R configs "$shtmp/configs"
 printf 'the record of the last build\n' > "$shtmp/build/.config"
 show_out="$("$shtmp/tools/build.sh" --config production --show-config 2>&1)"
@@ -284,6 +287,21 @@ unset THYLACINE_READINESS_QUALIFICATION
 bc_reset; bc_apply_preset default; bc_set READINESS_QUAL=y; bc_export
 eq "explicit readiness qualification export" "${THYLACINE_READINESS_QUALIFICATION:-}" "1"
 unset THYLACINE_READINESS_QUALIFICATION
+
+# The test levers (vote 136): stripped by the production preset only, and
+# exported both ways (build.sh keys the strip on the exported value).
+for tl_preset in "$BC_DIR_CONFIGS"/*.config; do
+    tl_name="$(basename "$tl_preset" .config)"
+    unset THYLACINE_TEST_LEVERS
+    bc_reset; bc_apply_preset "$tl_name"; bc_resolve 2>/dev/null; bc_export
+    if [[ "$tl_name" == production ]]; then want_tl=n want_env=0; else want_tl=y want_env=1; fi
+    eq "preset $tl_name leaves test levers $want_tl" "$(bc_get TEST_LEVERS)" "$want_tl"
+    eq "preset $tl_name exports test levers $want_env" "${THYLACINE_TEST_LEVERS:-}" "$want_env"
+done
+unset THYLACINE_TEST_LEVERS
+bc_reset; bc_apply_preset ci; bc_set TEST_LEVERS=n; bc_export
+eq "explicit test levers n export" "${THYLACINE_TEST_LEVERS:-}" "0"
+unset THYLACINE_TEST_LEVERS
 
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

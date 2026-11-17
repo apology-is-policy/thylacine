@@ -249,6 +249,18 @@ if (( do_all )); then
     fi
     echo "  ok -- lean (release, KASLR, hardened) kernel + userspace + ramfs + fresh loginnable pool"
 
+    # The test levers (vote 136, #880): build.sh's verdict greps the three
+    # display binaries for `test levers compiled in` and fails a production
+    # build that still carries it. Assert that the verdict RAN and said
+    # STRIPPED -- a build that skipped the Rust step would otherwise pass here
+    # having checked nothing.
+    if ! grep -q "test levers: STRIPPED (TEST_LEVERS=n" "$OUT.full.log"; then
+        echo "check-production: FAIL -- the production build never reported its test levers STRIPPED; see $OUT.full.log" >&2
+        grep -a "test levers" "$OUT.full.log" | head -3 >&2
+        exit 1
+    fi
+    echo "  ok -- the display test levers are stripped (tapestryd, halcyond, lictor: no 'test levers compiled in')"
+
     # The lean spine (provision_dev_accounts, the finding-#1 login fix) is boot-critical
     # in this shape and compiled OUT of config C, so NOTHING in the routine loop boots
     # it -- the size delta above proves it COMPILED IN, never that it SUCCEEDS. That is
