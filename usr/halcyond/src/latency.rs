@@ -220,17 +220,27 @@ impl Latency {
 /// times a second says a line every ten seconds.
 pub const IDLE_POLLS_SAID: u32 = 1000;
 
-/// Why the loop woke while no burst was open (test builds): its iterations, its
-/// poll's returns by cause, and its presents.
+/// Distinct surface event kinds an idle tally names; later kinds count in `events`.
+pub const IDLE_KINDS: usize = 4;
+/// A wait armed for less than this is `short`: a deadline, not idleness.
+pub const IDLE_SHORT_MS: i32 = 50;
+
+/// Why the loop woke while no burst was open (test builds): its iterations, how
+/// long each wait was armed for, its poll's returns by cause, the surface events
+/// it drained by kind, and its presents.
 #[derive(Default)]
 pub struct IdleTally {
     since_ns: u64,
     iterations: u32,
     polls: u32,
+    forever: u32,
+    short: u32,
     timeouts: u32,
     ring: u32,
     up: u32,
     other: u32,
+    events: u32,
+    kinds: [(u16, u32); IDLE_KINDS],
     presents: u32,
 }
 
@@ -252,13 +262,34 @@ impl IdleTally {
         self.presents = self.presents.saturating_add(1);
     }
 
-    /// The poll returned `rc` at `now`; which of its entries were ready. The line,
-    /// once IDLE_POLLS_SAID polls have been counted, and a fresh tally.
-    pub fn polled(&mut self, now: u64, rc: i64, ring: bool, up: bool, other: bool) -> Option<String> {
+    /// A tile's surface event of `kind` was drained.
+    pub fn event(&mut self, kind: u16) {
+        self.events = self.events.saturating_add(1);
+        for slot in self.kinds.iter_mut() {
+            if slot.1 == 0 {
+                *slot = (kind, 1);
+                return;
+            }
+            if slot.0 == kind {
+                slot.1 = slot.1.saturating_add(1);
+                return;
+            }
+        }
+    }
+
+    /// The poll, armed for `timeout` ms (negative: no bound), returned `rc` at
+    /// `now`; which of its entries were ready. The line, once IDLE_POLLS_SAID polls
+    /// have been counted, and a fresh tally.
+    pub fn polled(&mut self, now: u64, timeout: i32, rc: i64, ring: bool, up: bool, other: bool) -> Option<String> {
         if self.polls == 0 {
             self.since_ns = now;
         }
         self.polls += 1;
+        if timeout < 0 {
+            self.forever += 1;
+        } else if timeout < IDLE_SHORT_MS {
+            self.short += 1;
+        }
         if rc == 0 {
             self.timeouts += 1;
         }
@@ -268,15 +299,29 @@ impl IdleTally {
         if self.polls < IDLE_POLLS_SAID {
             return None;
         }
+        let mut kinds = String::new();
+        for (kind, n) in self.kinds.iter().filter(|k| k.1 > 0) {
+            if !kinds.is_empty() {
+                kinds.push(',');
+            }
+            kinds.push_str(&format!("{}:{}", kind, n));
+        }
+        if kinds.is_empty() {
+            kinds.push('-');
+        }
         let line = format!(
-            "halcyond: idle wakes: polls={} ms={} iterations={} timeout={} ring={} up={} other={} presents={}",
+            "halcyond: idle wakes: polls={} ms={} iterations={} forever={} short={} timeout={} ring={} up={} other={} events={} kinds={} presents={}",
             self.polls,
             now.saturating_sub(self.since_ns) / 1_000_000,
             self.iterations,
+            self.forever,
+            self.short,
             self.timeouts,
             self.ring,
             self.up,
             self.other,
+            self.events,
+            kinds,
             self.presents
         );
         self.reset();
@@ -293,15 +338,39 @@ mod tests {
         let mut t = IdleTally::new();
         for i in 0..(IDLE_POLLS_SAID - 1) {
             t.iteration();
-            assert_eq!(t.polled(1_000 * MS + i as u64 * MS, if i % 2 == 0 { 0 } else { 1 }, i % 2 == 1, false, i % 4 == 1), None);
+            let timeout = match i % 3 {
+                0 => -1,
+                1 => IDLE_SHORT_MS - 1,
+                _ => IDLE_SHORT_MS,
+            };
+            assert_eq!(t.polled(1_000 * MS + i as u64 * MS, timeout, if i % 2 == 0 { 0 } else { 1 }, i % 2 == 1, false, i % 4 == 1), None);
         }
         t.presented();
-        let line = t.polled(1_000 * MS + 999 * MS, 1, false, true, false).unwrap();
+        let line = t.polled(1_000 * MS + 999 * MS, 0, 1, false, true, false).unwrap();
         assert_eq!(
             line,
-            "halcyond: idle wakes: polls=1000 ms=999 iterations=999 timeout=500 ring=499 up=1 other=250 presents=1"
+            "halcyond: idle wakes: polls=1000 ms=999 iterations=999 forever=333 short=334 timeout=500 ring=499 up=1 other=250 events=0 kinds=- presents=1"
         );
-        assert_eq!(t.polled(5_000 * MS, 0, false, false, false), None);
+        assert_eq!(t.polled(5_000 * MS, -1, 0, false, false, false), None);
+    }
+
+    #[test]
+    fn the_idle_tally_names_the_first_kinds_and_counts_the_rest() {
+        let mut t = IdleTally::new();
+        for kind in [7u16, 3, 7, 9, 11, 7, 13, 13, 3] {
+            t.event(kind);
+        }
+        for _ in 0..(IDLE_POLLS_SAID - 1) {
+            assert_eq!(t.polled(0, -1, 1, true, false, false), None);
+        }
+        let line = t.polled(MS, -1, 1, true, false, false).unwrap();
+        assert!(line.contains(" events=9 kinds=7:3,3:2,9:1,11:1 presents=0"), "{}", line);
+        t.event(5);
+        for _ in 0..IDLE_POLLS_SAID {
+            let _ = t.polled(0, -1, 1, true, false, false);
+        }
+        assert_eq!(t.events, 0, "the line resets the kinds too");
+        assert_eq!(t.kinds, [(0, 0); IDLE_KINDS]);
     }
 
     const MS: u64 = 1_000_000;

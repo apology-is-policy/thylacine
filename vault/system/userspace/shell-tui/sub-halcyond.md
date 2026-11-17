@@ -520,9 +520,11 @@ twice busy-max). A device-side stamp would need a timestamp in the tevent, whose
 `tick` is the display clock on a version-pinned wire (TAPESTRY 18.4).
 
 While no burst is open the loop keeps an idle tally (`IdleTally`): iterations,
-poll returns by cause (timeout, the ring, an up-pipe, anything else) and presents,
-said as `halcyond: idle wakes: polls=1000 ms= ...` once per thousand polls -- never
-in minutes for a session that wakes a few times a second. The other idle half is
+how long each wait was armed for (`forever` unbounded, `short` under 50 ms), poll
+returns by cause (timeout, the ring, an up-pipe, anything else), the surface events
+drained (`events`, and `kinds` naming the first four kinds with their counts) and
+presents, said as `halcyond: idle wakes: polls=1000 ms= ...` once per thousand
+polls -- never in minutes for a session that wakes a few times a second. The other idle half is
 outside halcyond: `kaua-term-probe --paste-latency wakes` reads
 `/proc/<pid>/sched` in one read (the kernel renders it afresh per read; owner or
 CAP_HOSTOWNER, so halcyond and the panes' programs, not tapestryd) around a

@@ -2315,7 +2315,11 @@ pub fn run(home: Option<String>) -> i64 {
         for (&leaf, t) in tiles.iter_mut() {
             loop {
                 match t.surf.poll_event() {
-                    Ok(Some(e)) => match e.kind {
+                    Ok(Some(e)) => match {
+                        #[cfg(feature = "test-mode")]
+                        idle.event(e.kind);
+                        e.kind
+                    } {
                         TEV_CLOSE => reap.push(leaf),
                         TEV_STORAGE => match t.surf.handle_storage(&e) {
                             Ok(resumed) => {
@@ -3053,7 +3057,7 @@ pub fn run(home: Option<String>) -> i64 {
                 let ring_ready = fds[0].revents != 0;
                 let up_ready = fds[1..1 + n_up].iter().any(|f| f.revents != 0);
                 let other_ready = fds[1 + n_up..].iter().any(|f| f.revents != 0);
-                if let Some(line) = idle.polled(now, polled, ring_ready, up_ready, other_ready) {
+                if let Some(line) = idle.polled(now, timeout, polled, ring_ready, up_ready, other_ready) {
                     say!("{}", line);
                 }
             }
