@@ -568,8 +568,12 @@ second over its two threads in both images: the
 UI thread ~70 polls a second, ~60 of them a TEV_FRAME on a tile surface that it
 drops (tapestryd ticks every visible surface, at 15 Hz once the console is
 quiet), and the service worker ~46-57 a second, nearly all on its control channel
-(`take_completed` wakes it on every session pass) plus the seat at ~8 a second
-(owner tallies, 550564b07; OPEN-BUGS 2026-11-17T11:10Z).
+plus the seat at ~8 a second (owner tallies, 550564b07; OPEN-BUGS
+2026-11-17T11:10Z). The control wakes were `take_completed`'s: the session loop
+calls it on every pass, and it woke the owner every time. It now wakes the owner
+only when it freed a completion slot (a dropped stale-route image frees one too),
+the one mailbox change it makes that the owner's admission reads; every other
+mailbox write already wakes the owner itself (routes, hosts, a changed budget).
 
 ### The console data flow
 

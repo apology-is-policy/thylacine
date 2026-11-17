@@ -1168,13 +1168,20 @@ impl PanePlaceServer {
             return out;
         }
         let routes = m.routes;
+        let mut freed = false;
         for slot in &mut m.completed {
             if let Some(img) = slot.take() {
+                freed = true;
                 if completion_route_current(&routes, &img) { out.push(img); }
             }
         }
         drop(m);
-        let _ = self.owner.wake();
+        // Only a freed slot changes the owner's admission budget. The session
+        // loop calls this on every pass; an unconditional wake made each of its
+        // wakes the owner's too.
+        if freed {
+            let _ = self.owner.wake();
+        }
         out
     }
 }
