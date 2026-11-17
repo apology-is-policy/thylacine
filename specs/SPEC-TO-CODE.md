@@ -2657,7 +2657,10 @@ Opens={o1}); all fifteen cfgs as wanted (aux-gate resid/m15-tlc-fscache.sh):
   variable from `fs_cache_wb.cfg`): `InvariantsWb` VIOLATED at `NoWrongRead` --
   o1's write-through passes its leg with nothing staged, o2 starts staging while
   it is in flight, the write lands, and o2's own read serves its stage under the
-  newer content (5 states: Init, begin, stage, land, read).
+  newer content (5 states: Init, begin, stage, land, read). That is the model's
+  symptom of the race; the stale own-page serve audit round 5 found needs the
+  flush's land and install as two steps, and `FlushClose` is one, so the
+  install's guard is pinned by `dev9p.m24_guard_skips_the_own_install`.
 
 ---
 

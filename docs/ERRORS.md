@@ -144,6 +144,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
 | `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: the file a fid named has died (Stratum answers it for an unlinked file's fid), or a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` or `SYS_WSTAT` cannot name its file (B-3h). Also what a server answers for its own dead handle when its client must tell that from a lost link: `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle` (operator vote 2026-11-04 (66)). And a memory account named by an incarnation that is not its own, on `SYS_ACCOUNT` or the spawn account tail (operator vote 2026-11-05 (76)), where 0 on a handle stays `EINVAL`. Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
 | `T_E_CONNREFUSED` | 111 | `ECONNREFUSED` | Connection refused: netd rejected the dial, or the data open failed after the connect verb was accepted |
+| `T_E_DQUOT`     | 122   | `EDQUOT`     | Disk quota exceeded. A server's `EDQUOT` crossed by value before this name; named with signoff (vote M28, 2026-11-17), minting no new ABI value, because a refused write-behind run reports it unchanged, as `ENOSPC` |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
 The values follow Linux's errno numbering (which musl + glibc agree on
@@ -513,7 +514,8 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WSTAT` | not the owner (chmod, chown, a time), or no write permission (the touch: both times to "now") | `-T_E_ACCES` (13); the POSIX front ends answer `EPERM` for the owner-only kinds |
 | `SYS_WSTAT` | the Dev has no metadata slot | `-T_E_OPNOTSUPP` (95) |
 | `SYS_WSTAT` | the fd is dev9p's loose cached open of a file renamed, unlinked or replaced since its open | `-T_E_STALE` (116) |
-| `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
+| `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), or `-T_E_NOSPC` (28) / `-T_E_DQUOT` (122) when the server refused for space (vote M28), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
+| `SYS_WRITE` / `SYS_FSYNC` | a write-behind run of the file was refused by the server: the open's own latch; for fsync also a run its leg flushed (vote M25) or a run a closer lost since the open was last told (vote M27) | `-T_E_IO` (5), or `-T_E_NOSPC` (28) / `-T_E_DQUOT` (122) when the server refused for space (vote M28: Linux's `mapping_set_error` rule; a server's `EINTR` or `EAGAIN` would invite a retry that returns 0) |
 | any handler | structurally bad argument | `-T_E_INVAL` (22) |
 | any handler | uaccess fault on a user VA | `-T_E_FAULT` (14) |
 

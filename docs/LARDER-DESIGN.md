@@ -928,7 +928,8 @@ flushed before another open's operation on the file:
   becomes the holder in between (the pin, below).
 
 The holder's own operations are unchanged: its reads overlay, its fstat
-patches the size, its writes keep 12.2's rules. So writes from two opens land
+patches the size, its writes keep 12.2's rules, and its changes pin as every
+other change does (the pin, below). So writes from two opens land
 in the order their callers made them, as in one page cache. The vote named the
 open, stat and read legs. The changing legs and fsync follow from the same
 rule: a second writer's change is ordered after the first writer's held bytes,
@@ -955,7 +956,9 @@ anchor in place. The holder leaves the registry at its last close once its run
 is gone, or at its last reference, where a run it still holds keeps its place
 as the closer's job. A last close that finds a run while another reference
 stands (a map, a Loom op, a leg) hands the run to a lock-flush job, and the
-holder leaves once that job's flush has ended.
+holder leaves once that job's flush has ended with nothing held. A leg's flush
+still in the air at that moment keeps it registered until its last reference,
+which costs another open its staging, never a byte.
 
 **The pin (votes M24 and M24a, 2026-11-16).** A leg that runs before the
 holder registers is ordered with nothing. Audit round 5 of vote M15 found a
@@ -964,27 +967,43 @@ the server after a new holder's flush; the flush had installed its run as own
 pages, which then served bytes the server no longer held, and a truncate
 landing the same way leaves the holder's anchor past the file's end. The same
 order opens when the leg finds a holder that closes before the change lands.
-So every changing operation through an open that is not the file's holder
-pins the file in its leg, under the bucket lock, whether or not it found a
-holder, and keeps the pin until its wire operation has answered and it has
-dropped the attr and pages that operation staled, on every return. A pin is a
-record on the operation's own stack, linked in the bucket beside the entries.
-While any pin on the file stands, an open that would become the holder is
-refused and writes through for its life, as an open that finds a holder does.
-A truncating open's own pin passes to its registration under that same bucket
-lock, so it never refuses itself. The holder's own operations take no pin: its
-`wb_lock` orders them. Linux's analogue is the inode lock that a write and a
-truncating open take.
+So every changing operation pins the file in its leg, under the bucket lock,
+whether or not it found a holder (vote M24a), and keeps the pin until its wire
+operation has answered and it has dropped the attr and pages that operation
+staled, on every return. A pin is a record on the operation's own stack, linked
+in the bucket beside the entries. While any pin on the file stands, an open
+that would become the holder is refused and writes through for its life, as an
+open that finds a holder does. A truncating open's own pin passes to its
+registration under that same bucket lock, so it never refuses itself.
+
+The holder's own changes pin too (vote M26, 2026-11-17). Audit round 6 of vote
+M15 found the holder's own truncate unordered: its wire operation runs outside
+its `wb_lock`, and another thread's last close takes the holder out of the
+registry while nothing is staged, so a new truncating open could register,
+stage and flush before that truncate landed, and its anchor would then stand
+past the file's end. So the holder's write, wstat and Loom registration keep
+the pin their leg links, as any other open's do. A write the holder stages
+holds it only while it stages: a staged byte reaches the server through a
+flush, which the holder's entry orders (the entry stays while a run is held
+or a flush is in the air). Linux's analogue is the inode lock that every write
+and truncate take, whoever makes them.
 
 **What a leg's flush can end in.** Landed: the operation goes on and sees the
 bytes. Refused by the server: as with any failed flush, the run is dropped and
 the error latches on the holder, whose next write, fsync or last close reports
-it; the operation goes on and sees the file without those bytes. An fsync is
+it; the operation goes on and sees the file without those bytes. A refusal is
+reported as `EIO`, unless the server refused for space (`ENOSPC`, `EDQUOT`),
+which passes through (vote M28, 2026-11-17: Linux's `mapping_set_error` rule).
+A server's `EINTR` or `EAGAIN` would tell the caller to try again, and the
+retry would find nothing held and return 0 for bytes that are gone. An fsync is
 the exception (vote M25, 2026-11-16): an fsync whose leg ran a refused flush,
 or waited one out, returns that error, as Linux reports a writeback error to
 the descriptor whose fsync waited on the writeback, and the holder keeps its
-latch for its own report. A later fsync through a third open, which flushes
-nothing, returns 0. Only a refusal the server answered counts: a flush
+latch for its own report. That includes a refusal that retired between the
+leg's look, which found the run held, and its flush, which found nothing left.
+A later fsync through a third open, which flushes nothing, returns 0, unless a
+closer has lost a run of the file that this open has not yet been told of
+(below). Only a refusal the server answered counts: a flush
 cancelled by a caught note or cut short by a death keeps its run. Cancelled by
 a caught note on the leg's own thread: flush(5) never applied the Twrite, the
 run stays held, and the operation returns `EINTR`. It did not happen, so no
@@ -1008,6 +1027,13 @@ another open's write found the Image from before the write, while a read on
 the same descriptor saw the new bytes (audit round 5 of vote M15). A mapping
 already made keeps its pages, as ever.
 
+A mapping made through an open that can stage (a create- or OTRUNC-born open
+that became the holder) is private (vote M29, 2026-11-17). Its pages fill
+through that open's read, whose overlay serves staged bytes the server may yet
+refuse, so they are never shared: its Image is its own and never registered,
+as an unversioned file's is (vote 114). Another program's mapping fills through
+its own open, whose read leg lands the holder's run first.
+
 **A writer killed in its last close.** Its run goes to a closer as 12.2 says.
 When a map or a Loom op still holds the file, the closer's job holds it too and
 the open stays registered: a leg flushes the run itself or waits out the
@@ -1028,6 +1054,19 @@ before and leaves the registry with the job. No leg runs on a closer: its jobs
 write a run, flush an open and release its locks, and clunk. So a closer never
 waits for a job.
 
+**A run a closer loses (vote M27, 2026-11-17).** A closer's job can still lose
+its run: its retries spent, the job never queued for memory, or a lock-flush
+job's flush refused past the last close. No program is left to hear it, so the
+loss is recorded against the file on its client, as Linux's errseq records a
+writeback error against the inode. The record holds a sequence and whether any
+open has been told. An open samples the file's record at its open: the current
+sequence once some open has been told, the one before it while none has, so an
+open made after a loss nobody heard is told too. An fsync whose sample is
+behind the record returns `EIO` once (or the space errno, as above) and
+catches up, and marks the record told. The table is per client and bounded;
+the oldest record is evicted, and an evicted loss leaves only the console line,
+which every loss prints as before.
+
 **What stays.** A cached open serves its open-time snapshot (close-to-open;
 FID-LIFECYCLE 3.3). Its open flushed every held byte before the snapshot was
 taken, and its reads and fstat see no later write of any kind. Loom: a
@@ -1042,23 +1081,30 @@ between clients, as between two NFS clients. Strict mounts stage nothing
 mutation of the file landing between a flush's freeze and its install. Before
 this section that held only for the flushing open. A changing operation on the
 client either finds the holder, and its leg waits out the holder's flush, or
-pinned the file before the holder registered, which refuses the registration.
+pinned the file before the holder registered, which refuses the registration;
+the holder's own change keeps its pin, so a holder that leaves in the middle of
+one is not replaced until it has landed (vote M26).
 So no change from this client lands inside a holder's flush, and the install's
 guard (13) holds the premise against anything that argument misses.
 
 **Cost.** Each read, write, open, fstat, stat by name and fsync of a plain file
 on a loose cacheable client looks the file up: one bucket lock and an empty
 bucket in the common case, and nothing at all while no open stages anywhere.
-A changing operation through an open that is not the holder also pins and
-unpins, two bucket locks whether or not anything stages, beside the wire
-operation it orders.
+A changing operation also pins and unpins, the holder's own included, two
+bucket locks whether or not anything stages, beside the wire operation it
+orders. A strict client runs no leg at all: it never stages (12.3), and its
+`loose` flag is fixed at attach.
 The measured mix -- one writer per file, read after its close -- never meets a
 holder. A program that stats a file while another program writes it pays a
 flush per stat, as an NFS client's `getattr` writes dirty pages back first.
 
 **Spec.** `fs_cache.tla` names the opens (12.4). A write-through is two steps
 there, its leg and its land, and `fs_cache_buggy_unpinned.cfg` shows the race
-the pin closes: a stage started while another open's write is in flight.
+the pin closes in the model's terms: a stage started while another open's
+write is in flight, read back under the newer content. The stale own-page
+serve that audit round 5 found needs the flush's land and its install as two
+steps, and the model's `FlushClose` is one, so the install's guard (13) is
+pinned by a runtime test.
 
 ---
 
