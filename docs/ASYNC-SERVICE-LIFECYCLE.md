@@ -449,4 +449,6 @@ The client's rules, each from a rule above it:
   e6e723cf9 (work/nov03-mm1/pl4, one run each): typing first output p50 2.4-3.5 ms in both images;
   the 24,399-byte Nora paste p50 3.2 ms, settle 3.4 ms; the 4,000-byte ut paste p50 10.2 ms, settle
   84.5 ms, frames up to 37.0 ms; idle halcyond 107-141 dispatches a second, the same in both
-  images (ASYNC-SERVICE-STATUS AS-4 has every number).
+  images (ASYNC-SERVICE-STATUS AS-4 has every number). The service worker's half is fixed
+  (76bd5710b: the owner is woken only when a completion slot was freed): idle halcyond 60-75
+  dispatches a second after it (q-ow1), the rest the frame ticks (vote 141) and the seat.

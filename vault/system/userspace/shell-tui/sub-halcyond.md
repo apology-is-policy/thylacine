@@ -576,6 +576,13 @@ calls it on every pass, and it woke the owner every time. It now wakes the owner
 only when it freed a completion slot (a dropped stale-route image frees one too),
 the one mailbox change it makes that the owner's admission reads; every other
 mailbox write already wakes the owner itself (routes, hosts, a changed budget).
+Measured after the change (q-ow1 on 8352efe6f): the owner's control wakes fell
+from 88-90% of its polls to 0-1%, and an idle halcyond from ~110-140 to 60-75
+dispatches a second; what remains is the UI thread's frame ticks and the seat's
+~8 a second. A typing outlier first seen after it does not follow it: ten
+interleaved rounds against its base (q-ow3) had typing samples past 15 ms in 0 of
+10 runs with it and 1 of 10 without, and the slow frames on both sides were slow
+presents -- time inside the synchronous write to tapestryd, not halcyond's.
 
 ### The console data flow
 
