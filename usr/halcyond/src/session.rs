@@ -282,6 +282,12 @@ struct SessionTile {
     sync_late_said: bool,
     #[cfg(feature = "test-mode")]
     sync_cut_said: bool,
+    /// The latency record's first unanswered key (monotonic ns, 0 = none)
+    /// and whether the program has written since it (test builds).
+    #[cfg(feature = "test-mode")]
+    lat_key_ns: u64,
+    #[cfg(feature = "test-mode")]
+    lat_echoed: bool,
     /// H-4d: the Helix-modal transcript mode (HALCYON.md 4): Esc leaves
     /// Insert for Normal, where the cursor walks the rows and `w`/`b` walk
     /// the obj runs; Enter opens the run's verb menu; `i` returns.
@@ -452,6 +458,10 @@ impl SessionTile {
             sync_late_said: false,
             #[cfg(feature = "test-mode")]
             sync_cut_said: false,
+            #[cfg(feature = "test-mode")]
+            lat_key_ns: 0,
+            #[cfg(feature = "test-mode")]
+            lat_echoed: false,
             mode: Mode::Insert,
             flat: Vec::new(),
             flat_seq: u64::MAX,
@@ -1974,6 +1984,8 @@ pub fn run(home: Option<String>) -> i64 {
     // first present; reaped at the loop top; killed at logout.
     let mut init: Option<Child> = None;
     let mut init_spawned = false;
+    #[cfg(feature = "test-mode")]
+    let mut lat = halcyond::latency::Latency::new();
 
     loop {
         // The atlas bound, between frames: every tile re-lays its visible
@@ -2223,9 +2235,21 @@ pub fn run(home: Option<String>) -> i64 {
                 continue;
             }
             let was_dirty = t.dirty;
+            #[cfg(feature = "test-mode")]
+            let frame_start = libthyla_rs::time::monotonic_ns();
             let ok = t.render_if_dirty(&mut cart, &mut gs, &sheet);
             if !was_dirty {
                 continue;
+            }
+            #[cfg(feature = "test-mode")]
+            if ok {
+                let now = libthyla_rs::time::monotonic_ns();
+                lat.frame(frame_start, now);
+                if t.lat_key_ns != 0 && t.lat_echoed {
+                    lat.answered(t.lat_key_ns, now);
+                    t.lat_key_ns = 0;
+                    t.lat_echoed = false;
+                }
             }
             if ok {
                 t.painted();
@@ -2319,6 +2343,15 @@ pub fn run(home: Option<String>) -> i64 {
                                 wire_out.clear();
                                 encode_input(&Input::Key(kev), &mut wire_out);
                                 t.queue_key(&wire_out);
+                                #[cfg(feature = "test-mode")]
+                                {
+                                    let now = libthyla_rs::time::monotonic_ns();
+                                    if t.lat_key_ns == 0 {
+                                        t.lat_key_ns = now;
+                                        t.lat_echoed = false;
+                                    }
+                                    lat.key(now);
+                                }
                             }
                         }
                         TEV_PTR_MOVE => {
@@ -2964,7 +2997,27 @@ pub fn run(home: Option<String>) -> i64 {
             .filter_map(|t| t.tile.hold.due_ms(hold_now))
             .min();
         let timeout = libhalcyon::motion::fold_timeout(timeout, hold_due);
-        if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
+        // Test builds: an open latency burst says its line once it is over, so
+        // the wait ends there at the latest; an idle session has none open.
+        #[cfg(feature = "test-mode")]
+        let timeout = {
+            let now = libthyla_rs::time::monotonic_ns();
+            let owed = tiles.values().filter(|t| t.lat_key_ns != 0).count() as u32;
+            if let Some(line) = lat.end(now, owed) {
+                say!("{}", line);
+                for t in tiles.values_mut() {
+                    t.lat_key_ns = 0;
+                    t.lat_echoed = false;
+                }
+            }
+            lat.waiting(now);
+            let due = lat.due_ms(now, owed > 0).map(|ms| ms.min(i32::MAX as u64) as i32);
+            libhalcyon::motion::fold_timeout(timeout, due)
+        };
+        let polled = unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) };
+        #[cfg(feature = "test-mode")]
+        lat.woke(libthyla_rs::time::monotonic_ns());
+        if polled < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
             break;
@@ -3017,6 +3070,10 @@ pub fn run(home: Option<String>) -> i64 {
             };
             match t.ingest(&mut inbuf, &mut places) {
                 Ingested::Live => {
+                    #[cfg(feature = "test-mode")]
+                    if t.lat_key_ns != 0 {
+                        t.lat_echoed = true;
+                    }
                     if !ingest_announced {
                         ingest_announced = true;
                         say!("halcyond: session tile ingest live");

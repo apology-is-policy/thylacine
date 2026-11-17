@@ -1,0 +1,248 @@
+#!/usr/bin/expect -f
+# Rendering and input latency under a paste, and the session's idle wakeups, recorded
+# rather than judged from a still image (ASYNC-SERVICE-LIFECYCLE AS-4f; HALCYON-INTERACTION
+# 12: "record render latency and idle wakeups before/after").
+#
+# Images and boots, the paste image and its control without the interaction work:
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_HALCYON_SESSION=1 \
+#     THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_BUILD_DIR=build/kernel-private-async-qual \
+#     tools/test-interactive.sh ls-halcyon-paste-latency
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
+#   tools/test-interactive.sh ls-halcyon-paste-latency
+#
+# halcyond's test builds say one line per typing burst (usr/halcyond/src/latency.rs):
+# key-to-present, render + present per frame, the loop's longest busy stretch and its
+# wakes. The probe's `wakes` verb says each readable process's dispatches over a silent
+# window. Every number goes into the log. What fails the run is a record that is missing
+# or does not add up: no line for a burst, a burst whose key count is not the keys
+# typed, a key never answered, samples past the cap, or halcyond's counters unreadable.
+# Both images run the baselines (an idle shell, typing into ut, typing into Nora, Nora
+# idle beside a shell). The paste image adds a 24,000-byte paste into Nora and a
+# 4,000-byte one into ut, each with forty keys typed straight after it in one burst.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set paste_image [expr {[info exists ::env(THYLACINE_INTERACTION_QUALIFICATION)] && $::env(THYLACINE_INTERACTION_QUALIFICATION) eq "1"}]
+# Forty keys with a rune each and no shift: a burst's key count is exactly this.
+set T40 "abcdefghijklmnopqrstuvwxyzabcdefghijklmn"
+
+proc settle {seconds} {
+    lc_within $seconds {
+        -ex "PASTE-LATENCY-NEVER-PRINTED" {}
+        -re {EXTINCTION:} { lc_extinction_fail "paste latency" }
+        timeout {}
+        eof { lc_fail "EOF in the paste latency run" }
+    }
+}
+# A chord with no wait after it, so the keys after it fall in the same burst.
+proc chord {c} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $c} e]} { lc_fail $e }
+}
+proc key {c} {
+    chord $c
+    settle 1
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc verdict {leg} {
+    global lc_cmd_timeout
+    lc_within $lc_cmd_timeout {
+        -ex "paste-latency: $leg PASS" { lc_step "$leg passed" }
+        -re "paste-latency: FAIL $leg -- (\[^\r\n\]+)\[\r\n\]" { lc_fail "$leg: $expect_out(1,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail $leg }
+        timeout { lc_fail "$leg: no verdict" }
+        eof { lc_fail "EOF at $leg" }
+    }
+}
+# The next burst line with `want` keys; a line with another count is an earlier burst
+# (a command typed, a chord) and is logged and passed over. With `pasted` set, Nora's
+# paste must also land, before the line or after it.
+proc burst {leg want {pasted 0}} {
+    global lc_cmd_timeout
+    set landed [expr {!$pasted}]
+    set measured 0
+    while {!($landed && $measured)} {
+        set line ""
+        lc_within $lc_cmd_timeout {
+            -re {halcyond: latency: [^\r\n]*over=[0-9]+[\r\n]} { set line [string trim $expect_out(0,string)] }
+            -ex "nora: clipboard pasted" { set landed 1 }
+            -ex "nora: clipboard paste not applied" { lc_fail "$leg: the paste came back and was not applied" }
+            -re {nora: clipboard paste failed: ([^\r\n]+)[\r\n]} { lc_fail "$leg: the paste failed: $expect_out(1,string)" }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail "$leg: no latency line or no paste (only halcyond's test-mode builds say a line)" }
+            eof { lc_fail "EOF at $leg" }
+        }
+        if {$line eq "" || $measured} { continue }
+        if {![regexp {keys=([0-9]+) answered=([0-9]+) unanswered=([0-9]+) key-to-present-us p50=(\S+) p99=(\S+) max=(\S+) frames=([0-9]+) frame-us p50=(\S+) p99=(\S+) max=(\S+) busy-max-us=([0-9]+) wakes=([0-9]+) span-ms=([0-9]+) over=([0-9]+)$} \
+                $line -> keys answered unanswered kp50 kp99 kmax frames fp50 fp99 fmax busy wakes span over]} {
+            lc_fail "$leg: a latency line that does not parse: $line"
+        }
+        if {$keys != $want} {
+            lc_step "$leg: an earlier burst passed over: $line"
+            continue
+        }
+        lc_step "LATENCY $leg: $line"
+        if {$unanswered != 0} { lc_fail "$leg: $unanswered key(s) never answered: $line" }
+        if {$answered < 1 || $frames < 1} { lc_fail "$leg: a burst with no answer or no frame: $line" }
+        if {$over != 0} { lc_fail "$leg: $over sample(s) past the cap: $line" }
+        set measured 1
+    }
+    if {$pasted} { lc_step "$leg: the paste into Nora landed" }
+}
+# One idle window from the probe; every process line goes into the log.
+proc wakes {leg secs} {
+    type "kaua-term-probe --paste-latency wakes $secs $leg\n"
+    set halcyond 0
+    set done 0
+    while {!$done} {
+        lc_within [expr {$secs + 60}] {
+            -re "paste-latency: wakes $leg \[^\r\n\]+ pid=\[0-9\]+ \[^\r\n\]*secs=\[0-9\]+\[\r\n\]" {
+                set row [string trim $expect_out(0,string)]
+                lc_step "WAKES $row"
+                if {[string match "paste-latency: wakes $leg halcyond pid=*" $row]} { set halcyond 1 }
+            }
+            -re "paste-latency: wakes $leg processes=\[0-9\]+ skipped=\[0-9\]+\[\r\n\]" {
+                lc_step "WAKES [string trim $expect_out(0,string)]"
+            }
+            -ex "paste-latency: $leg PASS" { set done 1 }
+            -re "paste-latency: FAIL $leg -- (\[^\r\n\]+)\[\r\n\]" { lc_fail "$leg: $expect_out(1,string)" }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail "$leg: no verdict" }
+            eof { lc_fail "EOF at $leg" }
+        }
+    }
+    if {!$halcyond} { lc_fail "$leg: halcyond's counters were not readable" }
+}
+proc new_shell {c why} {
+    global lc_cmd_timeout
+    key $c
+    lc_within $lc_cmd_timeout {
+        -re {halcyond: session tile leaf=[0-9]+ spawned pid=[0-9]+[^\r\n]*/bin/ut} { lc_step "a new shell: $why" }
+        -re {tapestryd: chord new-tile refused[^\r\n]*[\r\n]} { lc_fail "the new tile was refused: $why" }
+        -re {EXTINCTION:} { lc_extinction_fail $why }
+        timeout { lc_fail "no new shell: $why" }
+        eof { lc_fail "EOF waiting for a new shell: $why" }
+    }
+    settle 3
+}
+proc nora {name} {
+    global lc_cmd_timeout
+    type "nora ~/$name\n"
+    lc_within $lc_cmd_timeout {
+        -re {halcyond: session tile leaf=[0-9]+ screenmode -> AltScreen} { lc_step "Nora holds its tile: $name" }
+        -re {(nora: EXIT path=[a-z]+[^\r\n]*)[\r\n]} { lc_fail "Nora left before it held its tile: $name ($expect_out(1,string))" }
+        -re {EXTINCTION:} { lc_extinction_fail "opening $name" }
+        timeout { lc_fail "Nora never took its tile: $name" }
+        eof { lc_fail "EOF opening $name" }
+    }
+    settle 2
+}
+proc leave {} {
+    global lc_cmd_timeout
+    key "esc"
+    type ":wq\n"
+    lc_within $lc_cmd_timeout {
+        -ex "nora: EXIT path=quit code=0" { lc_step "Nora left" }
+        -re {(nora: EXIT path=[a-z]+[^\r\n]*)[\r\n]} { lc_fail "Nora left another way: $expect_out(1,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "leaving Nora" }
+        timeout { lc_fail "Nora did not leave" }
+        eof { lc_fail "EOF leaving Nora" }
+    }
+    settle 2
+}
+proc login_to_session {user password} {
+    global lc_boot_timeout
+    lc_within $lc_boot_timeout {
+        -ex "Thylacine login: " {}
+        -re {EXTINCTION:} { lc_extinction_fail "login prompt" }
+        timeout { lc_fail "no login prompt for $user" }
+        eof { lc_fail "EOF before login" }
+    }
+    lc_raw_send "$user\r" "login user"
+    lc_within 60 {
+        -ex "password: " {}
+        timeout { lc_fail "no password prompt for $user" }
+        eof { lc_fail "EOF before password" }
+    }
+    lc_raw_send "$password\r" "login password"
+    lc_within 60 {
+        -ex "login: session compositor (halcyond) spawned" {}
+        -ex "Thylacine textual shell" {
+            puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. See this scenario's header for the bake"
+            lc_quit
+            exit 77
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "session start" }
+        timeout { lc_fail "no graphical session for $user" }
+        eof { lc_fail "EOF at session start" }
+    }
+    lc_within 60 {
+        -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+        -re {EXTINCTION:} { lc_extinction_fail "session start" }
+        timeout { lc_fail "welcome and shell did not become ready for $user" }
+        eof { lc_fail "EOF before the shell" }
+    }
+    settle 3
+}
+
+lc_boot
+login_to_session michael correct-horse-battery-staple-v1
+lc_step "image: [expr {$paste_image ? {paste (interaction qualification, private rings)} : {control (no interaction work)}}]"
+
+# An idle shell: only the probe's own window, nothing typed during it.
+wakes idle-shell 10
+settle 2
+
+# Typing into ut, a line never run.
+type $T40
+burst ut-typing 40
+key "ctrl+u"
+settle 2
+
+# Typing into Nora, in Insert mode.
+nora lat-a.txt
+key "i"
+settle 2
+type $T40
+burst nora-typing 40
+leave
+
+# Nora idle beside a shell, its private client open (in the paste image).
+nora lat-b.txt
+new_shell "meta_l+h" "beside the editor"
+wakes idle-nora 10
+settle 2
+
+if {$paste_image} {
+    # 400 lines of 60 bytes; Space p, then Insert and forty keys, one burst of 43 keys.
+    type "kaua-term-probe --paste-latency fill 400 60 fill-nora\n"
+    verdict fill-nora
+    key "meta_l+left"
+    settle 2
+    type " pi$T40"
+    burst nora-paste 43 1
+    leave
+    # One 4,000-byte line into ut, Alt-P and forty keys: 41 keys.
+    type "kaua-term-probe --paste-latency fill 1 4000 fill-ut\n"
+    verdict fill-ut
+    settle 2
+    chord "alt+p"
+    type $T40
+    burst ut-paste 41
+    key "ctrl+u"
+    settle 2
+    lc_pass "paste latency: baselines and both pastes recorded (paste image)"
+} else {
+    key "meta_l+left"
+    settle 2
+    leave
+    lc_pass "paste latency: baselines recorded (control image)"
+}
+lc_quit
+exit 0

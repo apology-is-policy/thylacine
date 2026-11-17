@@ -1051,7 +1051,8 @@ geometry rather than stale boot EDID. App preferences die with surface ownership
 
 Still open: explicit application relative-pointer capture and its client
 migration (relative motion is not capture); direct-scanout qualification;
-additional scales/modes and failure-injection matrix; latency/idle measurement;
+additional scales/modes and failure-injection matrix; latency/idle numbers (the
+session's latency record and idle-wakeup window are written: `ls-halcyon-paste-latency`);
 production-feature and full sanitizer qualification; Pi bare-metal backends.
 The existing `ls-gfx-panes` direct-scanout harness assumes the legacy console
 image and hard-codes HVF, so the Halcyon image cannot honestly substitute for

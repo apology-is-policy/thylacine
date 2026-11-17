@@ -29,6 +29,7 @@ pub mod indicator;
 pub mod inlineaccum;
 pub mod inlinecache;
 pub mod input;
+pub mod latency;
 pub mod layout;
 pub mod menu;
 pub mod modeview;

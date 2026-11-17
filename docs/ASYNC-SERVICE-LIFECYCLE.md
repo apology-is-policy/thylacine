@@ -435,4 +435,10 @@ The client's rules, each from a rule above it:
   over their private rings and a blocking client as the other path. It passed in the
   same run (265 s, interaction-qualification image with private rings). One seat holds one live session, since a second `session on` answers EBUSY,
   so several sessions means one after another. The unknown commit is already in
-  `ls-halcyon-clipboard-async`. Rendering and input latency under a paste is still owed.
+  `ls-halcyon-clipboard-async`. Rendering and input latency under a paste are recorded, not
+  judged (HALCYON-INTERACTION 12), by `ls-halcyon-paste-latency`: halcyond's test builds say
+  one line per typing burst, from a key entering a tile's input queue to the present after the
+  program's answer, every frame's render and present, and the loop's longest busy stretch;
+  the probe reads each readable process's dispatches over a silent window. It runs on the
+  paste image and on a control image without the interaction work, so the record has a
+  before and an after. The run fails only on a record that is missing or does not add up.
