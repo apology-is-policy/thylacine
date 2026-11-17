@@ -561,13 +561,15 @@ merge (they did under a 150 ms per-key stall: one 114-key burst). Its ut paste c
 content end to end: the probe's `mark` line is typed first, the 4,000-capital
 paste and forty keys follow in one burst, and Enter runs `mark`, which requires
 every typed key in order plus the whole paste and says after how many keys the
-paste landed. Its runs (2026-11-17: 8fe41cb57, 6a2dda6d6) measured an idle
-halcyond at 99-125 dispatches a second over its two threads in both images: the
+paste landed. Its runs (2026-11-17: 8fe41cb57, 6a2dda6d6, 550564b07, e6e723cf9)
+measured typing at a first output p50 of 2.4-3.5 ms in both images, 10.2 ms under the
+4,000-byte ut paste (settle 84.5 ms), and an idle halcyond at 88-141 dispatches a
+second over its two threads in both images: the
 UI thread ~70 polls a second, ~60 of them a TEV_FRAME on a tile surface that it
 drops (tapestryd ticks every visible surface, at 15 Hz once the console is
 quiet), and the service worker ~46-57 a second, nearly all on its control channel
-(the session loop pokes it on most passes) plus the seat at ~8 a second (owner
-tallies, 550564b07; OPEN-BUGS 2026-11-17T11:10Z).
+(`take_completed` wakes it on every session pass) plus the seat at ~8 a second
+(owner tallies, 550564b07; OPEN-BUGS 2026-11-17T11:10Z).
 
 ### The console data flow
 

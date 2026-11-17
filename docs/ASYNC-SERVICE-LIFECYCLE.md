@@ -445,5 +445,8 @@ The client's rules, each from a rule above it:
   after, and fails only on a record that is missing or does not add up. Its runs found an idle
   halcyond dispatched about 100-125 times a second over its two threads in both images: the UI
   thread on tapestryd's frame ticks, which it drops, and the service worker on its control
-  channel, which the session loop pokes on most passes (OPEN-BUGS 2026-11-17T11:10Z); the numbers
-  are owed by the run that lands this record.
+  channel, which the session loop pokes on every pass (OPEN-BUGS 2026-11-17T11:10Z). Recorded on
+  e6e723cf9 (work/nov03-mm1/pl4, one run each): typing first output p50 2.4-3.5 ms in both images;
+  the 24,399-byte Nora paste p50 3.2 ms, settle 3.4 ms; the 4,000-byte ut paste p50 10.2 ms, settle
+  84.5 ms, frames up to 37.0 ms; idle halcyond 107-141 dispatches a second, the same in both
+  images (ASYNC-SERVICE-STATUS AS-4 has every number).
