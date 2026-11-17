@@ -1355,6 +1355,119 @@ void test_p9_closer_lock_flush_job_leaves_the_registry(void) {
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
 }
 
+// Vote M27: a run a closer's job loses reached no program, so it is recorded
+// against the file, and an open made before the loss hears it at its next fsync,
+// once. Here the server refuses the close job's write on every try.
+void test_p9_closer_close_job_loss_reaches_a_peer_fsync(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w), peered = false, started = false;
+    struct Spoor *peer = NULL;
+    int f1 = 1, f2 = 1;
+    u32 nfs1 = 0xffffffffu, nfs2 = 0xffffffffu;
+    if (opened) {
+        peer   = pw_open_peer(&w);
+        peered = peer != NULL;
+    }
+    if (peered) {
+        p9_close_flush_quiet_for_test(true);
+        g_rec_a.fail_writes = 64;        // past every retry
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, wbc_drop, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));   // the retries take about a second
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+        g_rec_a.fail_writes = 0;
+        p9_close_flush_quiet_for_test(false);
+        f1   = dev9p.fsync(peer, 0);
+        nfs1 = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+        f2   = dev9p.fsync(peer, 0);
+        nfs2 = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    int pcc = peered ? wbc_fd_close(peer) : 0;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(peered, "a peer open of the same file");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "its close reports nothing: the job carries the run");
+    TEST_ASSERT(rec.nwrite_refused >= 2u, "the server refused the job's write, try after try");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors + 1, "and the job lost the run");
+    TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "the peer's next fsync hears the loss");
+    TEST_EXPECT_EQ((u64)nfs1, 0ull, "before any Tfsync");
+    TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)nfs2, 1ull, "the next fsync syncs");
+    TEST_EXPECT_EQ((u64)(s64)pcc, 0ull, "the peer closes");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+// The same for a lock-flush job: a last close on a thread that may not wait,
+// with another reference keeping the open, hands its flush to a job, and the
+// server refuses it past the last close.
+void test_p9_closer_lock_flush_job_loss_reaches_a_peer_fsync(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w), peered = false, started = false;
+    struct Spoor *peer = NULL;
+    int f1 = 1, f2 = 1;
+    u32 nfs1 = 0xffffffffu, nfs2 = 0xffffffffu, refused = 0;
+    if (opened) {
+        peer   = pw_open_peer(&w);
+        peered = peer != NULL;
+    }
+    if (peered) {
+        p9_close_flush_quiet_for_test(true);
+        g_rec_a.fail_writes = 1;         // a job alone runs once
+        spoor_ref(w.f);                  // what a map or a Loom op holds
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, wbc_drop, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_rec_a.nwrite_refused, __ATOMIC_ACQUIRE) >= 1 &&
+                              closer_quiet());
+        refused = __atomic_load_n(&g_rec_a.nwrite_refused, __ATOMIC_ACQUIRE);
+        g_rec_a.fail_writes = 0;
+        p9_close_flush_quiet_for_test(false);
+        f1   = dev9p.fsync(peer, 0);
+        nfs1 = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+        f2   = dev9p.fsync(peer, 0);
+        nfs2 = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+        spoor_clunk(w.f);                // the last reference
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    int pcc = peered ? wbc_fd_close(peer) : 0;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(peered, "a peer open of the same file");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "its close reports nothing: a job flushes");
+    TEST_EXPECT_EQ((u64)refused, 1ull, "the server refused the job's flush");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors + 1, "which the job reported");
+    TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "the peer's next fsync hears the loss");
+    TEST_EXPECT_EQ((u64)nfs1, 0ull, "before any Tfsync");
+    TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)nfs2, 1ull, "the next fsync syncs");
+    TEST_EXPECT_EQ((u64)(s64)pcc, 0ull, "the peer closes");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
 // An exits() close sets no group_exit_msg, so its first kill wins the CAS; the
 // final-close mark the at-exit close sets is what makes that kill find the close
 // under way and force it (part B). The Proc's own thread runs the real at-exit

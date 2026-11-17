@@ -33,6 +33,9 @@
 #include <thylacine/loom.h>
 #include <thylacine/path.h>
 #include <thylacine/territory.h>
+#include <thylacine/9p_attach.h>
+#include <thylacine/image.h>
+#include <thylacine/vma.h>
 
 #include "../../mm/slub.h"             // kmalloc (the wb heap scratch)
 #include "../../arch/arm64/uart.h"
@@ -180,6 +183,9 @@ static u8   g_m24_type[8];
 static u32  g_m24_pins[8];
 static u32  g_m24_log_n;
 static u64  g_m24_event_path;
+// The qid.version an Rgetattr and an Rlopen report (0: the canonical 0).
+static u32  g_ga_vers;
+static u32  g_tlopen_vers;
 static u64  g_wga_path_base = 0x20;  // Rwalkgetattr qid.path = base + component
 static u32  g_unlinkat_fail_ecode;   // != 0: the NEXT Tunlinkat answers Rlerror, then clears
 static u32  g_renameat_fail_ecode;   // #80: != 0: the NEXT Trenameat answers Rlerror, then clears
@@ -384,7 +390,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[4] = P9_RLOPEN;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
         resp[7] = P9_QTFILE;
-        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        for (int i = 0; i < 4; i++) resp[8 + i] = (u8)(g_tlopen_vers >> (8 * i));
         { u64 qp = g_tlopen_path_ov ? g_tlopen_path_ov : 0x42u;
           for (int i = 0; i < 8; i++) resp[12 + i] = (u8)(qp >> (8 * i)); }
         resp[20] = 0; resp[21] = 0x10; resp[22] = 0; resp[23] = 0;     // iounit=4096
@@ -645,7 +651,9 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         size_t o = P9_HDR_LEN;
         for (int b = 0; b < 8; b++) resp[o + b] = (u8)(g_ga_valid >> (8 * b));
         o += 8;                                              // valid (BASIC unless a test narrows it)
-        resp[o] = P9_QTFILE; o += 1 + 4; resp[o] = 0x33; o += 8;   // qid (path 0x33)
+        resp[o] = P9_QTFILE;                                 // qid (path 0x33)
+        for (int b = 0; b < 4; b++) resp[o + 1 + b] = (u8)(g_ga_vers >> (8 * b));
+        o += 1 + 4; resp[o] = 0x33; o += 8;
         { u32 m = g_ga_mode;                                 // mode (S_IFREG|0644 unless a test sets it)
           resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
           resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
@@ -4678,9 +4686,10 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
 // A server that answers a flush's Twrite with Rlerror(EINTR) has failed the
 // write: with no mark the EINTR is the server's, not a cancellation, so it
 // latches and drops the run like ENOSPC, and the last close reports it rather
-// than handing the run to a closer and returning 0. A claim changes nothing: it
-// is what a thread holds when that answer beats its flush, and client_run has
-// taken the mark back by then.
+// than handing the run to a closer and returning 0. It is reported as EIO (vote
+// M28): an EINTR would invite a retry, which would find nothing held. A claim
+// changes nothing: it is what a thread holds when that answer beats its flush,
+// and client_run has taken the mark back by then.
 static void wb_server_eintr_leg(u32 claim) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
@@ -4702,11 +4711,11 @@ static void wb_server_eintr_leg(u32 claim) {
     u32  seen_close = g_twrite_seen;
     wb_test_end(root);
 
-    TEST_EXPECT_EQ((u64)(-fe0), (u64)P9_E_INTR, "the fsync returns the server's EINTR");
-    TEST_EXPECT_EQ((u64)(-fe1), (u64)P9_E_INTR, "and it latched: the next fsync returns it");
+    TEST_EXPECT_EQ((u64)(-fe0), (u64)T_E_IO, "the fsync reports the server's EINTR as EIO");
+    TEST_EXPECT_EQ((u64)(-fe1), (u64)T_E_IO, "and it latched: the next fsync returns it");
     TEST_EXPECT_EQ((u64)seen, 1ull, "nothing was resent");
     TEST_EXPECT_EQ((u64)seen_close, 1ull, "the close sends nothing: the run was dropped");
-    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-P9_E_INTR, "and the last close reports it");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-T_E_IO, "and the last close reports it");
 }
 
 void test_dev9p_wb_server_eintr_latches(void) {
@@ -5070,7 +5079,7 @@ void test_dev9p_m23_peer_write_stops_an_idle_holder(void) {
 
 // A truncating open, a wstat and a Loom registration through a peer each land
 // the holder's run and stop it staging. The truncating open does not become a
-// second holder.
+// second holder. A registered ring writes, so its peer is opened for writing.
 static void m23_changing_leg(int leg) {
     u8 *chunk = m23_chunk();
     TEST_ASSERT(chunk != NULL, "scratch");
@@ -5078,7 +5087,7 @@ static void m23_changing_leg(int leg) {
     struct Spoor *root = NULL;
     struct Spoor *f = wb_make_created(&root);
     TEST_ASSERT(f != NULL, "create");
-    struct Spoor *o = leg == 0 ? NULL : m23_peer(root, 0 /*OREAD*/);
+    struct Spoor *o = leg == 0 ? NULL : m23_peer(root, leg == 2 ? 2 /*ORDWR*/ : 0 /*OREAD*/);
     wb_wire_reset();
     g_twrite_pat_on = true;
     long w0   = dev9p.write(f, chunk, 256, 0);
@@ -5138,11 +5147,9 @@ static void m23_changing_leg(int leg) {
     TEST_ASSERT(pat, "every byte on the wire is the byte written");
 }
 
-void test_dev9p_m23_truncating_open_wstat_loom_change_the_file(void) {
-    m23_changing_leg(0);
-    m23_changing_leg(1);
-    m23_changing_leg(2);
-}
+void test_dev9p_m23_truncating_open_changes_the_file(void)   { m23_changing_leg(0); }
+void test_dev9p_m23_wstat_changes_the_file(void)             { m23_changing_leg(1); }
+void test_dev9p_m23_loom_registration_changes_the_file(void) { m23_changing_leg(2); }
 
 // One holder per client and file: a second create-born open of the same qid
 // writes through, and once the holder has closed, a new one holds.
@@ -5393,9 +5400,9 @@ void test_dev9p_m23_cached_open_interrupted_fails(void) {
 
 // A server that answers a leg's flush Rlerror(EINTR) has refused the run: with
 // no mark the EINTR is the server's, not a cancellation. The leg returns as for
-// any refusal, so the peer's fstat goes on, and the holder's latch holds EINTR
-// for its next write and its last close. The control, one variable away, is
-// m23_interrupted_leg_keeps_the_run: the mark.
+// any refusal, so the peer's fstat goes on, and the holder's latch holds EIO
+// (vote M28) for its next write and its last close. The control, one variable
+// away, is m23_interrupted_leg_keeps_the_run: the mark.
 void test_dev9p_m23_server_eintr_is_a_refusal(void) {
     u8 *chunk = m23_chunk();
     TEST_ASSERT(chunk != NULL, "scratch");
@@ -5424,10 +5431,10 @@ void test_dev9p_m23_server_eintr_is_a_refusal(void) {
     TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "the peer's fstat goes on");
     TEST_EXPECT_EQ((u64)seen, 1ull, "after the refused flush");
     TEST_EXPECT_EQ((u64)kept, 0ull, "which dropped the run");
-    TEST_EXPECT_EQ((u64)err, (u64)P9_E_INTR, "and latched the server's EINTR on the holder");
-    TEST_EXPECT_EQ((u64)(-we), (u64)P9_E_INTR, "the holder's next write reports it");
+    TEST_EXPECT_EQ((u64)err, (u64)T_E_IO, "and latched the server's EINTR on the holder as EIO");
+    TEST_EXPECT_EQ((u64)(-we), (u64)T_E_IO, "the holder's next write reports it");
     TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer's close has nothing to report");
-    TEST_EXPECT_EQ((u64)(s64)fcc, (u64)(s64)-P9_E_INTR, "the holder's last close reports it");
+    TEST_EXPECT_EQ((u64)(s64)fcc, (u64)(s64)-T_E_IO, "the holder's last close reports it");
 }
 
 // A leg waiting out a run on its way to a closer sleeps between looks on every
@@ -5460,7 +5467,10 @@ void test_dev9p_m23_leg_wait_sleeps(void) {
     if (started) {
         TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_m23_thread));
         done = test_dying_done(&g_m23_thread);
-        if (done) test_dying_reap(&g_m23_thread);
+        // Never tear the fixture down under a live reader: a kill ends its wait.
+        if (!done) test_dying_kill(&g_m23_thread);
+        TEST_YIELD_UNTIL(test_dying_done(&g_m23_thread));
+        test_dying_reap(&g_m23_thread);
     }
     u64 w2 = dev9p_wb_leg_waits();
     u64 s2 = dev9p_wb_leg_sleeps();
@@ -5480,9 +5490,9 @@ void test_dev9p_m23_leg_wait_sleeps(void) {
 }
 
 // =============================================================================
-// Votes M24, M24a, M25 (LARDER-DESIGN 12.6, 13): a change through an open that
-// is not the file's holder pins the file from its leg until its wire operation
-// and its drops are done, found holder or not; a registration while a pin stands
+// Votes M24, M24a, M25 (LARDER-DESIGN 12.6, 13): a change pins the file from its
+// leg until its wire operation and its drops are done, found holder or not, the
+// holder's own included (M26); a registration while a pin stands
 // is refused; the flush's own install is skipped, and the file's pages dropped,
 // when an event named the file after the flush froze its run; and an fsync whose
 // leg flush the server refused returns the refusal.
@@ -5538,7 +5548,7 @@ void test_dev9p_m24_change_pins_the_file(void) {
     TEST_EXPECT_EQ((u64)p1, 0ull, "and was released once the write was done");
     TEST_EXPECT_EQ((u64)wh, 64ull, "the holder's next write is taken");
     TEST_EXPECT_EQ((u64)n2, 3ull, "and goes through: its anchor dropped");
-    TEST_ASSERT(ty[2] == P9_TWRITE && pn[2] == 0, "the holder's own operation pins nothing");
+    TEST_ASSERT(ty[2] == P9_TWRITE && pn[2] == 1, "the holder's own write-through pins too (M26)");
     TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "the peer's mode change succeeds");
     TEST_EXPECT_EQ((u64)n3, 4ull, "with one Tsetattr");
     TEST_ASSERT(ty[3] == P9_TSETATTR && pn[3] == 1,
@@ -5696,6 +5706,487 @@ void test_dev9p_m25_peer_fsync_reports_a_refused_run(void) {
     TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "the peer closes");
     TEST_EXPECT_EQ((u64)(s64)oc2, 0ull, "the third open closes");
     TEST_EXPECT_EQ((u64)(s64)fcc, (u64)(s64)-28, "the holder's last close reports it");
+}
+
+static struct Proc *oc9_proc(struct Spoor *root, hidx_t *fd_out);
+
+// Vote M26: the holder's own changes pin the file too -- its wstat over the flush
+// of its own run and its Tsetattr, and its write-through after -- since its wire
+// operation runs outside its wb_lock, and its entry can leave meanwhile.
+void test_dev9p_m26_holder_changes_pin(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    long w0 = dev9p.write(f, chunk, 256, 0);
+    m24_probe_on();
+    int  sr = dev9p.wstat_native(f, T_WSTAT_SIZE, 0, 0, 0, 128, NULL);
+    u32  p1 = dev9p_wb_pins(&g_client, M23_PATH);
+    long wt = dev9p.write(f, chunk + 128, 64, 128);
+    u32  p2 = dev9p_wb_pins(&g_client, M23_PATH);
+    g_m24_probe = false;
+    u32 n = g_m24_log_n;
+    u8  ty[3];
+    u32 pn[3];
+    for (u32 i = 0; i < 3; i++) { ty[i] = g_m24_type[i]; pn[i] = g_m24_pins[i]; }
+    int fcc = d9_close(f);
+    m23_end(root);
+
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "its truncate succeeds");
+    TEST_EXPECT_EQ((u64)n, 3ull, "a Twrite, a Tsetattr and a Twrite");
+    TEST_ASSERT(ty[0] == P9_TWRITE && pn[0] == 1, "the holder's wstat lands its own run under its pin");
+    TEST_ASSERT(ty[1] == P9_TSETATTR && pn[1] == 1, "and pins over its own Tsetattr (M26)");
+    TEST_EXPECT_EQ((u64)p1, 0ull, "released once its drops are done");
+    TEST_EXPECT_EQ((u64)wt, 64ull, "its next write is taken");
+    TEST_ASSERT(ty[2] == P9_TWRITE && pn[2] == 1, "and goes through under its pin (M26)");
+    TEST_EXPECT_EQ((u64)p2, 0ull, "released after it");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+}
+
+// Vote M27: a run a closer lost is recorded against the file on its client. An
+// open made before the loss, or after it while nobody had been told, hears it at
+// its next fsync, once, as EIO (the space errnos as they are, vote M28); an open
+// made after one was told hears nothing. A full table evicts its oldest record,
+// and that loss is told to nobody: one record fewer, and it is told (the control).
+void test_dev9p_m27_lost_run_reaches_the_next_fsync(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    dev9p_wb_test_loss(&g_client, 0x2000u, -T_E_IO);        // the oldest record
+    struct Spoor *a = m23_peer(root, 0 /*OREAD*/);           // before the loss
+    dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_INTR);
+    struct Spoor *b = m23_peer(root, 0 /*OREAD*/);           // after it, nobody told
+    int fa1 = a ? dev9p.fsync(a, 0) : 1;
+    int fa2 = a ? dev9p.fsync(a, 0) : 1;
+    int fb1 = b ? dev9p.fsync(b, 0) : 1;
+    struct Spoor *c = m23_peer(root, 0 /*OREAD*/);           // after one was told
+    int fc1 = c ? dev9p.fsync(c, 0) : 1;
+    dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_NOSPC);
+    int fc2 = c ? dev9p.fsync(c, 0) : 1;
+    int fb2 = b ? dev9p.fsync(b, 0) : 1;
+    struct Spoor *d = m23_peer(root, 0 /*OREAD*/);
+    struct Spoor *e = m23_peer(root, 0 /*OREAD*/);
+    dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_IO);
+    for (u32 i = 0; i + 1u < P9_WB_LOSS_MAX; i++)
+        dev9p_wb_test_loss(&g_client, 0x1000u + i, -T_E_IO);
+    int fe1 = e ? dev9p.fsync(e, 0) : 1;
+    dev9p_wb_test_loss(&g_client, 0x1000u + P9_WB_LOSS_MAX, -T_E_IO);
+    int fd1 = d ? dev9p.fsync(d, 0) : 1;
+    int ca = a ? d9_close(a) : -1, cb = b ? d9_close(b) : -1, cc = c ? d9_close(c) : -1;
+    int cd = d ? d9_close(d) : -1, ce = e ? d9_close(e) : -1;
+    m23_end(root);
+
+    TEST_ASSERT(a && b && c && d && e, "five opens of the file");
+    TEST_EXPECT_EQ((u64)(s64)fa1, (u64)(s64)-T_E_IO, "an open made before the loss hears it at its next fsync, as EIO");
+    TEST_EXPECT_EQ((u64)(s64)fa2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)(s64)fb1, (u64)(s64)-T_E_IO, "an open made after it while nobody had been told hears it too");
+    TEST_EXPECT_EQ((u64)(s64)fc1, 0ull, "an open made after one was told hears nothing");
+    TEST_EXPECT_EQ((u64)(s64)fc2, (u64)(s64)-T_E_NOSPC, "a later loss reaches it, ENOSPC as it is");
+    TEST_EXPECT_EQ((u64)(s64)fb2, (u64)(s64)-T_E_NOSPC, "and every open behind it");
+    TEST_EXPECT_EQ((u64)(s64)fe1, (u64)(s64)-T_E_IO, "with one slot to spare the record survives (control)");
+    TEST_EXPECT_EQ((u64)(s64)fd1, 0ull, "evicted as the oldest, its loss is told to nobody");
+    TEST_ASSERT(ca == 0 && cb == 0 && cc == 0 && cd == 0 && ce == 0, "every open closes");
+}
+
+// A holder whose last reference goes with a run staged hands the run to a closer
+// with its clunk. A test's bare client has none, so the run is lost, and recorded
+// (vote M27): a peer opened before hears it at its next fsync, once.
+void test_dev9p_m27_unhanded_run_is_recorded(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    long w0 = dev9p.write(f, chunk, 256, 0);
+    p9_close_flush_quiet_for_test(true);
+    spoor_clunk(f);                  // its last reference, with no descriptor's close
+    p9_close_flush_quiet_for_test(false);
+    u32 seen = g_twrite_seen;
+    int f1  = o ? dev9p.fsync(o, 0) : 1;
+    int f2  = o ? dev9p.fsync(o, 0) : 1;
+    int occ = o ? d9_close(o) : -1;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "a peer");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "the run never reached the server");
+    TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "the peer's next fsync hears the loss");
+    TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+}
+
+// Vote M29: a mapping made through an open that can stage is its own private
+// Image, never shared: its pages would fill through that open's read, which
+// serves bytes the server may yet refuse. A peer's mapping misses it and is
+// shared as before (the control, one variable away: the same file through an
+// open that cannot stage).
+static struct Proc *m29_proc(void) {
+    struct Proc *p = proc_alloc();
+    if (p) p->territory = territory_alloc();
+    return p;
+}
+
+static s64 m29_map(struct Proc *p, struct Spoor *s) {
+    if (!p || !p->territory || !s) return 0;
+    spoor_ref(s);
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, s);
+    if (fd < 0) { spoor_clunk(s); return 0; }
+    return sys_mmap_file_for_proc(p, (u64)fd, PAGE_SIZE, false, 0);
+}
+
+static void m29_proc_end(struct Proc *p) {
+    if (!p) return;
+    vma_drain(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+void test_dev9p_m29_holder_maps_privately(void) {
+    (void)image_cache_evict_idle_for_test();
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    bool vf = dev9p.content_versioned(f);
+    bool vo = o && dev9p.content_versioned(o);
+    struct Proc *p = m29_proc();
+    u64 pr0 = image_cache_private_for_test();
+    u64 cr0 = image_cache_creates_for_test();
+    s64 mf  = m29_map(p, f);
+    u64 pr1 = image_cache_private_for_test();
+    u64 cr1 = image_cache_creates_for_test();
+    u64 h1  = image_cache_hits_for_test();
+    s64 mo1 = m29_map(p, o);
+    u64 cr2 = image_cache_creates_for_test();
+    u64 h2  = image_cache_hits_for_test();
+    s64 mo2 = m29_map(p, o);
+    u64 h3  = image_cache_hits_for_test();
+    u64 pr3 = image_cache_private_for_test();
+    m29_proc_end(p);
+    int ev  = image_cache_evict_idle_for_test();
+    int occ = o ? d9_close(o) : -1;
+    int fcc = d9_close(f);
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL && p != NULL, "a peer, and a Proc to map in");
+    TEST_ASSERT(!vf, "the holder's open is not versioned content");
+    TEST_ASSERT(vo, "a peer's open of the same file is (control)");
+    TEST_ASSERT(mf > 0, "the holder maps the file");
+    TEST_EXPECT_EQ(pr1 - pr0, 1ull, "privately");
+    TEST_EXPECT_EQ(cr1, cr0, "registering nothing in the cache");
+    TEST_ASSERT(mo1 > 0, "a peer maps it");
+    TEST_EXPECT_EQ(h2, h1, "missing the holder's Image");
+    TEST_EXPECT_EQ(cr2 - cr1, 1ull, "and shares a new one (control)");
+    TEST_ASSERT(mo2 > 0, "the peer maps it again");
+    TEST_EXPECT_EQ(h3 - h2, 1ull, "and finds that one (control)");
+    TEST_EXPECT_EQ(pr3, pr1, "the peer's mappings are not private");
+    TEST_EXPECT_EQ((u64)ev, 1ull, "one shared Image to evict");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+}
+
+// A mapping keys its Image on the version its probe fetched, not on its
+// descriptor's open-time one, through the mapping call itself: a descriptor
+// opened at version 0 maps the file its probe says is at 5, and a descriptor
+// opened at 5 finds that Image. Keyed on each descriptor's own version, the
+// second would miss.
+void test_dev9p_mapping_keys_on_the_probe_version(void) {
+    (void)image_cache_evict_idle_for_test();
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct Spoor *o1 = m23_peer(root, 0 /*OREAD*/);
+    g_ga_vers = 5;
+    struct t_stat st;
+    int sr = o1 ? dev9p.stat_native(o1, &st) : -1;
+    g_tlopen_vers = 5;
+    struct Spoor *o2 = m23_peer(root, 0 /*OREAD*/);
+    u32 v1 = o1 ? o1->qid.vers : 0xffffffffu;
+    u32 v2 = o2 ? o2->qid.vers : 0xffffffffu;
+    struct Proc *p = m29_proc();
+    u64 h0 = image_cache_hits_for_test();
+    s64 m1 = m29_map(p, o1);
+    u64 h1 = image_cache_hits_for_test();
+    s64 m2 = m29_map(p, o2);
+    u64 h2 = image_cache_hits_for_test();
+    m29_proc_end(p);
+    (void)image_cache_evict_idle_for_test();
+    g_ga_vers     = 0;
+    g_tlopen_vers = 0;
+    int c1 = o1 ? d9_close(o1) : -1;
+    int c2 = o2 ? d9_close(o2) : -1;
+    larder_destroy(&g_client.larder);
+    m23_end(root);
+
+    TEST_ASSERT(o1 != NULL && o2 != NULL && p != NULL, "two opens, and a Proc to map in");
+    TEST_EXPECT_EQ((u64)v1, 0ull, "premise: the first was opened at version 0");
+    TEST_ASSERT(sr == 0 && st.qid_vers == 5u, "premise: the probe says 5");
+    TEST_EXPECT_EQ((u64)v2, 5ull, "premise: the second was opened at 5");
+    TEST_ASSERT(m1 > 0 && m2 > 0, "both map");
+    TEST_EXPECT_EQ(h1, h0, "the first misses the empty cache");
+    TEST_EXPECT_EQ(h2 - h1, 1ull, "the second finds the Image the first keyed on its probe's version");
+    TEST_ASSERT(c1 == 0 && c2 == 0, "both close");
+}
+
+// A refusal that retires between a leg's look, which found the run held, and its
+// flush, which finds nothing left, is the fsync's answer, as the leg's own
+// refusal is (vote M25). The holder's own fsync runs inside that window here; in
+// the control, one variable away, it lands the run, and the peer's fsync is 0.
+static struct Spoor *g_win_holder;
+static int           g_win_rc;
+
+static void win_holder_fsync(void *arg) {
+    (void)arg;
+    g_win_rc = dev9p.fsync(g_win_holder, 0);
+}
+
+static void win_leg(u32 ecode, int *fo, int *fh, u32 *seen) {
+    *fo = 1; *fh = 1; *seen = 0xffffffffu;
+    u8 *chunk = m23_chunk();
+    struct Spoor *root = NULL;
+    struct Spoor *f = chunk ? wb_make_created(&root) : NULL;
+    if (!f) return;
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    (void)dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = ecode;
+    g_win_holder = f;
+    g_win_rc     = 1;
+    dev9p_wb_test_leg_window(win_holder_fsync, NULL);
+    if (o) *fo = dev9p.fsync(o, 0);
+    dev9p_wb_test_leg_window(NULL, NULL);
+    g_twrite_fail_ecode = 0;
+    *fh   = g_win_rc;
+    *seen = g_twrite_seen;
+    if (o) (void)d9_close(o);
+    (void)d9_close(f);
+    m23_end(root);
+}
+
+void test_dev9p_m25_refusal_inside_the_leg_window(void) {
+    int fo0, fh0, fo1, fh1;
+    u32 s0, s1;
+    win_leg(28 /*ENOSPC*/, &fo0, &fh0, &s0);
+    win_leg(0, &fo1, &fh1, &s1);
+    TEST_EXPECT_EQ((u64)(s64)fh0, (u64)(s64)-28, "the holder's fsync inside the window is refused");
+    TEST_EXPECT_EQ((u64)s0, 1ull, "one Twrite: the holder's");
+    TEST_EXPECT_EQ((u64)(s64)fo0, (u64)(s64)-28,
+                   "the peer's fsync, whose look found the run held, returns that refusal");
+    TEST_EXPECT_EQ((u64)(s64)fh1, 0ull, "CONTROL: the holder's fsync lands the run");
+    TEST_EXPECT_EQ((u64)s1, 1ull, "CONTROL: one Twrite");
+    TEST_EXPECT_EQ((u64)(s64)fo1, 0ull, "CONTROL: and the peer's fsync returns 0");
+}
+
+// A caught note that cancels the leg of a two-name walk ends the open with
+// EINTR: the note names no component, so the resolver does not take the run one
+// name at a time and walk again with the note claimed. The control, one variable
+// away, has no mark: the server's EINTR is a refusal, the leg goes on, and the
+// walk asks again.
+static void eintr_walk_leg(bool mark, int *err, u32 *wga, bool *opened) {
+    *err = 0; *wga = 0xffffffffu; *opened = false;
+    u8 *chunk = m23_chunk();
+    struct Spoor *root = NULL;
+    struct Spoor *f = chunk ? wb_make_created(&root) : NULL;
+    if (!f) return;
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    struct Handle h;
+    bool hb = p && handle_get(p, base, &h) == 0;
+    wb_wire_reset();
+    (void)dev9p.write(f, chunk, 256, 0);
+    g_wga_path_base = M23_PATH - 1u;     // "d", then "wbfile" at the holder's path
+    g_wga_seen = 0;
+    g_twrite_fail_ecode = P9_E_INTR;
+    struct Thread *t = current_thread();
+    t->note_call_unwound = mark;         // what an unwind leaves
+    struct Spoor *s = hb ? stalk_err(p, (struct Spoor *)h.obj, "d/wbfile", 8, STALK_OPEN,
+                                     0, err) : NULL;
+    t->note_call_unwound = false;        // what the EL0-return tail clears
+    g_twrite_fail_ecode = 0;
+    *wga    = g_wga_seen;
+    *opened = s != NULL;
+    if (s) spoor_clunk(s);
+    if (p) { p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+    (void)d9_close(f);
+    m23_end(root);
+}
+
+void test_dev9p_m23_stalk_eintr_names_no_component(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    int  e0, e1;
+    u32  w0, w1;
+    bool o0, o1;
+    eintr_walk_leg(true, &e0, &w0, &o0);
+    eintr_walk_leg(false, &e1, &w1, &o1);
+    TEST_ASSERT(!o0, "a two-name open whose leg a note cancelled opens nothing");
+    TEST_EXPECT_EQ((u64)e0, (u64)T_E_INTR, "and fails EINTR");
+    TEST_EXPECT_EQ((u64)w0, 1ull, "after one Twalkgetattr: no step walks the run again");
+    TEST_ASSERT(w1 >= 2u, "CONTROL: with no mark the leg goes on and the walk asks again");
+}
+
+// The stalk-level twin of m23_cached_open_interrupted_fails: the resolver ends
+// the open with its cached leg's EINTR and never takes the normal path. The
+// control, one variable away, has no mark: the run lands, and the open falls back
+// to the normal path, which opens the file.
+static void co_eintr_leg(bool mark, int *err, bool *opened, u32 *lopens) {
+    *err = 0; *opened = false; *lopens = 0xffffffffu;
+    u8 *chunk = m23_chunk();
+    struct Spoor *root = NULL;
+    struct Spoor *f = chunk ? wb_make_created(&root) : NULL;
+    if (!f) return;
+    g_wga_path_base = M23_PATH;
+    const char *names[1] = { "wbfile" };
+    size_t lens[1] = { 6 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    bool primed = m23_prime(root, names, lens, sts);
+    hidx_t base = -1;
+    struct Proc *p = primed ? oc9_proc(root, &base) : NULL;
+    struct Handle h;
+    bool hb = p && handle_get(p, base, &h) == 0;
+    wb_wire_reset();
+    (void)dev9p.write(f, chunk, 256, 0);
+    g_lopen_seen = 0;
+    if (mark) g_twrite_fail_ecode = P9_E_INTR;
+    struct Thread *t = current_thread();
+    t->note_call_unwound = mark;
+    struct Spoor *s = hb ? stalk_err(p, (struct Spoor *)h.obj, "wbfile", 6, STALK_OPEN, 0,
+                                     err) : NULL;
+    t->note_call_unwound = false;
+    g_twrite_fail_ecode = 0;
+    *opened = s != NULL;
+    *lopens = g_lopen_seen;
+    if (s) spoor_clunk(s);
+    if (p) { p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+    (void)d9_close(f);
+    larder_destroy(&g_client.larder);
+    m23_end(root);
+}
+
+void test_dev9p_m23_stalk_cached_open_interrupted_fails(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    int  e0, e1;
+    bool o0, o1;
+    u32  l0, l1;
+    co_eintr_leg(true, &e0, &o0, &l0);
+    co_eintr_leg(false, &e1, &o1, &l1);
+    TEST_ASSERT(!o0, "an open whose cached leg a note cancelled opens nothing");
+    TEST_EXPECT_EQ((u64)e0, (u64)T_E_INTR, "and fails EINTR");
+    TEST_EXPECT_EQ((u64)l0, 0ull, "never taking the normal path");
+    TEST_ASSERT(o1, "CONTROL: with no mark the open falls back and opens the file");
+    TEST_EXPECT_EQ((u64)l1, 1ull, "CONTROL: with one Tlopen");
+}
+
+// A Tsetattr the server failed may still have applied (a reply this thread never
+// read), as a failed write may have landed: its attr goes, and its pages when it
+// asked a size. A failed truncating Tlopen drops both too. The controls, one
+// variable away: a failed mode change keeps the pages, and a failed plain open
+// drops nothing.
+static void drop_prime(struct larder *l) {
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.qid_path = M23_PATH;
+    st.size     = 0x200;
+    st.mode     = 0100644u;
+    larder_attr_install(l, larder_gen_snapshot(l), M23_PATH, 0, &st, NULL);
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 5 + 2);
+    larder_page_install(l, larder_gen_snapshot(l), M23_PATH, 0, 0, data, (u32)sizeof(data));
+}
+
+static void drop_look(struct larder *l, bool *attr, u32 *page) {
+    struct t_stat st;
+    u64 sq = 0, ps = 0;
+    u8 probe[16];
+    *attr = larder_attr_serve(l, M23_PATH, &st, &sq);
+    *page = larder_page_serve(l, M23_PATH, 0, 0, sizeof(probe), 0, probe, &ps);
+}
+
+void test_dev9p_m24_failed_change_drops_what_it_staled(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct larder *l = &g_client.larder;
+    struct Spoor *o = m23_peer(root, 2 /*ORDWR*/);
+    bool a0, a1, a2, a3, ap;
+    u32  p0, p1, p2, p3, pp;
+    drop_prime(l);
+    drop_look(l, &ap, &pp);
+    g_setattr_fail_ecode = 5;
+    int r0 = o ? dev9p.wstat_native(o, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL) : 0;
+    g_setattr_fail_ecode = 0;
+    drop_look(l, &a0, &p0);
+    drop_prime(l);
+    g_setattr_fail_ecode = 5;
+    int r1 = o ? dev9p.wstat_native(o, T_WSTAT_SIZE, 0, 0, 0, 0, NULL) : 0;
+    g_setattr_fail_ecode = 0;
+    drop_look(l, &a1, &p1);
+    drop_prime(l);
+    g_tlopen_fail_ecode = 5;
+    struct Spoor *t0 = m23_peer(root, 0 /*OREAD*/);
+    g_tlopen_fail_ecode = 0;
+    drop_look(l, &a2, &p2);
+    drop_prime(l);
+    g_tlopen_fail_ecode = 5;
+    struct Spoor *t1 = m23_peer(root, 1 | 0x10 /*OWRITE|OTRUNC*/);
+    g_tlopen_fail_ecode = 0;
+    drop_look(l, &a3, &p3);
+    if (t0) (void)d9_close(t0);
+    if (t1) (void)d9_close(t1);
+    int occ = o ? d9_close(o) : -1;
+    larder_destroy(l);
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "an open of the file");
+    TEST_ASSERT(ap && pp > 0, "premise: its attr and a page are cached");
+    TEST_ASSERT(r0 != 0, "a mode change the server fails");
+    TEST_ASSERT(!a0, "drops the attr: it may have applied");
+    TEST_ASSERT(p0 > 0, "and keeps the pages: a mode staled none (control)");
+    TEST_ASSERT(r1 != 0, "a truncate the server fails");
+    TEST_ASSERT(!a1, "drops the attr");
+    TEST_EXPECT_EQ((u64)p1, 0ull, "and the pages");
+    TEST_ASSERT(t0 == NULL, "a plain open the server fails");
+    TEST_ASSERT(a2 && p2 > 0, "drops nothing (control)");
+    TEST_ASSERT(t1 == NULL, "a truncating open the server fails");
+    TEST_ASSERT(!a3, "drops the attr: it may have truncated");
+    TEST_EXPECT_EQ((u64)p3, 0ull, "and the pages");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the open closes");
+}
+
+// A strict client never stages, so its changes run no leg and pin nothing. The
+// control, one variable away: the same write on a loose client pins.
+void test_dev9p_m24_strict_client_runs_no_leg(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct Spoor *o = m23_peer(root, 1 /*OWRITE*/);
+    wb_wire_reset();
+    m24_probe_on();
+    long w0 = o ? dev9p.write(o, chunk, 64, 0) : -1;
+    g_client.loose = true;
+    long w1 = o ? dev9p.write(o, chunk + 64, 64, 64) : -1;
+    g_m24_probe = false;
+    g_client.loose = false;
+    u32 n = g_m24_log_n;
+    u8  ty0 = g_m24_type[0], ty1 = g_m24_type[1];
+    u32 pn0 = g_m24_pins[0], pn1 = g_m24_pins[1];
+    int occ = o ? d9_close(o) : -1;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "an open for writing");
+    TEST_EXPECT_EQ((u64)w0, 64ull, "a strict client's write is taken");
+    TEST_EXPECT_EQ((u64)w1, 64ull, "and a loose one's");
+    TEST_EXPECT_EQ((u64)n, 2ull, "two Twrites");
+    TEST_ASSERT(ty0 == P9_TWRITE && pn0 == 0, "the strict client's pins nothing: it runs no leg");
+    TEST_ASSERT(ty1 == P9_TWRITE && pn1 == 1, "the loose client's pins (control)");
+    TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the open closes");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
@@ -7097,7 +7588,7 @@ void test_dev9p_lock_cancelled_flush_says_eintr(void) {
     TEST_EXPECT_EQ((s64)rc1, 0ll, "CONTROL: the server's own EINTR is no cancellation");
     TEST_EXPECT_EQ(w1, 1u, "CONTROL: the Twrite went out");
     TEST_EXPECT_EQ(l1, 1u, "CONTROL: and the lock went ahead");
-    TEST_EXPECT_EQ((s64)f1, -(s64)T_E_INTR, "CONTROL: the server's EINTR latched: the fsync reports it");
+    TEST_EXPECT_EQ((s64)f1, -(s64)T_E_IO, "CONTROL: the server's EINTR latched as EIO: the fsync reports it");
     TEST_EXPECT_EQ(fw1, 0u, "CONTROL: and the run was dropped: nothing resent");
     TEST_EXPECT_EQ((s64)rc2, 0ll, "CONTROL: with nothing staged the mark alone refuses nothing");
     TEST_EXPECT_EQ(w2, 0u, "CONTROL: no Twrite");
