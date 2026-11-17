@@ -178,8 +178,11 @@ unifies a shared dependency's features across one invocation, so building
 lictor (or tapestryd, whose `test-mode` turns lictor's on) with its defaults
 would hand corvus and caps-probe, which link lictor's library, a test-mode
 lictor. build.sh therefore asks Cargo's own resolver (`cargo tree -e
-features`) which crates get `test-mode` in each invocation: none under `n`,
-and every lever crate under `y` (the positive control). `READINESS_QUAL=y`
+normal,build`, over each invocation's exact selection and features) which
+crates get `test-mode`: none in either invocation under `n`; under `y`, every
+lever crate, and lictor again with lictor left out of the selection -- the
+positive controls, the second showing the check sees a `test-mode` that
+reaches a crate only through another crate's features. `READINESS_QUAL=y`
 is refused with `TEST_LEVERS=n`: the readiness probe puts libthyla-rs's test
 hooks in every binary, the opposite of what `n` promises. Before this symbol
 the levers were documented as "stripped for production" while every build,
@@ -191,7 +194,10 @@ binaries it just built, and in `build_ramfs` on the binaries it stages, so
 `build.sh ramfs` or a host that skipped the Rust build cannot stage an
 earlier build's levers into a `TEST_LEVERS=n` image -- and
 `tools/check-production.sh --all` requires the build's `STRIPPED` ledger
-line. The strip is the second layer: tapestryd also gates the determinism
+line. `tools/test-test-levers.py` (a host checker) drives the Rust step,
+`build_userspace_rust`, against a stub cargo and runs the resolver check
+against the real one, and its `--mutants` pass shows each of these checks
+turning red when removed. The strip is the second layer: tapestryd also gates the determinism
 verbs at runtime in every image (TAPESTRY.md 18.6).
 
 **The display group carries two decisions worth stating, because both look

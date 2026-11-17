@@ -579,7 +579,7 @@ test_mode_packages() {
     local tree
     tree=$( cd "$REPO_ROOT/usr" && cargo tree --target "$USR_RS_TARGET" "$@" -e normal,build \
                 --prefix none -f '{p}|{f}' ) || { echo "TEST_LEVERS: cargo tree failed ($*)" >&2; return 1; }
-    awk -F'|' '{ n = split($2, f, ","); for (i = 1; i <= n; i++) if (f[i] == "test-mode") { split($1, p, " "); print p[1] } }' \
+    awk -F'|' '{ sub(/ \(\*\)$/, "", $2); n = split($2, f, ","); for (i = 1; i <= n; i++) if (f[i] == "test-mode") { split($1, p, " "); print p[1] } }' \
         <<<"$tree" | sort -u | tr '\n' ' '
 }
 
@@ -1396,6 +1396,84 @@ emit_corvus_recovery_header() {
     ledger "system recovery phrase header: GENERATED ($CORVUS_RECOVERY_HEADER; seed=${CORVUS_SYSTEM_RECOVERY_SEED:-corvus-mint default})"
 }
 
+# The userspace Rust workspace (cargo), and the TEST_LEVERS strip and its two
+# checks. Its own function so tools/test-test-levers.py can drive it against a
+# stub cargo.
+build_userspace_rust() {
+    echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
+    # TEST_LEVERS=n (BUILD-CONFIG-DESIGN.md 4.2): the workspace build
+    # leaves out the lever crates, which take test-mode by default, and
+    # one stripped invocation builds them without it. Leaving them out
+    # matters for the crates that stay: resolver 2 unifies a shared
+    # dependency's features across one invocation, so building lictor
+    # (or tapestryd, whose test-mode turns lictor's on) with its defaults
+    # would hand corvus and caps-probe a test-mode lictor library that no
+    # by-content check of theirs can see.
+    local levers lb
+    levers=$(test_levers_resolved) || return 1
+    local ws_sel=() strip_sel=() hi_features=()
+    local strip_features=tapestryd/guest,halcyond/guest,lictor/backend
+    if (( levers == 0 )); then
+        ws_sel=(--workspace)
+        for lb in "${TEST_LEVER_BINS[@]}"; do ws_sel+=(--exclude "$lb"); strip_sel+=(-p "$lb"); done
+    fi
+    case "${THYLACINE_INTERACTION_QUALIFICATION:-0}" in
+        0) ;;
+        1) if (( levers == 1 )); then hi_features=(--features halcyond/interaction-qualification)
+           else strip_features+=,halcyond/interaction-qualification; fi
+           echo "==> Halcyon interaction qualification ENABLED (not a release default)" ;;
+        *) echo "THYLACINE_INTERACTION_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
+    esac
+    case "${THYLACINE_READINESS_QUALIFICATION:-0}" in
+        0) ;;
+        1) if (( levers == 0 )); then
+               echo "THYLACINE_READINESS_QUALIFICATION=1 cannot combine with THYLACINE_TEST_LEVERS=0: the readiness probe puts libthyla-rs's test hooks in every binary" >&2
+               return 1
+           fi
+           hi_features+=(--features kaua-term-probe/readiness-qualification)
+           echo "==> Native readiness qualification probe ENABLED (libthyla-rs test hooks in every binary; not a release default)" ;;
+        *) echo "THYLACINE_READINESS_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
+    esac
+    # Cargo's own resolver says which crates get test-mode, both ways: none
+    # in either stripped invocation, and in the default build every lever
+    # crate -- including lictor when it is NOT selected, so the check is
+    # shown to see a test-mode that reaches a crate only through another
+    # one's features (tapestryd's turns lictor's on), which is how a
+    # workspace build would hand corvus and caps-probe a test-mode lictor.
+    local tm_pkgs
+    tm_pkgs=" $(test_mode_packages ${ws_sel[@]+"${ws_sel[@]}"} ${hi_features[@]+"${hi_features[@]}"})" || return 1
+    if (( levers == 0 )); then
+        tm_pkgs+="$(test_mode_packages "${strip_sel[@]}" --no-default-features --features "$strip_features")" || return 1
+        if [[ -n "${tm_pkgs// /}" ]]; then
+            echo "TEST_LEVERS=n: cargo resolves test-mode on for:$tm_pkgs" >&2; return 1
+        fi
+    else
+        for lb in "${TEST_LEVER_BINS[@]}"; do
+            if [[ "$tm_pkgs " != *" $lb "* ]]; then
+                echo "TEST_LEVERS=y: cargo does not resolve test-mode on for $lb (got:$tm_pkgs) -- the TEST_LEVERS=n check would prove nothing" >&2; return 1
+            fi
+        done
+        tm_pkgs=" $(test_mode_packages --workspace --exclude lictor ${hi_features[@]+"${hi_features[@]}"})" || return 1
+        if [[ "$tm_pkgs " != *" lictor "* ]]; then
+            echo "TEST_LEVERS=y: cargo does not resolve test-mode on for lictor as a dependency (got:$tm_pkgs) -- the TEST_LEVERS=n check would not see it reach corvus or caps-probe" >&2; return 1
+        fi
+    fi
+    ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${ws_sel[@]+"${ws_sel[@]}"} ${hi_features[@]+"${hi_features[@]}"} ) || return 1
+    if (( levers == 0 )); then
+        echo "==> Stripping the test levers (TEST_LEVERS=n): ${TEST_LEVER_BINS[*]} without test-mode"
+        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose "${strip_sel[@]}" \
+              --no-default-features --features "$strip_features" ) || return 1
+    fi
+    test_levers_verdict "$USR_RS_BUILD/$USR_RS_TARGET/release" "built" 1 || return 1
+    if (( levers == 1 )); then
+        ledger "test levers: COMPILED IN (TEST_LEVERS=y; ${TEST_LEVER_BINS[*]} each carry '$TEST_LEVER_LINE'; cargo resolves test-mode on for each)"
+    else
+        ledger "test levers: STRIPPED (TEST_LEVERS=n; none of ${TEST_LEVER_BINS[*]} carries '$TEST_LEVER_LINE'; cargo resolves test-mode on for no crate)"
+    fi
+    echo "==> Userspace Rust built under $USR_RS_BUILD"
+    ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true
+}
+
 build_userspace() {
     # A-5c-c: the generated recovery-phrase header must exist before joey compiles.
     emit_corvus_recovery_header
@@ -1423,71 +1501,7 @@ build_userspace() {
     local rs_targets
     rs_targets=$(rustup target list --installed 2>/dev/null || true)
     if grep -q "^$USR_RS_TARGET$" <<<"$rs_targets"; then
-        echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
-        # TEST_LEVERS=n (BUILD-CONFIG-DESIGN.md 4.2): the workspace build
-        # leaves out the lever crates, which take test-mode by default, and
-        # one stripped invocation builds them without it. Leaving them out
-        # matters for the crates that stay: resolver 2 unifies a shared
-        # dependency's features across one invocation, so building lictor
-        # (or tapestryd, whose test-mode turns lictor's on) with its defaults
-        # would hand corvus and caps-probe a test-mode lictor library that no
-        # by-content check of theirs can see.
-        local levers lb
-        levers=$(test_levers_resolved) || return 1
-        local ws_sel=() strip_sel=() hi_features=()
-        local strip_features=tapestryd/guest,halcyond/guest,lictor/backend
-        if (( levers == 0 )); then
-            ws_sel=(--workspace)
-            for lb in "${TEST_LEVER_BINS[@]}"; do ws_sel+=(--exclude "$lb"); strip_sel+=(-p "$lb"); done
-        fi
-        case "${THYLACINE_INTERACTION_QUALIFICATION:-0}" in
-            0) ;;
-            1) if (( levers == 1 )); then hi_features=(--features halcyond/interaction-qualification)
-               else strip_features+=,halcyond/interaction-qualification; fi
-               echo "==> Halcyon interaction qualification ENABLED (not a release default)" ;;
-            *) echo "THYLACINE_INTERACTION_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
-        esac
-        case "${THYLACINE_READINESS_QUALIFICATION:-0}" in
-            0) ;;
-            1) if (( levers == 0 )); then
-                   echo "THYLACINE_READINESS_QUALIFICATION=1 cannot combine with THYLACINE_TEST_LEVERS=0: the readiness probe puts libthyla-rs's test hooks in every binary" >&2
-                   return 1
-               fi
-               hi_features+=(--features kaua-term-probe/readiness-qualification)
-               echo "==> Native readiness qualification probe ENABLED (libthyla-rs test hooks in every binary; not a release default)" ;;
-            *) echo "THYLACINE_READINESS_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
-        esac
-        # Cargo's own resolver says which crates get test-mode, both ways: none
-        # in either stripped invocation, and every lever crate in the default
-        # build (else this check could not have fired).
-        local tm_pkgs
-        tm_pkgs=" $(test_mode_packages ${ws_sel[@]+"${ws_sel[@]}"} ${hi_features[@]+"${hi_features[@]}"})" || return 1
-        if (( levers == 0 )); then
-            tm_pkgs+="$(test_mode_packages "${strip_sel[@]}" --no-default-features --features "$strip_features")" || return 1
-            if [[ -n "${tm_pkgs// /}" ]]; then
-                echo "TEST_LEVERS=n: cargo resolves test-mode on for:$tm_pkgs" >&2; return 1
-            fi
-        else
-            for lb in "${TEST_LEVER_BINS[@]}"; do
-                if [[ "$tm_pkgs " != *" $lb "* ]]; then
-                    echo "TEST_LEVERS=y: cargo does not resolve test-mode on for $lb (got:$tm_pkgs) -- the TEST_LEVERS=n check would prove nothing" >&2; return 1
-                fi
-            done
-        fi
-        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${ws_sel[@]+"${ws_sel[@]}"} ${hi_features[@]+"${hi_features[@]}"} )
-        if (( levers == 0 )); then
-            echo "==> Stripping the test levers (TEST_LEVERS=n): ${TEST_LEVER_BINS[*]} without test-mode"
-            ( cd "$REPO_ROOT/usr" && cargo build --release $verbose "${strip_sel[@]}" \
-                  --no-default-features --features "$strip_features" ) || return 1
-        fi
-        test_levers_verdict "$USR_RS_BUILD/$USR_RS_TARGET/release" "built" 1 || return 1
-        if (( levers == 1 )); then
-            ledger "test levers: COMPILED IN (TEST_LEVERS=y; ${TEST_LEVER_BINS[*]} each carry '$TEST_LEVER_LINE'; cargo resolves test-mode on for each)"
-        else
-            ledger "test levers: STRIPPED (TEST_LEVERS=n; none of ${TEST_LEVER_BINS[*]} carries '$TEST_LEVER_LINE'; cargo resolves test-mode on for no crate)"
-        fi
-        echo "==> Userspace Rust built under $USR_RS_BUILD"
-        ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true
+        build_userspace_rust
     else
         echo "==> Skipping userspace Rust: rustup target $USR_RS_TARGET not installed."
         echo "    Install via: rustup target add $USR_RS_TARGET"

@@ -956,16 +956,21 @@ shape, and is not meant to: the ctl read prints `test-mode on|off` only
 when the feature is compiled in, and `release` -- the only ungated
 write verb besides the reads, matched as the whole word or `release
 <surface>` (`is_release_ctl`), never as a prefix -- answers E_OPNOTSUPP
-in a stripped build. A refusal says `tapestryd: determinism verb
-refused: conn N (principal P) is neither the console renderer nor the
-console owner` once per conn (`determinism_refusal_said`) and at most
-`DETERMINISM_REFUSALS_SAID` (8) times Comp-wide; the next one says that
-later refusals go unsaid, and then the console stays quiet, so a client
-that reconnects in a loop cannot flood it. The witness is
-tapestry-battery's `--not-console-owner` child in `ls-gfx-panes`: the
-probe is admitted, the child calls `setsid`, and the same conn's probe,
+in a stripped build. Every refusal counts (`Comp.determinism_refusals`,
+the whole boot), and tapestryd says one only when that count reaches a
+power of two -- `tapestryd: determinism verb refused: conn N (principal
+P) is neither the console renderer nor the console owner (K refused so
+far)` -- the rule its connect-refused path already follows. So a client
+that reconnects in a loop adds a line per doubling, never a flood, and
+cannot silence the log either: the next power of two always speaks, with
+the total. The witness is tapestry-battery's `--not-console-owner` child
+in `ls-gfx-panes`: the probe is admitted and `released` meets the
+renderer gate (E_PERM: only `release` and `release <surface>` are
+ungated), then the child calls `setsid`; the same conn's probe,
 `test-mode on` and `tick` are refused while the ctl read stays at
-`test-mode off`.
+`test-mode off`, and `tick` on five fresh conns is refused too. Those
+are the boot's first eight refusals, so the scenario requires the lines
+to carry exactly 1, 2, 4 and 8.
 
 **Determinism mode ends with the conn that turned it on.**
 `test-mode on` records its conn in `Comp.test_mode_conn`; when that conn
@@ -975,9 +980,13 @@ off: conn N that turned it on closed`. Before this, a battery that died
 with the mode on left every surface frozen until an admitted conn said
 `test-mode off` -- and on the Halcyon image only the renderer is
 admitted, and it never does. A later `test-mode on` from another
-admitted conn moves the ownership to it. The witness is the battery's
-test-mode owner leg: a second conn turns the mode on and closes, and
-the ctl read must say `test-mode off` within 3 s.
+admitted conn moves the ownership to it, so it is the conn that LAST
+turned it on whose close ends it. The line is said during that conn's
+teardown, so it can interleave with a prompt login prints at the same
+moment; it appears only when a conn dies with the mode on, where it is
+the diagnostic. The witness is the battery's test-mode owner leg: a
+second conn turns the mode on and closes, and the ctl read must say
+`test-mode off` within 3 s.
 
 A build with the `test-mode` feature says `tapestryd: test levers
 compiled in` just after `serving`. build.sh's `TEST_LEVERS` verdict keys

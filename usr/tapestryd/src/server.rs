@@ -211,10 +211,6 @@ fn actor_owner_principal(actor: Actor) -> u32 {
 const _: () = assert!(core::mem::size_of::<Comp>() <= 256 * 1024);
 const _: () = assert!(MAX_SURFACES >= MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (MAX_SURFACES_PER_RENDERER - MAX_SURFACES_PER_CONN));
 
-/// How many determinism-verb refusals tapestryd says on the console before it
-/// stops saying them (Comp.determinism_refusals_said).
-const DETERMINISM_REFUSALS_SAID: u32 = 8;
-
 fn principal_is_session(p: u32) -> bool {
     p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
 }
@@ -1993,10 +1989,11 @@ pub struct Comp {
     /// comes next (vote 136 narrowed who may unfreeze).
     #[cfg(feature = "test-mode")]
     test_mode_conn: Option<u64>,
-    /// Determinism-verb refusals said on the console so far, across every
-    /// conn: past DETERMINISM_REFUSALS_SAID no more are said, so a client
-    /// that reconnects to repeat a refused verb cannot flood the console.
-    determinism_refusals_said: u32,
+    /// Determinism-verb refusals so far, every conn: one is said on the
+    /// console only when this reaches a power of two, with the total -- the
+    /// connect-refused rule -- so no client can flood the console or silence
+    /// it.
+    determinism_refusals: u64,
     /// Warp-2c: the GPU-seam context slots + the monotonic public-id
     /// sequences (the pane discipline -- tree names are never reused).
     warp_ctxs: [Option<WarpCtx>; MAX_WARP_CTXS],
@@ -2758,7 +2755,7 @@ impl Comp {
             test_mode: false,
             #[cfg(feature = "test-mode")]
             test_mode_conn: None,
-            determinism_refusals_said: 0,
+            determinism_refusals: 0,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
             warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
@@ -8607,10 +8604,6 @@ impl Comp {
         self.cost_add(Cost::Flush, t0);
     }
 
-    /// Flush surface `n`'s held region (F13 release; also the implicit
-    /// release a non-HOLD present performs). A hold recorded under a
-    /// scanout mode that has since changed is DROPPED -- the structural
-    /// repaint superseded it (pixels already re-fanned via CONFIGURE).
     /// `test-mode off`: no stuck regions -- every hold is flushed -- and the
     /// FRAME clock runs again.
     #[cfg(feature = "test-mode")]
@@ -8622,6 +8615,10 @@ impl Comp {
         self.test_mode_conn = None;
     }
 
+    /// Flush surface `n`'s held region (F13 release; also the implicit
+    /// release a non-HOLD present performs). A hold recorded under a
+    /// scanout mode that has since changed is DROPPED -- the structural
+    /// repaint superseded it (pixels already re-fanned via CONFIGURE).
     fn release_held(&mut self, n: usize) {
         let held = match self.surf_mut(n).and_then(|s| s.held.take()) {
             Some(h) => h,
@@ -16251,10 +16248,6 @@ pub struct Conn {
     peer_principal: u32,
     /// Layout mutations landed in the current service pass.
     layout_verbs: u32,
-    /// A determinism verb from this conn has been refused and said so: the
-    /// refusal is logged once per conn, so a refused client cannot flood
-    /// the console by repeating it.
-    determinism_refusal_said: bool,
     /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
     /// (/srv/warp) -- set by which listener accepted it (Warp-2c). One Conn
     /// type for both; the qid spaces are disjoint, so a warp conn simply
@@ -16368,7 +16361,6 @@ impl Conn {
             peer_stripes,
             peer_principal,
             layout_verbs: 0,
-            determinism_refusal_said: false,
             root,
             version_done: false,
             msize: SRV_MSIZE,
@@ -19695,22 +19687,14 @@ impl Conn {
         // never the stripped build's E_OPNOTSUPP.
         if Self::is_determinism_ctl(s) {
             if !self.peer_may_drive_determinism() {
-                if !self.determinism_refusal_said {
-                    self.determinism_refusal_said = true;
-                    if comp.determinism_refusals_said < DETERMINISM_REFUSALS_SAID {
-                        comp.determinism_refusals_said += 1;
-                        say!(
-                            "tapestryd: determinism verb refused: conn {} (principal {}) is neither the console renderer nor the console owner",
-                            self.conn_id,
-                            self.peer_principal
-                        );
-                        if comp.determinism_refusals_said == DETERMINISM_REFUSALS_SAID {
-                            say!(
-                                "tapestryd: {} determinism refusals said; later ones are not",
-                                DETERMINISM_REFUSALS_SAID
-                            );
-                        }
-                    }
+                comp.determinism_refusals = comp.determinism_refusals.saturating_add(1);
+                if comp.determinism_refusals.is_power_of_two() {
+                    say!(
+                        "tapestryd: determinism verb refused: conn {} (principal {}) is neither the console renderer nor the console owner ({} refused so far)",
+                        self.conn_id,
+                        self.peer_principal,
+                        comp.determinism_refusals
+                    );
                 }
                 return Err(p9::E_PERM);
             }

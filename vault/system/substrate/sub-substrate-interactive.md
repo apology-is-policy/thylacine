@@ -703,14 +703,21 @@ gates: admitted with the mode off it answers E_INVAL, refused it answers E_PERM.
 The scenario waits for two lines from two processes: tapestryd's refusal line,
 which shows which gate fired, and the child's verdict line. They can arrive in
 either order, so one regex alternation collects both, because two separate
-arms could consume one of them unseen. The arm classifies each match on
+arms could consume one of them unseen. Every alternative ends on fixed text or
+a line end: an open `[^\r\n]*` matches the moment its prefix arrives and keeps
+only the bytes then in the buffer, so the first version of the FAIL arm
+reported "tapestry-battery: FAIL co" (round 43 F1). The loop collects every
+refusal line's count until the verdict, and requires exactly 1, 2, 4, 8 (the
+child's refusals are the boot's first eight, and tapestryd says only those at a
+power-of-two count); it has an `eof` arm. Simulated with lines split across
+writes (work/nov03-mm1/sim43): the old FAIL arm lost the reason, the new one
+keeps it. The arm classifies each match on
 `expect_out(0,string)`, the whole match, never on a numbered group: expect 5.45
 leaves a group that took no part in a match at its previous value, so a test
 such as `expect_out(1,string) ne ""` stays true after any earlier regex set
 group 1, and the first version of this leg could therefore never see its
-verdict line (round 42, F1). The leg was simulated both ways before it ran: the
-whole-match loop passes with either line first or both in one burst and fails
-with the child's own reason, and the group-based loop timed out in all four.
+verdict line (round 42, F1). That simulation fed each line in one write, so it
+could not see the open FAIL arm above; the real run (TM1, q-tm1) did.
 
 After `hold OK` the battery checks that determinism mode ends with the conn
 that turned it on: a second `/srv/tapestry` conn writes `test-mode on`, the ctl

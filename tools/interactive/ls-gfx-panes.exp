@@ -37,12 +37,20 @@
 #   hold       : TPRESENT_HOLD + release (G-6c) -- B stays blue on
 #                screen with magenta already presented; release flips
 #                it (two dumps bracket the release);
+#   tm-owner   : determinism mode ends with the conn that last turned it
+#                on (#880) -- a second conn freezes the clock and closes,
+#                and the ctl must read `test-mode off` within 3 s;
 #   close      : a compositor-initiated pane close delivers TEV_CLOSE
 #                (G-6b); the surface retires only when the client drops.
 #   singleslot : the #56 latch's real discriminator (the fullscreen-zoom
 #                bug): a SINGLE-SLOT partial presenter zooms letterboxed 2x
 #                (placement line + three pixels); the rotating control
 #                still latches at its second slot;
+#   gate       : the determinism verbs' console-owner gate (vote 136,
+#                #880) -- the battery's child leaves the console session
+#                and its determinism writes are refused, `released` meets
+#                the renderer gate, and tapestryd says the refusals only at
+#                a power-of-two count;
 # The coda proves teardown: the battery exits, its panes collapse, the
 # console returns to fullscreen direct scanout, and the -c console verify
 # passes again.
@@ -675,27 +683,36 @@ expect {
 }
 # Vote 136 (#880): the determinism gate's negative leg. The battery's child
 # leaves the console-owning session (setsid) and its probe-screen, test-mode on
-# and tick are refused. Two processes print here -- tapestryd's refusal line
-# names WHICH gate fired, the child's line is the verdict -- in either order, so
-# ONE regex alternation collects them (two arms could consume one line unseen).
-set gate_refused 0
+# and tick are refused, then tick on five fresh conns: this boot's first eight
+# refusals, of which tapestryd says only those at a power-of-two count, with the
+# total -- so the lines must carry 1, 2, 4 and 8. Two processes print here --
+# tapestryd's refusal lines name WHICH gate fired, the child's line is the
+# verdict -- so ONE regex alternation collects them (two arms could consume a
+# line unseen). Each alternative ends on fixed text or a line end: an open
+# `[^\r\n]*` would match the moment its prefix arrived and keep only the bytes
+# then in the buffer.
+set gate_counts {}
 set gate_ok 0
-while {!($gate_refused && $gate_ok)} {
+while {!($gate_ok && [llength $gate_counts] >= 4)} {
     expect {
-        -re {tapestryd: determinism verb refused: conn [0-9]+ \(principal [0-9]+\) is neither the console renderer nor the console owner|battery: console-owner gate OK|tapestry-battery: FAIL[^\r\n]*} {
+        -re {tapestryd: determinism verb refused: conn [0-9]+ \(principal [0-9]+\) is neither the console renderer nor the console owner \([0-9]+ refused so far\)|battery: console-owner gate OK|tapestry-battery: FAIL[^\r\n]*[\r\n]} {
             # Classified on the WHOLE match: expect leaves a numbered group
             # that took no part in this match at its previous value.
-            set m $expect_out(0,string)
-            if {[string match "tapestryd: determinism verb refused:*" $m]} {
-                set gate_refused 1
+            set m [string trim $expect_out(0,string)]
+            if {[regexp {^tapestryd: determinism verb refused:.*\(([0-9]+) refused so far\)$} $m -> k]} {
+                lappend gate_counts $k
             } elseif {$m eq "battery: console-owner gate OK"} {
                 set gate_ok 1
             } else {
                 lc_fail "the console-owner gate leg failed: $m"
             }
         }
-        timeout { lc_fail "the console-owner gate leg never reported (refusal line $gate_refused, verdict $gate_ok)" }
+        timeout { lc_fail "the console-owner gate leg never reported (refusal counts said: '$gate_counts', verdict $gate_ok)" }
+        eof     { lc_fail "qemu exited during the console-owner gate leg (refusal counts said: '$gate_counts', verdict $gate_ok)" }
     }
+}
+if {$gate_counts ne {1 2 4 8}} {
+    lc_fail "tapestryd said the refusals numbered '$gate_counts', want '1 2 4 8' (only at a power-of-two count; the child's are this boot's first)"
 }
 lc_pass "panes: the determinism verbs are refused outside the console-owning session (vote 136)"
 expect {

@@ -491,7 +491,9 @@ fn cursor_demo(root: i64) -> i64 {
 /// inherited, then setsid moves it to a session of its own and the same
 /// conn's writes are refused (tapestryd reads the peer fresh per write).
 /// `tick` tells the gates apart: admitted with the mode off it answers
-/// E_INVAL, refused it answers E_PERM.
+/// E_INVAL, refused it answers E_PERM. The scenario counts tapestryd's
+/// refusal lines: this boot's first eight refusals are this child's, and
+/// tapestryd says only those at a power-of-two count (1, 2, 4, 8).
 fn not_console_owner(root: i64) -> i64 {
     let probe = "probe-screen 0 0";
     let rc = raw_ctl(root, probe);
@@ -502,6 +504,13 @@ fn not_console_owner(root: i64) -> i64 {
             rc,
             probe.len()
         );
+        return 1;
+    }
+    // Only `release` and `release <surface>` are ungated: a longer word that
+    // starts with it meets the renderer gate like any other verb.
+    let rc = raw_ctl(root, "released");
+    if rc != -1 {
+        say!("tapestry-battery: FAIL release word: 'released' rc {} want -1 (E_PERM)", rc);
         return 1;
     }
     let sid = unsafe { t_setsid() };
@@ -528,8 +537,30 @@ fn not_console_owner(root: i64) -> i64 {
         say!("tapestry-battery: FAIL console-owner gate: the refused `test-mode on` applied (ctl does not read test-mode off)");
         return 1;
     }
+    // A client that reconnects to repeat a refused verb: five more conns,
+    // one refused `tick` each, bring the refusals to eight.
+    for _ in 0..5 {
+        let c = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
+        if c < 0 {
+            say!("tapestry-battery: FAIL console-owner gate: reconnect rc {}", c);
+            return 1;
+        }
+        let rc = raw_ctl(c, "tick");
+        unsafe { t_close(c); }
+        if rc != -1 {
+            say!("tapestry-battery: FAIL console-owner gate: 'tick' on a fresh conn rc {} want -1 (E_PERM)", rc);
+            return 1;
+        }
+    }
     say!(
-        "battery: console-owner gate OK: probe admitted in the console session; probe, test-mode on and tick refused in session {}",
+        "battery: console-owner gate OK: probe admitted in the console session; probe, test-mode on and tick refused in session {}, and tick on five fresh conns",
         sid
     );
     0

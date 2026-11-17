@@ -886,7 +886,7 @@ that owns the console with a user principal -- AURORA-CONFIG.md 3.3's cfg-3
 bullet has the rule and who it admits on each image; the `TEST_LEVERS=n`
 production build compiles the verbs out, so an admitted caller gets
 E_OPNOTSUPP, proven by content in build.sh and `tools/check-production.sh`;
-the mode ends when the conn that turned it on closes). The same gate covers
+the mode ends when the conn that last turned it on closes). The same gate covers
 `tick` and the `probe-screen` pixel oracle, which reads a texel of the
 composed screen and says it on tapestryd's console (it returns nothing to the
 caller):

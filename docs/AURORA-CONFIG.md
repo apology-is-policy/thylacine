@@ -272,10 +272,12 @@ The gate mechanism — **RESOLVED at cfg-3 (2026-07-23; ground-truth-driven)**:
   closed, and no gate drives them from a pane. A system service, another
   session, a `none`-dropped process and a SYSTEM mounter's shared mount are
   refused with E_PERM, per write (revocation-correct, like the renderer
-  axis); the console says the first 8 refusals Comp-wide, then once that
-  later ones go unsaid. A frozen clock ends when the conn that froze it
-  closes (every hold released), so a battery that dies mid-test cannot leave
-  the display frozen for whoever is admitted next. The earlier exemption
+  axis); tapestryd says a refusal on the console only when the boot's
+  refusal count reaches a power of two, with the total (the connect-refused
+  rule), so no client can flood the console or silence it. A frozen clock
+  ends when the conn that last turned it on closes (every hold released), so
+  a battery that dies mid-test cannot leave the display frozen for whoever is
+  admitted next. The earlier exemption
   leaned on a production strip no build performed; the strip is now real and
   is the second layer: the `TEST_LEVERS=n` build config (the production
   preset) builds tapestryd, halcyond and lictor without the `test-mode` cargo
