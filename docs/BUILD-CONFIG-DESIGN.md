@@ -140,7 +140,7 @@ config-file comments are generated from, and any future full TUI would reuse —
 it once, in the schema.
 
 - **compile-shape** — `BUILD_TYPE`, `TESTS`, `BOOT_PROBES`, `DEV_ACCOUNTS`,
-  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`, `READINESS_QUAL`. KASLR (I-16) and the hardening
+  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`, `READINESS_QUAL`, `TEST_LEVERS`. KASLR (I-16) and the hardening
   flags are not symbols: every image has both. `HARDENING_FULL` and `KASLR` were
   symbols nothing applied, retired 2026-10-27 by operator vote; a profile that
   still names one loads with an unknown-symbol warning and the line is ignored.
@@ -163,6 +163,22 @@ it once, in the schema.
 
 One symbol per independent decision — the orthogonalization that dissolves the
 bundles.
+
+**`TEST_LEVERS` (added 2026-11-17, operator vote 136, #880)** decides whether
+the display stack's test levers are compiled in: the `test-mode` cargo feature
+of tapestryd (the determinism verbs and the `probe-screen` pixel oracle),
+halcyond (the `#wedge` verb rule) and lictor (the broker's test requests).
+`y` is the default and every preset but production keeps it, because the gate
+scenarios drive those levers. `n` -- `configs/production.config` -- makes
+build.sh build those three crates `--no-default-features` with only their
+non-test features, after the workspace build. Before this symbol the levers
+were documented as "stripped for production" while every build, production
+included, compiled them in. `tools/check-production.sh` proves the strip BY
+CONTENT: each crate announces `test levers compiled in` at startup from code
+under the feature, so a production binary must not contain that string, and
+the same check finds it in the default shape (the positive control). The strip
+is the second layer: tapestryd also gates the determinism verbs at runtime in
+every image (TAPESTRY.md 18.6).
 
 **The display group carries two decisions worth stating, because both look
 like arbitrary choices and are not.**
@@ -207,12 +223,12 @@ Instrument arc's I-9.
 
 The hand-coded bundles become data:
 
-| Preset | TESTS | BOOT_PROBES | DEV_ACCOUNTS | chunks |
-|---|---|---|---|---|
-| `configs/production.config` | n | n | **y** | lean set |
-| `configs/dev.config` | n | n | **y** | dev set |
-| `configs/ci.config` | y | y | y (implied) | test set |
-| `configs/everything.config` | n | n | y | all chunks on |
+| Preset | TESTS | BOOT_PROBES | DEV_ACCOUNTS | TEST_LEVERS | chunks |
+|---|---|---|---|---|---|
+| `configs/production.config` | n | n | **y** | **n** | lean set |
+| `configs/dev.config` | n | n | **y** | y | dev set |
+| `configs/ci.config` | y | y | y (implied) | y | test set |
+| `configs/everything.config` | n | n | y | y | all chunks on |
 
 `build.sh --config <name>` loads a preset. **Backward-compat migration:**
 `--production` becomes sugar for `--config production`, `--dev` for `--config dev`,

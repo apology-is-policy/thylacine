@@ -879,8 +879,14 @@ records it.
 
 ### 18.6 Determinism mode (the §16 wire, made concrete)
 
-`test-mode on` (global ctl; **dev/test builds only** — the #880
-strip-for-production class, enforced at build time, not runtime):
+`test-mode on` (global ctl; **gated at runtime in every image AND stripped
+from production builds** -- operator vote 136, 2026-11-17, #880: a conn is
+admitted only if its live peer is the console renderer, or is in the session
+that owns the console with a user principal -- AURORA-CONFIG.md 3.3's cfg-3
+bullet has the rule; the `TEST_LEVERS=n` production build compiles the verbs
+out to E_OPNOTSUPP, proven by content in `tools/check-production.sh`). The
+same gate covers `tick` and the `probe-screen` pixel oracle, which reads the
+composed screen:
 
 - freezes the FRAME clock (ticks only on `tick` ctl writes — the test drives
   time), suppresses cursor blink + animation timers tapestryd owns, and
@@ -1099,9 +1105,11 @@ surface clients don't) + renderer-role protection + the D5 read ACL are
 the Halcyon-era multi-untrusted-client fix (task #42) -- **REALIZED at H-4 (the D decision, ratified 2026-09-02): the WM-control capability is the `Session(principal)` actor tapestryd derives from the kernel-stamped `srv_peer_info.principal_id` (no new grant); a session-side layout tool, run as the user, drives layout, and placement is a one-shot `claim` token (HALCYON.md 13.6/13.7).** A partial
 owner-scope now would break the global-WM model (the no-overfit trap).
 The global `clock-rate` ctl is the same same-session-trust family;
-`test-mode`/`tick`/`release`/HOLD are dev-build-only (the `test-mode`
-cargo feature, stripped to `E_OPNOTSUPP` for production — the #880
-class), with `release` additionally F2-owner-gated. Gate:
+`test-mode`/`tick`/`release`/HOLD live behind the `test-mode` cargo
+feature, stripped to `E_OPNOTSUPP` by the production build (`TEST_LEVERS=n`
+-- the #880 class, realized by vote 136), and `test-mode`/`tick`/`probe-screen`
+are also gated at runtime on the renderer-or-console-owner axis (18.6), with
+`release` F2-owner-gated. Gate:
 `ls-gfx-panes.exp` + `/bin/tapestry-battery` (structure + exact pixels
 via `screendump -P`/`ppm-sample` + QMP focus legs + the collapse coda);
 ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
@@ -1205,9 +1213,10 @@ lives in the client's registered buffer, so a separate slice reference
 would be redundant indirection — the inline array preserves the
 registered-buffer intent with zero extra machinery. (g) **Determinism
 mode** (§18.6 + F13 + F15) behind the `test-mode` cargo feature
-(default-on for the dev tree; production builds strip it —
-`--no-default-features` — and every verb answers E_OPNOTSUPP, the #880
-class): `test-mode on` freezes the FRAME clock (the serve loop stops
+(default-on for the dev tree; the production build strips it --
+`TEST_LEVERS=n` builds the crate `--no-default-features` -- and every verb
+answers E_OPNOTSUPP, the #880 class; in the images that keep it, the verbs
+are gated on the renderer-or-console-owner axis of 18.6, vote 136): `test-mode on` freezes the FRAME clock (the serve loop stops
 wall-clock ticks — queued FRAME events drain normally, which IS the
 F15 transition discipline for a synchronous single-threaded engine;
 the anchor re-seats on unfreeze so no backlog fires), `tick` drives
