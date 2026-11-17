@@ -5882,7 +5882,7 @@ void test_dev9p_m30a_a_loss_is_told_once(void) {
     struct Spoor *q = m23_peer(root, 0 /*OREAD*/);
     wb_wire_reset();
     long w0 = dev9p.write(f, chunk, 256, 0);
-    g_twrite_fail_ecode = T_E_BADF;
+    g_twrite_fail_ecode = T_E_ACCES;   // crosses the client as itself: EIO is M28's
     int fo1 = o ? dev9p.fsync(o, 0) : 1;      // its leg meets the refusal
     int fo2 = o ? dev9p.fsync(o, 0) : 1;
     int fq1 = q ? dev9p.fsync(q, 0) : 1;
