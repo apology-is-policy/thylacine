@@ -1001,9 +1001,10 @@ or waited one out, returns that error, as Linux reports a writeback error to
 the descriptor whose fsync waited on the writeback, and the holder keeps its
 latch for its own report. That includes a refusal that retired between the
 leg's look, which found the run held, and its flush, which found nothing left.
-A later fsync through a third open, which flushes nothing, returns 0, unless a
-closer has lost a run of the file that this open has not yet been told of
-(below). Only a refusal the server answered counts: a flush
+A later fsync through a third open, which flushes nothing, is told of the
+refusal once, by the record below (vote M30a), as Linux tells every
+descriptor's next fsync; the fsync whose leg returned it is not told it again.
+Only a refusal the server answered counts: a flush
 cancelled by a caught note or cut short by a death keeps its run. Cancelled by
 a caught note on the leg's own thread: flush(5) never applied the Twrite, the
 run stays held, and the operation returns `EINTR`. It did not happen, so no
@@ -1054,18 +1055,30 @@ before and leaves the registry with the job. No leg runs on a closer: its jobs
 write a run, flush an open and release its locks, and clunk. So a closer never
 waits for a job.
 
-**A run a closer loses (vote M27, 2026-11-17).** A closer's job can still lose
-its run: its retries spent, the job never queued for memory, or a lock-flush
-job's flush refused past the last close. No program is left to hear it, so the
-loss is recorded against the file on its client, as Linux's errseq records a
-writeback error against the inode. The record holds a sequence and whether any
-open has been told. An open samples the file's record at its open: the current
-sequence once some open has been told, the one before it while none has, so an
-open made after a loss nobody heard is told too. An fsync whose sample is
-behind the record returns `EIO` once (or the space errno, as above) and
-catches up, and marks the record told. The table is per client and bounded;
-the oldest record is evicted, and an evicted loss leaves only the console line,
-which every loss prints as before.
+**A lost run (votes M27 and M30a, 2026-11-17).** A run can be lost where no
+program hears it: a closer's job spends its retries or is never queued for
+memory, a lock-flush job's flush is refused past the last close, or a last close
+whose answer reaches no program (an exit's close, or a thread that never
+returns to EL0) has its flush refused. A refusal that another open's leg met
+reaches the holder only through its latch. So every lost run is recorded
+against the file on its client, once, as Linux's errseq records a writeback
+error against the inode: a refused run at its refusal, under the holder's
+`wb_lock`, which every leg reads the latch under, so no leg reports a refusal
+before it is recorded; a closer's run when its job gives it up, before the job
+leaves the registry, so a leg waiting on the job finds the record when it stops
+waiting. The record holds a sequence and whether any open has been told. An
+open samples the file's record at its open: the current sequence once some open
+has been told, the one before it while none has, so an open made after a loss
+nobody heard is told too. An fsync is told every loss since its open was last
+told, once: it returns the refusal its leg met (vote M25), else a record past
+its sample, as `EIO` (or the space errno, as above), and either way it catches
+its open up to the record and marks the record told. So a peer is told of a
+holder's refusal even when the holder heard it from a write or an fsync, as
+Linux tells every descriptor's next fsync, and no open is told of one loss
+twice. The table is per client and bounded, and its lock is a leaf, taken under
+the holder's `wb_lock` at a refusal. The oldest record is evicted; an evicted
+loss is then told only where it was before: the holder's latch, the fsync whose
+leg met it, and the console line of a loss no program hears.
 
 **What stays.** A cached open serves its open-time snapshot (close-to-open;
 FID-LIFECYCLE 3.3). Its open flushed every held byte before the snapshot was
