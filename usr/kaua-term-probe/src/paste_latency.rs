@@ -7,9 +7,11 @@
 //! `wakes <secs> <leg>` waits two seconds, reads /proc/<pid>/sched for every process
 //! the caller may read (owner or CAP_HOSTOWNER), sleeps without printing, reads again
 //! and says each process's dispatches and parks over the window. `fill <lines> <width> <leg>`
-//! publishes `lines` numbered lines of `width` bytes, joined by LF. `fill-cmd <bytes>
-//! <mark> <leg>` publishes one line of `bytes` bytes that is this probe's `mark <mark>`
-//! command padded with letters, so a paste into a shell shows it landed when it runs.
+//! publishes `lines` numbered lines of `width` bytes, joined by LF. `fill-pad <bytes>
+//! <leg>` publishes `bytes` capitals, A to Z over and over. `mark <leg> <pad> <typed>
+//! <token>` checks a shell line made of a typed prefix, that paste and keys typed around
+//! it: the token must be the alphabet's first `typed` lowercase letters with the whole
+//! `pad`-capital run inside them, and it says after how many typed keys the paste landed.
 use crate::clipboard_client;
 use ::alloc::{format, string::String, vec, vec::Vec};
 use core::time::Duration;
@@ -34,17 +36,30 @@ struct Sample {
     threads: Vec<(u64, u64, u64)>,
 }
 
-impl Sample {
-    fn sums(&self) -> (u64, u64) {
-        self.threads.iter().fold((0, 0), |(n, p), t| (n + t.1, p + t.2))
-    }
-}
-
 /// The kernel renders the file afresh on every read, so it is read in ONE call: a
 /// row split across two reads could join two renders.
 const SCHED_BUF: usize = 8192;
 
-fn sched(pid: u32) -> Option<Vec<(u64, u64, u64)>> {
+fn header<'a>(text: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    let line = text.split(|b| *b == b'\n').find(|l| l.starts_with(key))?;
+    Some(trim(&line[key.len()..]))
+}
+
+fn trim(mut s: &[u8]) -> &[u8] {
+    while let [b' ', rest @ ..] = s {
+        s = rest;
+    }
+    while let [rest @ .., b' '] = s {
+        s = rest;
+    }
+    s
+}
+
+/// The file's name and threads, or None when it is unreadable or its table is not
+/// whole: the kernel commits whole rows into a fixed buffer, so a heavily threaded
+/// process's tail can be missing, and a thread can come or go between the
+/// `threads:` count and the rows.
+fn sched(pid: u32) -> Option<(Vec<u8>, Vec<(u64, u64, u64)>)> {
     let mut f = File::open(format!("/proc/{}/sched", pid).as_str()).ok()?;
     let mut buf = vec![0u8; SCHED_BUF];
     let n = f.read(&mut buf).ok()?;
@@ -52,6 +67,8 @@ fn sched(pid: u32) -> Option<Vec<(u64, u64, u64)>> {
         return None;
     }
     let text = &buf[..n];
+    let name = header(text, b"name:")?.to_vec();
+    let count = procs::decimal(header(text, b"threads:")?)?;
     let at = text
         .windows(b"tid band cpu run_ns nsched parks nmig state".len())
         .position(|w| w == b"tid band cpu run_ns nsched parks nmig state")?;
@@ -63,7 +80,10 @@ fn sched(pid: u32) -> Option<Vec<(u64, u64, u64)>> {
         }
         threads.push((procs::decimal(cols[0])?, procs::decimal(cols[4])?, procs::decimal(cols[5])?));
     }
-    Some(threads)
+    if threads.len() as u64 != count {
+        return None;
+    }
+    Some((name, threads))
 }
 
 /// Every readable process but this one; `skipped` counts the ones the kernel
@@ -77,9 +97,9 @@ fn snapshot(me: u32) -> Result<(Vec<Sample>, u32), &'static str> {
             continue;
         }
         match sched(r.pid) {
-            Some(threads) => out.push(Sample {
+            Some((name, threads)) => out.push(Sample {
                 pid: r.pid,
-                name: r.name,
+                name: String::from_utf8_lossy(&name).into_owned(),
                 threads,
             }),
             None => skipped += 1,
@@ -105,13 +125,19 @@ fn wakes(leg: &str) -> Result<(), &'static str> {
     let (after, skipped) = snapshot(me)?;
     let mut said = 0;
     for a in &after {
-        let Some(b) = before.iter().find(|b| b.pid == a.pid) else {
+        // The same pid under another name is a reused pid, not the same process.
+        let Some(b) = before.iter().find(|b| b.pid == a.pid && b.name == a.name) else {
             continue;
         };
-        // Each thread that woke in the window, by tid; a thread that came or went
-        // inside it is in the counts below only through the sums.
+        // Each thread that woke in the window, by tid. The sums run over the threads
+        // in the second snapshot: one seen in both by its growth, one born in the
+        // window by its whole count; one that left in the window is not counted.
+        let (mut dn, mut dp) = (0u64, 0u64);
         for t in &a.threads {
-            if let Some(bt) = b.threads.iter().find(|bt| bt.0 == t.0) {
+            let bt = b.threads.iter().find(|bt| bt.0 == t.0).copied().unwrap_or((t.0, 0, 0));
+            dn += t.1.saturating_sub(bt.1);
+            dp += t.2.saturating_sub(bt.2);
+            {
                 if t.1 > bt.1 || t.2 > bt.2 {
                     t_putstr(&format!(
                         "paste-latency: thread {} {} pid={} tid={} nsched=+{} parks=+{}\n",
@@ -125,7 +151,6 @@ fn wakes(leg: &str) -> Result<(), &'static str> {
                 }
             }
         }
-        let ((an, ap), (bn, bp)) = (a.sums(), b.sums());
         t_putstr(&format!(
             "paste-latency: wakes {} {} pid={} threads={}->{} nsched=+{} parks=+{} secs={}\n",
             leg,
@@ -133,8 +158,8 @@ fn wakes(leg: &str) -> Result<(), &'static str> {
             a.pid,
             b.threads.len(),
             a.threads.len(),
-            an.saturating_sub(bn),
-            ap.saturating_sub(bp),
+            dn,
+            dp,
             secs
         ));
         said += 1;
@@ -178,28 +203,46 @@ fn fill() -> Result<(), &'static str> {
     clipboard_client::publish(&filled(lines, width))
 }
 
-fn fill_cmd() -> Result<(), &'static str> {
+fn fill_pad() -> Result<(), &'static str> {
     let bytes = number(3, "no size")? as usize;
-    let mark = env::args().nth(4).ok_or("no mark")?;
-    let mut line = Vec::new();
-    line.extend_from_slice(b"kaua-term-probe --paste-latency mark ");
-    line.extend_from_slice(mark);
-    line.push(b' ');
-    if bytes < line.len() + 1 || bytes > FILL_MAX || mark.iter().any(|b| !b.is_ascii_graphic()) {
+    if bytes == 0 || bytes > FILL_MAX {
         return Err("size out of range");
     }
-    let mut i = 0usize;
-    while line.len() < bytes {
-        line.push(b'a' + (i % 26) as u8);
-        i += 1;
+    clipboard_client::publish(&(0..bytes).map(|i| b'A' + (i % 26) as u8).collect::<Vec<u8>>())
+}
+
+/// Where in `token` a `pad`-capital paste sits among `typed` typed keys, or why
+/// the line is not that.
+pub fn landed(token: &[u8], pad: usize, typed: usize) -> Result<usize, &'static str> {
+    let at = token.iter().position(|b| b.is_ascii_uppercase()).ok_or("the paste is not in the line")?;
+    let run = token[at..].iter().take_while(|b| b.is_ascii_uppercase()).count();
+    if run != pad || token[at..at + run].iter().enumerate().any(|(i, b)| *b != b'A' + (i % 26) as u8) {
+        return Err("the paste is not whole");
     }
-    clipboard_client::publish(&line)
+    let keys = token[..at].iter().chain(&token[at + run..]);
+    if token.len() - run != typed || keys.enumerate().any(|(i, b)| *b != b'a' + (i % 26) as u8) {
+        return Err("typed keys missing, extra or out of order");
+    }
+    Ok(at)
+}
+
+fn mark(leg: &str) -> Result<(), &'static str> {
+    let pad = number(4, "no paste size")? as usize;
+    let typed = number(5, "no typed count")? as usize;
+    let token = env::args().nth(6).ok_or("no line")?;
+    let after = landed(token, pad, typed)?;
+    t_putstr(&format!(
+        "paste-latency: {}: the paste landed after {} of {} typed keys\n",
+        leg, after, typed
+    ));
+    Ok(())
 }
 
 pub fn run() -> i64 {
     let which = env::args().nth(2).unwrap_or(b"");
     let leg_at = match which {
-        b"fill" | b"fill-cmd" => 5,
+        b"fill" => 5,
+        b"fill-pad" => 4,
         b"mark" => 3,
         _ => 4,
     };
@@ -210,8 +253,8 @@ pub fn run() -> i64 {
     let result = match which {
         b"wakes" => wakes(&leg),
         b"fill" => fill(),
-        b"fill-cmd" => fill_cmd(),
-        b"mark" => Ok(()),
+        b"fill-pad" => fill_pad(),
+        b"mark" => mark(&leg),
         _ => Err("no such verb"),
     };
     match result {

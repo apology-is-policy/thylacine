@@ -44,7 +44,8 @@ prechord=""
 while getopts "s:kphc:" opt; do
     case "$opt" in
         s) sock="$OPTARG" ;;
-        c) prechord="$OPTARG" ;;
+        c) [[ -n "$OPTARG" ]] || { echo "qmp-sendtext: -c needs a chord" >&2; exit 2; }
+           prechord="$OPTARG" ;;
         k) mode="chord" ;;
         p) mode="pointer" ;;
         *) echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p|-c CHORD] TEXT|CHORD|PTR" >&2; exit 2 ;;
@@ -135,6 +136,27 @@ def send_events(events):
     cmd("input-send-event", events=events)
 
 
+def chord(codes, hold_ms=0):
+    # Whatever went down comes up, even when a later qcode is refused.
+    pressed = []
+    try:
+        for q in codes:
+            key(q, True)
+            pressed.append(q)
+            time.sleep(0.03)
+        if hold_ms:
+            s.close()
+            time.sleep(hold_ms / 1000.0)
+            connect()
+    finally:
+        for q in reversed(pressed):
+            try:
+                key(q, False)
+            except BaseException:
+                pass
+            time.sleep(0.03)
+
+
 connect()
 if mode == "pointer":
     parts = text.split()
@@ -209,16 +231,7 @@ if mode == "chord":
     if not codes:
         print("qmp-sendtext: empty chord", file=sys.stderr)
         sys.exit(1)
-    for q in codes:
-        key(q, True)
-        time.sleep(0.03)
-    if hold_ms:
-        s.close()
-        time.sleep(hold_ms / 1000.0)
-        connect()
-    for q in reversed(codes):
-        key(q, False)
-        time.sleep(0.03)
+    chord(codes, hold_ms)
     print(f"qmp-sendtext: chorded {text!r}")
     sys.exit(0)
 text = text.replace("\\n", "\n")
@@ -229,12 +242,7 @@ if prechord:
     if not codes:
         print("qmp-sendtext: empty chord", file=sys.stderr)
         sys.exit(1)
-    for q in codes:
-        key(q, True)
-        time.sleep(0.03)
-    for q in reversed(codes):
-        key(q, False)
-        time.sleep(0.03)
+    chord(codes)
     time.sleep(PACE_S)
 for ch in text:
     q = QCODE.get(ch)

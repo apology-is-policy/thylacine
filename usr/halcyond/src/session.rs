@@ -283,14 +283,17 @@ struct SessionTile {
     #[cfg(feature = "test-mode")]
     sync_cut_said: bool,
     /// The latency record's first unanswered key (monotonic ns, 0 = none),
-    /// whether the program has written since it, and whether it has written
-    /// since this tile's last present inside a burst (test builds).
+    /// whether the program has written since it, whether it has written since
+    /// this tile's last present inside a burst, and whether it took one of the
+    /// open burst's keys (test builds).
     #[cfg(feature = "test-mode")]
     lat_key_ns: u64,
     #[cfg(feature = "test-mode")]
     lat_echoed: bool,
     #[cfg(feature = "test-mode")]
     lat_out: bool,
+    #[cfg(feature = "test-mode")]
+    lat_took: bool,
     /// H-4d: the Helix-modal transcript mode (HALCYON.md 4): Esc leaves
     /// Insert for Normal, where the cursor walks the rows and `w`/`b` walk
     /// the obj runs; Enter opens the run's verb menu; `i` returns.
@@ -467,6 +470,8 @@ impl SessionTile {
             lat_echoed: false,
             #[cfg(feature = "test-mode")]
             lat_out: false,
+            #[cfg(feature = "test-mode")]
+            lat_took: false,
             mode: Mode::Insert,
             flat: Vec::new(),
             flat_seq: u64::MAX,
@@ -2317,7 +2322,9 @@ pub fn run(home: Option<String>) -> i64 {
                 match t.surf.poll_event() {
                     Ok(Some(e)) => match {
                         #[cfg(feature = "test-mode")]
-                        idle.event(e.kind);
+                        if !lat.is_open() {
+                            idle.event(e.kind);
+                        }
                         e.kind
                     } {
                         TEV_CLOSE => reap.push(leaf),
@@ -2371,11 +2378,13 @@ pub fn run(home: Option<String>) -> i64 {
                                 #[cfg(feature = "test-mode")]
                                 if taken {
                                     let now = libthyla_rs::time::monotonic_ns();
-                                    if t.lat_key_ns == 0 {
+                                    let stamped = t.lat_key_ns == 0;
+                                    if stamped {
                                         t.lat_key_ns = now;
                                         t.lat_echoed = false;
                                     }
-                                    lat.key(now);
+                                    t.lat_took = true;
+                                    lat.key(now, stamped);
                                 } else {
                                     lat.dropped();
                                 }
@@ -3031,17 +3040,18 @@ pub fn run(home: Option<String>) -> i64 {
         #[cfg(feature = "test-mode")]
         let timeout = {
             let now = libthyla_rs::time::monotonic_ns();
-            let owed = tiles.values().filter(|t| t.lat_key_ns != 0).count() as u32;
-            if let Some(line) = lat.end(now, owed) {
+            let queued = tiles.values().filter(|t| t.lat_took && !t.down.is_empty()).count() as u32;
+            if let Some(line) = lat.end(now, queued) {
                 say!("{}", line);
                 for t in tiles.values_mut() {
                     t.lat_key_ns = 0;
                     t.lat_echoed = false;
                     t.lat_out = false;
+                    t.lat_took = false;
                 }
             }
             lat.waiting(now);
-            let due = lat.due_ms(now, owed > 0).map(|ms| ms.min(i32::MAX as u64) as i32);
+            let due = lat.due_ms(now, queued).map(|ms| ms.min(i32::MAX as u64) as i32);
             libhalcyon::motion::fold_timeout(timeout, due)
         };
         let polled = unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) };
@@ -3051,7 +3061,9 @@ pub fn run(home: Option<String>) -> i64 {
             let now = libthyla_rs::time::monotonic_ns();
             lat.woke(now);
             if lat.is_open() {
-                idle.reset();
+                if let Some(line) = idle.stretch_end(now) {
+                    say!("{}", line);
+                }
             } else if polled >= 0 {
                 let n_up = up_leaves.len();
                 let ring_ready = fds[0].revents != 0;
@@ -3120,7 +3132,7 @@ pub fn run(home: Option<String>) -> i64 {
                         if t.lat_key_ns != 0 {
                             t.lat_echoed = true;
                         }
-                        if lat.is_open() {
+                        if lat.is_open() && t.lat_took {
                             t.lat_out = true;
                         }
                     }

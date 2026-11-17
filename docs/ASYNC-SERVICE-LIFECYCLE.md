@@ -438,10 +438,11 @@ The client's rules, each from a rule above it:
   `ls-halcyon-clipboard-async`. Rendering and input latency under a paste are to be recorded,
   not judged (HALCYON-INTERACTION 12), by `ls-halcyon-paste-latency`: halcyond's test builds
   say one line per typing burst (the first output after a key, a lower bound under a backlog;
-  the settle from the last key to the present after the last output; every frame's render and
-  present; the loop's longest busy stretch) and, while idle, why the loop woke; the probe reads
-  each readable process's and thread's dispatches over a silent window. It runs on the paste
-  image and on a control image without the interaction work, for a before and an after, and
-  fails only on a record that is missing or does not add up. Its first run found an idle
-  halcyond waking about 110 times a second in both images (OPEN-BUGS 2026-11-17T11:10Z); the
-  numbers are owed by a run on the round-44 close.
+  the settle from the last key to the present after the last output; each tile frame's render
+  and present; the loop's longest busy stretch) and, while idle, why the loop woke; the probe reads
+  dispatches of each process and thread the session user may read over a silent window. It runs
+  on the paste image and on a control image without the interaction work, for a before and an
+  after, and fails only on a record that is missing or does not add up. Its runs found an idle
+  halcyond dispatched about 100-125 times a second over its two threads in both images: the UI
+  thread on tapestryd's frame ticks, which it drops, and the service worker for a cause not yet
+  observed (OPEN-BUGS 2026-11-17T11:10Z); the numbers are owed by a run on the round-45 close.

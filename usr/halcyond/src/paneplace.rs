@@ -1366,6 +1366,8 @@ fn serve_owner(
     control.ready()?;
     let mut diag = Diag::default();
     let mut stopping = false;
+    #[cfg(feature = "test-mode")]
+    let mut owner_tally = halcyond::latency::OwnerTally::new();
     loop {
         control.drain_wake()?;
         if control.stopping() {
@@ -1507,7 +1509,26 @@ fn serve_owner(
                 .into_iter().flatten().min();
             halcyond::servicepool::poll_timeout(libthyla_rs::time::monotonic_ns(), deadline)
         };
-        Error::from_syscall_return(unsafe { libthyla_rs::t_poll(poll.as_mut_ptr(), n, timeout) })?;
+        let polled = unsafe { libthyla_rs::t_poll(poll.as_mut_ptr(), n, timeout) };
+        // Test builds: why this thread woke (HALCYON-INTERACTION 12's idle wakeups).
+        #[cfg(feature = "test-mode")]
+        if polled >= 0 {
+            let ready = |i: Option<usize>| i.is_some_and(|i| poll[i].revents != 0);
+            let conns_ready = poll[base..n].iter().any(|p| p.revents != 0);
+            if let Some(line) = owner_tally.polled(
+                libthyla_rs::time::monotonic_ns(),
+                timeout,
+                polled,
+                ready(Some(0)),
+                ready(seat_index),
+                ready(admission_index),
+                ready(listener_index),
+                conns_ready,
+            ) {
+                say!("{}", line);
+            }
+        }
+        Error::from_syscall_return(polled)?;
         for i in [seat_index, admission_index, listener_index]
             .into_iter()
             .flatten()
