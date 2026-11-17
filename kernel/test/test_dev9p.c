@@ -6027,53 +6027,120 @@ void test_dev9p_mapping_keys_on_the_probe_version(void) {
     TEST_ASSERT(c1 == 0 && c2 == 0, "both close");
 }
 
+// A loss of each of P9_WB_LOSS_MAX other files: the table's oldest record, the
+// file's own when it is the only one, is evicted.
+static void wb_evict_the_file(void) {
+    for (u32 i = 0; i < P9_WB_LOSS_MAX; i++)
+        dev9p_wb_test_loss(&g_client, 0x1000u + i, -T_E_IO);
+}
+
 // A refusal that retires between a leg's look, which found the run held, and its
 // flush, which finds nothing left, is the fsync's answer, as the leg's own
-// refusal is (vote M25). The holder's own fsync runs inside that window here; in
-// the control, one variable away, it lands the run, and the peer's fsync is 0.
+// refusal is (vote M25). The holder's own fsync runs inside that window here. Its
+// refusal is recorded too (vote M30a), so a third open is told by the record; with
+// the record evicted inside the window, the third open hears nothing and the
+// peer's answer is the leg's alone. In the control, one variable away, the
+// holder's fsync lands the run, and both fsyncs are 0.
 static struct Spoor *g_win_holder;
 static int           g_win_rc;
+static bool          g_win_evict;
 
 static void win_holder_fsync(void *arg) {
     (void)arg;
     g_win_rc = dev9p.fsync(g_win_holder, 0);
+    if (g_win_evict) wb_evict_the_file();
 }
 
-static void win_leg(u32 ecode, int *fo, int *fh, u32 *seen) {
-    *fo = 1; *fh = 1; *seen = 0xffffffffu;
+static void win_leg(u32 ecode, bool evict, int *fo, int *fq, int *fh, u32 *seen) {
+    *fo = 1; *fq = 1; *fh = 1; *seen = 0xffffffffu;
     u8 *chunk = m23_chunk();
     struct Spoor *root = NULL;
     struct Spoor *f = chunk ? wb_make_created(&root) : NULL;
     if (!f) return;
     struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    struct Spoor *q = m23_peer(root, 0 /*OREAD*/);
     wb_wire_reset();
     (void)dev9p.write(f, chunk, 256, 0);
     g_twrite_fail_ecode = ecode;
     g_win_holder = f;
     g_win_rc     = 1;
+    g_win_evict  = evict;
     dev9p_wb_test_leg_window(win_holder_fsync, NULL);
     if (o) *fo = dev9p.fsync(o, 0);
     dev9p_wb_test_leg_window(NULL, NULL);
+    g_win_evict = false;
     g_twrite_fail_ecode = 0;
+    if (q) *fq = dev9p.fsync(q, 0);
     *fh   = g_win_rc;
     *seen = g_twrite_seen;
     if (o) (void)d9_close(o);
+    if (q) (void)d9_close(q);
     (void)d9_close(f);
     m23_end(root);
 }
 
 void test_dev9p_m25_refusal_inside_the_leg_window(void) {
-    int fo0, fh0, fo1, fh1;
-    u32 s0, s1;
-    win_leg(28 /*ENOSPC*/, &fo0, &fh0, &s0);
-    win_leg(0, &fo1, &fh1, &s1);
+    int fo0, fq0, fh0, fo1, fq1, fh1, fo2, fq2, fh2;
+    u32 s0, s1, s2;
+    win_leg(28 /*ENOSPC*/, false, &fo0, &fq0, &fh0, &s0);
+    win_leg(28 /*ENOSPC*/, true, &fo1, &fq1, &fh1, &s1);
+    win_leg(0, false, &fo2, &fq2, &fh2, &s2);
     TEST_EXPECT_EQ((u64)(s64)fh0, (u64)(s64)-28, "the holder's fsync inside the window is refused");
     TEST_EXPECT_EQ((u64)s0, 1ull, "one Twrite: the holder's");
     TEST_EXPECT_EQ((u64)(s64)fo0, (u64)(s64)-28,
                    "the peer's fsync, whose look found the run held, returns that refusal");
-    TEST_EXPECT_EQ((u64)(s64)fh1, 0ull, "CONTROL: the holder's fsync lands the run");
-    TEST_EXPECT_EQ((u64)s1, 1ull, "CONTROL: one Twrite");
-    TEST_EXPECT_EQ((u64)(s64)fo1, 0ull, "CONTROL: and the peer's fsync returns 0");
+    TEST_EXPECT_EQ((u64)(s64)fq0, (u64)(s64)-28, "a third open is told by the refusal's record (M30a)");
+    TEST_EXPECT_EQ((u64)(s64)fh1, (u64)(s64)-28, "EVICTED: the holder's fsync inside the window is refused");
+    TEST_EXPECT_EQ((u64)s1, 1ull, "EVICTED: one Twrite: the holder's");
+    TEST_EXPECT_EQ((u64)(s64)fq1, 0ull, "EVICTED: the record is gone, so a third open hears nothing");
+    TEST_EXPECT_EQ((u64)(s64)fo1, (u64)(s64)-28,
+                   "EVICTED: the peer's fsync returns the refusal its look waited out, record or none");
+    TEST_EXPECT_EQ((u64)(s64)fh2, 0ull, "CONTROL: the holder's fsync lands the run");
+    TEST_EXPECT_EQ((u64)s2, 1ull, "CONTROL: one Twrite");
+    TEST_EXPECT_EQ((u64)(s64)fo2, 0ull, "CONTROL: and the peer's fsync returns 0");
+    TEST_EXPECT_EQ((u64)(s64)fq2, 0ull, "CONTROL: as does the third open's");
+}
+
+// Vote M25 with M30a: the refusal a peer's fsync's leg met is its answer even
+// when the file's record is gone before the fsync reads it -- here a loss of each
+// of P9_WB_LOSS_MAX other files evicts it between the leg and the report. A third
+// open, made before, hears nothing: the record was evicted. In the control, one
+// variable away, nothing evicts it, and the third open is told.
+static void outlive_evict(void *arg) {
+    (void)arg;
+    wb_evict_the_file();
+}
+
+static void outlive_leg(bool evict, int *fo, int *fq) {
+    *fo = 1; *fq = 1;
+    u8 *chunk = m23_chunk();
+    struct Spoor *root = NULL;
+    struct Spoor *f = chunk ? wb_make_created(&root) : NULL;
+    if (!f) return;
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    struct Spoor *q = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    (void)dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    if (evict) dev9p_wb_test_report_window(outlive_evict, NULL);
+    if (o) *fo = dev9p.fsync(o, 0);
+    dev9p_wb_test_report_window(NULL, NULL);
+    g_twrite_fail_ecode = 0;
+    if (q) *fq = dev9p.fsync(q, 0);
+    if (o) (void)d9_close(o);
+    if (q) (void)d9_close(q);
+    (void)d9_close(f);
+    m23_end(root);
+}
+
+void test_dev9p_m25_refusal_outlives_its_record(void) {
+    int fo0, fq0, fo1, fq1;
+    outlive_leg(true, &fo0, &fq0);
+    outlive_leg(false, &fo1, &fq1);
+    TEST_EXPECT_EQ((u64)(s64)fq0, 0ull, "the file's record was evicted between the peer's leg and its report");
+    TEST_EXPECT_EQ((u64)(s64)(-fo0), 28ull, "the peer's fsync returns the refusal its leg met all the same");
+    TEST_EXPECT_EQ((u64)(s64)(-fo1), 28ull, "CONTROL: nothing evicts the record: the peer's fsync returns the refusal");
+    TEST_EXPECT_EQ((u64)(s64)(-fq1), 28ull, "CONTROL: and the third open is told by the record");
 }
 
 // A caught note that cancels the leg of a two-name walk ends the open with

@@ -306,8 +306,10 @@ void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on);
 void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on);
 u32  dev9p_wb_test_purge(struct p9_client *cl);
 // A hook run once, on the next leg that found a run held, between its look and
-// its flush, with no lock held; and a lost run recorded by hand (vote M27).
+// its flush, with no lock held; one run once on the next fsync of a plain file,
+// between its leg and its loss report; and a lost run recorded by hand (vote M27).
 void dev9p_wb_test_leg_window(void (*fn)(void *), void *arg);
+void dev9p_wb_test_report_window(void (*fn)(void *), void *arg);
 void dev9p_wb_test_loss(struct p9_client *cl, u64 path, int err);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the

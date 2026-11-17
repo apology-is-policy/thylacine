@@ -1041,6 +1041,14 @@ void dev9p_wb_test_leg_window(void (*fn)(void *), void *arg) {
     g_wb_leg_window_arg = arg;
     g_wb_leg_window     = fn;
 }
+
+static void (*g_wb_report_window)(void *);
+static void  *g_wb_report_window_arg;
+
+void dev9p_wb_test_report_window(void (*fn)(void *), void *arg) {
+    g_wb_report_window_arg = arg;
+    g_wb_report_window     = fn;
+}
 #endif // KERNEL_TESTS
 
 static int wb_leg_wait(u64 *backoff) {
@@ -3091,9 +3099,17 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
         int refused = 0;
         int lr = wb_holder_flush(p->client, c->qid.path, p, NULL, &refused);
         if (lr < 0) return lr;
+#ifdef KERNEL_TESTS
+        void (*window)(void *) = g_wb_report_window;
+        if (window) {
+            g_wb_report_window = NULL;
+            window(g_wb_report_window_arg);
+        }
+#endif
         // Every run of the file lost since this open was last told, once (votes
         // M27, M30a): a refusal the leg met was recorded before the leg saw it,
-        // so the report catches this open up past it too.
+        // so the report catches this open up past it too. The leg's refusal is
+        // the answer even when its record has been evicted meanwhile.
         int lost = wb_loss_report(p, c->qid.path);
         if (refused != 0) return refused;
         if (lost != 0) return lost;

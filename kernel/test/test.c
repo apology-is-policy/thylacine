@@ -3086,6 +3086,8 @@ struct test_case g_tests[] = {
                                        test_dev9p_m25_peer_fsync_reports_a_refused_run, false, NULL },
     { "dev9p.m25_refusal_inside_the_leg_window",
                                        test_dev9p_m25_refusal_inside_the_leg_window, false, NULL },
+    { "dev9p.m25_refusal_outlives_its_record",
+                                       test_dev9p_m25_refusal_outlives_its_record, false, NULL },
     { "dev9p.m26_holder_changes_pin",  test_dev9p_m26_holder_changes_pin, false, NULL },
     { "dev9p.m27_lost_run_reaches_the_next_fsync",
                                        test_dev9p_m27_lost_run_reaches_the_next_fsync, false, NULL },

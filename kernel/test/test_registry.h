@@ -2114,6 +2114,7 @@ void test_dev9p_m24_pin_refuses_a_holder(void);
 void test_dev9p_m24_guard_skips_the_own_install(void);
 void test_dev9p_m25_peer_fsync_reports_a_refused_run(void);
 void test_dev9p_m25_refusal_inside_the_leg_window(void);
+void test_dev9p_m25_refusal_outlives_its_record(void);
 void test_dev9p_m26_holder_changes_pin(void);
 void test_dev9p_m27_lost_run_reaches_the_next_fsync(void);
 void test_dev9p_m27_unhanded_run_is_recorded(void);
