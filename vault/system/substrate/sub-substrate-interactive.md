@@ -259,6 +259,19 @@ unrun they rot — "the exit-record check exists precisely because
 hard-fails; a broken relay would otherwise surface as a mysterious guest
 failure in every scenario.
 
+**The listener's path appears only once it listens.** Waiters poll for the
+path and connect the moment it exists — `lib.exp` before it starts the relay,
+the preflight's capacity arm — so a listener bound at the path and listened a
+moment later left a window in which that connect was refused, and the relay
+reports a refused connect as `connect-refused`, the signature of a qemu that
+died at startup. One preflight died of it (2026-11-17: `ConnectionRefusedError`
+in the capacity arm's 8 KiB leg). The wrapper now binds under a private name,
+listens, and only then renames onto the path; the rename keeps the socket, so a
+connect by the published path reaches the listener. The preflight's fifth arm
+holds bind and listen 0.5 s apart and demands that a connect at first sight
+succeed, and that first sight come after the hold: the old order is refused
+every time (shown both ways when the arm landed).
+
 **Evidence before the kill, and the `ps` state is the discriminator.**
 `lc_fail` records `vm-at-fail: pid N stat=<S>` *before* killing anything.
 The state splits "qemu exited" (`Z*` — Tcl lazy-reaps, so a dead child

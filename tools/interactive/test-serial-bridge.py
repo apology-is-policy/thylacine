@@ -215,6 +215,13 @@ def measure_capacity(sndbuf: int) -> int:
     # /tmp, not tempfile.gettempdir(): AF_UNIX paths cap at 104 bytes and
     # macOS's per-user temp dir is long enough to blow that on its own.
     path = f"/tmp/lsci-cap-{os.getpid()}-{sndbuf}.sock"
+    # A file left by an earlier process of the same pid would be "seen" before
+    # the listener exists; lib.exp deletes its path before booting for the same
+    # reason.
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
     proc = subprocess.Popen(
         [sys.executable, LISTEN, "--sock", path, "--sndbuf", str(sndbuf),
          "--", sys.executable, "-c", _WRITER_PROG],
@@ -224,7 +231,12 @@ def measure_capacity(sndbuf: int) -> int:
             if os.path.exists(path):
                 break
             time.sleep(0.05)
+        else:
+            print(f"[4] the listener never published {path}")
+            return -1
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # No retry: the path is published only once it listens, so a refused
+        # connect here means the listener is gone -- a failure, not a wait.
         peer.connect(path)
         try:
             # Deliberately never read: that is the condition being measured.
@@ -234,6 +246,53 @@ def measure_capacity(sndbuf: int) -> int:
         return int(out.strip() or 0)
     finally:
         if proc.poll() is None:
+            proc.kill()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+_ACCEPT_ONE = (
+    "import socket\n"
+    "s=socket.socket(fileno={SERIALFD})\n"
+    "c,_=s.accept()\n"
+    "c.close()\n"
+)
+
+
+def connect_at_first_sight(hold: float):
+    """Poll for serial-listen.py's path and connect the instant it appears,
+    with bind and listen `hold` seconds apart. Returns (outcome, seconds from
+    spawn to first sight)."""
+    path = f"/tmp/lsci-pub-{os.getpid()}.sock"
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        [sys.executable, LISTEN, "--sock", path, "--hold-before-listen", str(hold),
+         "--", sys.executable, "-c", _ACCEPT_ONE],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        while not os.path.exists(path):
+            if time.monotonic() - t0 > hold + 10:
+                return "never-published", None
+            time.sleep(0.002)
+        seen = time.monotonic() - t0
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            peer.connect(path)
+        except ConnectionRefusedError:
+            return "refused", seen
+        finally:
+            peer.close()
+        return "connected", seen
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             proc.kill()
         try:
             os.unlink(path)
@@ -309,7 +368,20 @@ def main():
         print(f"[4] console capacity OS-buffer ~{cap_wide}B "
               f"(non-Darwin: AF_UNIX is rcvbuf-governed; real capacity is the [1] app spool -- informational)")
 
-    ok = spool_ok and exit_ok and stall_ok and cap_ok
+    # [5] The listener's path appears only once it listens. Waiters connect the
+    # moment it exists (lib.exp then starts the relay); a refused connect there
+    # reads as a qemu that died at startup. The hold is the control: it opens
+    # the bind-to-listen window for long enough that a listener publishing at
+    # bind() is refused every time, and first sight after the hold shows the
+    # window was really open rather than too short to hit.
+    HOLD_S = 0.5
+    outcome, seen = connect_at_first_sight(HOLD_S)
+    pub_ok = outcome == "connected" and seen is not None and seen >= HOLD_S * 0.7
+    print(f"[5] bind and listen {HOLD_S}s apart -> {outcome} at first sight "
+          f"({'-' if seen is None else f'{seen:.2f}'}s after spawn)")
+    print(f"[5] listener path {'PUBLISHED ONLY ONCE LISTENING' if pub_ok else 'PUBLISHED EARLY'}")
+
+    ok = spool_ok and exit_ok and stall_ok and cap_ok and pub_ok
     # Name the subject. A bare "PASS" here is indistinguishable from a SCENARIO
     # verdict, and it prints immediately above the scenario run -- which is
     # exactly how a mistyped `test-interactive.sh ls-3` (the real names are
