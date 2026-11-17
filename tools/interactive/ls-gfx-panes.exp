@@ -507,6 +507,11 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the hold coda failed" }
     timeout { lc_fail "battery never finished the hold leg" }
 }
+expect {
+    -ex "battery: test-mode ends with the conn that turned it on" { lc_pass "panes: determinism mode ends with the conn that turned it on" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the test-mode owner leg failed" }
+    timeout { lc_fail "battery never finished the test-mode owner leg" }
+}
 
 # Scenario 3 (G-6b): a compositor-initiated pane close delivers the
 # queued TEV_CLOSE exit request to the stranded surface.
@@ -677,13 +682,16 @@ set gate_refused 0
 set gate_ok 0
 while {!($gate_refused && $gate_ok)} {
     expect {
-        -re {(tapestryd: determinism verb refused: conn [0-9]+ \(principal [0-9]+\) is neither the console renderer nor the console owner)|(battery: console-owner gate OK)|(tapestry-battery: FAIL[^\r\n]*)} {
-            if {$expect_out(1,string) ne ""} {
+        -re {tapestryd: determinism verb refused: conn [0-9]+ \(principal [0-9]+\) is neither the console renderer nor the console owner|battery: console-owner gate OK|tapestry-battery: FAIL[^\r\n]*} {
+            # Classified on the WHOLE match: expect leaves a numbered group
+            # that took no part in this match at its previous value.
+            set m $expect_out(0,string)
+            if {[string match "tapestryd: determinism verb refused:*" $m]} {
                 set gate_refused 1
-            } elseif {$expect_out(2,string) ne ""} {
+            } elseif {$m eq "battery: console-owner gate OK"} {
                 set gate_ok 1
             } else {
-                lc_fail "the console-owner gate leg failed: $expect_out(3,string)"
+                lc_fail "the console-owner gate leg failed: $m"
             }
         }
         timeout { lc_fail "the console-owner gate leg never reported (refusal line $gate_refused, verdict $gate_ok)" }
@@ -720,5 +728,5 @@ lc_pass "panes: winsize restored fullscreen after the battery (#55 live across r
 scale_legs $boot_scale
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + console-owner gate + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + test-mode owner + close + singleslot + console-owner gate + collapse)"
 exit 0

@@ -211,6 +211,10 @@ fn actor_owner_principal(actor: Actor) -> u32 {
 const _: () = assert!(core::mem::size_of::<Comp>() <= 256 * 1024);
 const _: () = assert!(MAX_SURFACES >= MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (MAX_SURFACES_PER_RENDERER - MAX_SURFACES_PER_CONN));
 
+/// How many determinism-verb refusals tapestryd says on the console before it
+/// stops saying them (Comp.determinism_refusals_said).
+const DETERMINISM_REFUSALS_SAID: u32 = 8;
+
 fn principal_is_session(p: u32) -> bool {
     p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
 }
@@ -1983,6 +1987,16 @@ pub struct Comp {
     /// `tick` ctl writes) and TPRESENT_HOLD is accepted.
     #[cfg(feature = "test-mode")]
     test_mode: bool,
+    /// The conn that turned determinism mode on. The mode ends with it:
+    /// retire_conn runs `test-mode off` for it, so a battery that dies with
+    /// the clock frozen does not leave every surface frozen for whoever
+    /// comes next (vote 136 narrowed who may unfreeze).
+    #[cfg(feature = "test-mode")]
+    test_mode_conn: Option<u64>,
+    /// Determinism-verb refusals said on the console so far, across every
+    /// conn: past DETERMINISM_REFUSALS_SAID no more are said, so a client
+    /// that reconnects to repeat a refused verb cannot flood the console.
+    determinism_refusals_said: u32,
     /// Warp-2c: the GPU-seam context slots + the monotonic public-id
     /// sequences (the pane discipline -- tree names are never reused).
     warp_ctxs: [Option<WarpCtx>; MAX_WARP_CTXS],
@@ -2742,6 +2756,9 @@ impl Comp {
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
+            #[cfg(feature = "test-mode")]
+            test_mode_conn: None,
+            determinism_refusals_said: 0,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
             warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
@@ -8594,6 +8611,17 @@ impl Comp {
     /// release a non-HOLD present performs). A hold recorded under a
     /// scanout mode that has since changed is DROPPED -- the structural
     /// repaint superseded it (pixels already re-fanned via CONFIGURE).
+    /// `test-mode off`: no stuck regions -- every hold is flushed -- and the
+    /// FRAME clock runs again.
+    #[cfg(feature = "test-mode")]
+    fn test_mode_end(&mut self) {
+        for n in 0..MAX_SURFACES {
+            self.release_held(n);
+        }
+        self.test_mode = false;
+        self.test_mode_conn = None;
+    }
+
     fn release_held(&mut self, n: usize) {
         let held = match self.surf_mut(n).and_then(|s| s.held.take()) {
             Some(h) => h,
@@ -9234,6 +9262,11 @@ impl Comp {
     fn retire_conn(&mut self, conn_id: u64) {
         // Before any surface/GPU teardown that might park during SAK.
         self.retire_seat_declaration(conn_id);
+        #[cfg(feature = "test-mode")]
+        if self.test_mode && self.test_mode_conn == Some(conn_id) {
+            say!("tapestryd: test-mode off: conn {} that turned it on closed", conn_id);
+            self.test_mode_end();
+        }
         self.ordered_remove(conn_id);
         let seat = self.session_declared(conn_id);
         self.teardown_conn = Some(conn_id);
@@ -19331,8 +19364,9 @@ impl Conn {
 
     /// Vote 136 (#880; TAPESTRY.md 18.6): may this conn's LIVE peer drive
     /// the determinism verbs? `test-mode on` stalls every surface's clock
-    /// and `probe-screen` reads the composed screen, so only the console
-    /// renderer or the person at the keyboard may: a peer whose session
+    /// and `probe-screen` reads a composed-screen texel (a GPU readback) and
+    /// says it on the console, so only the console renderer or the person
+    /// at the keyboard may: a peer whose session
     /// owns the console AND whose principal is a user principal. The
     /// console-owner axis is keyed on the SESSION, so the principal half is
     /// what refuses a SYSTEM or `none` process inside the console session.
@@ -19404,7 +19438,13 @@ impl Conn {
     /// global verb defaults to GATED" (an allowlist would silently ungate a
     /// verb added without touching the gate line).
     fn is_ungated_ctl(s: &str) -> bool {
-        s.starts_with("release")
+        Self::is_release_ctl(s)
+    }
+
+    /// `release` or `release <surface>` -- a whole word, so a future verb
+    /// that merely begins with "release" is not exempted with it.
+    fn is_release_ctl(s: &str) -> bool {
+        s == "release" || s.starts_with("release ")
     }
 
     /// The leaf id of a WELL-FORMED tile-status verb (`tag <id> status
@@ -19602,9 +19642,10 @@ impl Conn {
         // global verb -- mode, clock-rate, and every future global
         // mutation -- admits only a conn whose LIVE peer holds the
         // console-renderer role. Checked per write (revocation-correct).
-        // Default-DENY: only the determinism verbs are exempt (see
-        // is_ungated_ctl); ctl READS stay ungated (the geometry query,
-        // a separate read path).
+        // Default-DENY: only `release` is exempt (see is_ungated_ctl), and
+        // the determinism verbs meet peer_may_drive_determinism instead
+        // (vote 136); ctl READS stay ungated (the geometry query, a separate
+        // read path).
         // H-4d: the menu verbs (`menu place` / `menu dismiss`) are ALSO the
         // declared session compositor's -- the arms below still require the
         // menu surface to be the caller's own process's.
@@ -19656,11 +19697,20 @@ impl Conn {
             if !self.peer_may_drive_determinism() {
                 if !self.determinism_refusal_said {
                     self.determinism_refusal_said = true;
-                    say!(
-                        "tapestryd: determinism verb refused: conn {} (principal {}) is neither the console renderer nor the console owner",
-                        self.conn_id,
-                        self.peer_principal
-                    );
+                    if comp.determinism_refusals_said < DETERMINISM_REFUSALS_SAID {
+                        comp.determinism_refusals_said += 1;
+                        say!(
+                            "tapestryd: determinism verb refused: conn {} (principal {}) is neither the console renderer nor the console owner",
+                            self.conn_id,
+                            self.peer_principal
+                        );
+                        if comp.determinism_refusals_said == DETERMINISM_REFUSALS_SAID {
+                            say!(
+                                "tapestryd: {} determinism refusals said; later ones are not",
+                                DETERMINISM_REFUSALS_SAID
+                            );
+                        }
+                    }
                 }
                 return Err(p9::E_PERM);
             }
@@ -19895,14 +19945,11 @@ impl Conn {
         {
             if s == "test-mode on" {
                 comp.test_mode = true;
+                comp.test_mode_conn = Some(self.conn_id);
                 return Ok(());
             }
             if s == "test-mode off" {
-                // No stuck regions: leaving the mode flushes every hold.
-                for n in 0..MAX_SURFACES {
-                    comp.release_held(n);
-                }
-                comp.test_mode = false;
+                comp.test_mode_end();
                 return Ok(());
             }
             if s == "tick" {
@@ -19945,8 +19992,8 @@ impl Conn {
             // opened by the commit that claimed to close it. They exist
             // in exactly one place now: the W_CTL arm, scoped to the
             // caller's own ctx -- which a tapestry client does not have.
-            if let Some(rest) = s.strip_prefix("release") {
-                let rest = rest.trim();
+            if Self::is_release_ctl(s) {
+                let rest = s["release".len()..].trim();
                 if rest.is_empty() {
                     for n in 0..MAX_SURFACES {
                         if comp.surf(n).map_or(false, |s| s.owner_conn == self.conn_id) {
@@ -19966,7 +20013,7 @@ impl Conn {
         #[cfg(not(feature = "test-mode"))]
         if s.starts_with("test-mode")
             || s == "tick"
-            || s.starts_with("release")
+            || Self::is_release_ctl(s)
             || s.starts_with("probe-screen ")
         {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)

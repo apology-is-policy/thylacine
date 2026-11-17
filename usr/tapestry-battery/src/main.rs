@@ -1732,6 +1732,55 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: hold OK");
 
+    // Determinism mode ends with the conn that turned it on: a second conn
+    // freezes the clock and closes, and the mode must be off again once
+    // tapestryd retires that conn -- else a battery that dies frozen leaves
+    // every surface frozen for whoever comes next.
+    {
+        let r2 = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
+        if r2 < 0 {
+            say!("tapestry-battery: FAIL test-mode owner: second conn rc {}", r2);
+            return 1;
+        }
+        if !write_file(r2, "ctl", "test-mode on") {
+            unsafe { t_close(r2) };
+            say!("tapestry-battery: FAIL test-mode owner: test-mode on from the second conn");
+            return 1;
+        }
+        if !read_file(root, "ctl")
+            .unwrap_or_default()
+            .contains("test-mode on")
+        {
+            unsafe { t_close(r2) };
+            say!("tapestry-battery: FAIL test-mode owner: the second conn's test-mode on not reported");
+            return 1;
+        }
+        unsafe { t_close(r2) };
+        let mut off = false;
+        for _ in 0..30 {
+            nap(100);
+            if read_file(root, "ctl")
+                .unwrap_or_default()
+                .contains("test-mode off")
+            {
+                off = true;
+                break;
+            }
+        }
+        if !off {
+            say!("tapestry-battery: FAIL test-mode owner: the mode outlived the conn that turned it on");
+            return 1;
+        }
+        say!("battery: test-mode ends with the conn that turned it on");
+    }
+
     // Scenario 3 (G-6b): the compositor-initiated pane close. Closing
     // B's pane strands the surface and queues the TEV_CLOSE exit
     // request; the surface stays live until the CLIENT destroys it
