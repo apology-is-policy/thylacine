@@ -1940,6 +1940,9 @@ static int p9_client_init_storage(struct p9_client *c,
     // Parked fids die with the session, so destroy has no wire teardown for it.
     for (size_t di = 0; di < sizeof(c->dirfid); di++) ((u8 *)&c->dirfid)[di] = 0;
     spin_lock_init(&c->dirfid.lock);
+    // No loss recorded yet (dev9p, vote M27); the same non-zeroed-storage rule.
+    for (size_t li = 0; li < sizeof(c->wb_loss); li++) ((u8 *)&c->wb_loss)[li] = 0;
+    spin_lock_init(&c->wb_loss.lock);
     c->total_ops    = 0;
     c->total_errors = 0;
     return 0;

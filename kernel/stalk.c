@@ -1657,9 +1657,10 @@ restart:
                 // a reason could answer past a directory this caller cannot search,
                 // and tell it that a name exists. Take the run one component at a
                 // time, whose X-checks come first; each step that gets through
-                // shortens the run, so this ends.
+                // shortens the run, so this ends. A caught note's EINTR names no
+                // component, and a step would walk again with the note claimed.
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }
-                if (why && why != T_E_NOENT && nrun > 1) {
+                if (why && why != T_E_NOENT && why != T_E_INTR && nrun > 1) {
                     i = ends[0];
                     goto per_component;
                 }

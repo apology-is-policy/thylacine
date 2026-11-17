@@ -206,6 +206,22 @@ struct p9_client_progress {
     bool rx_next;
 };
 
+// Runs a closer lost (LARDER-DESIGN 12.6, vote M27): one record per file, for
+// the next fsync of each open not yet told, as Linux's errseq. dev9p keeps the
+// policy; this is only the table. The lock is a pure leaf.
+#define P9_WB_LOSS_MAX 16u
+struct p9_wb_loss {
+    u64  path;
+    u64  seq;      // 0: a free slot
+    int  err;      // positive errno
+    bool seen;     // some open has been told
+};
+struct p9_wb_losses {
+    spin_lock_t       lock;
+    u64               seq;     // the last sequence handed out; 0 until a loss
+    struct p9_wb_loss rec[P9_WB_LOSS_MAX];
+};
+
 struct p9_client {
     u32                  magic;
     // Per-client lock. Protects the session's tag table (with each tag's
@@ -427,6 +443,7 @@ struct p9_client {
     // op -- evict/dedup clunks run outside it). Fids die with the session, so
     // destroy needs no wire teardown.
     struct p9_dirfid_cache dirfid;
+    struct p9_wb_losses  wb_loss;
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;

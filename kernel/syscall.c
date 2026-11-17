@@ -2127,13 +2127,15 @@ s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
 // -- EBADF. Mapped HERE rather than inside handle_close so the internal
 // contract (and its ~20 kernel callers, which test == 0 or ignore the result)
 // stays byte-unchanged. ARCH 21.11: a last close whose Dev hook failed (dev9p's
-// write-behind flush, now or latched earlier) is EIO, and the fd is closed all
-// the same -- POSIX leaves the descriptor's state unspecified after an EIO
-// close, and Linux, like us, never leaves it open.
+// write-behind flush, now or latched earlier) is EIO, or the space errno a
+// server refused for (vote M28: ENOSPC, EDQUOT), and the fd is closed all the
+// same -- POSIX leaves the descriptor's state unspecified after an EIO close,
+// and Linux, like us, never leaves it open.
 static s64 sys_close_in(struct Proc *p, u64 hraw) {
     int crc;
     if (handle_close_report(p, sys_hidx_arg(hraw), &crc) != 0)
         return (s64)(-T_E_BADF);
+    if (crc == -T_E_NOSPC || crc == -T_E_DQUOT) return (s64)crc;
     return crc < 0 ? (s64)(-T_E_IO) : 0;
 }
 

@@ -67,7 +67,7 @@
 #include "../mm/slub.h"
 
 _Static_assert(sizeof(((struct Burrow *)0)->file_devno) == sizeof(((struct Spoor *)0)->devno),
-               "a FILE Burrow's key copy carries the whole devno");
+               "a FILE Burrow's copy carries the whole devno");
 
 // B-1a': the pagemap's per-page hooks. A FILE or ANON_SHARED slot's page is its
 // Burrow's alone, never COW-shared (a plain free; a shared Burrow is shared by
@@ -397,10 +397,8 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
     // KP_ZERO zeroed the struct, and 0 is a REAL size (an empty file, where
     // every page is past EOF) -- the no-bound default must be explicit (#194).
     v->file_limit    = BURROW_FILE_LIMIT_UNKNOWN;
-    v->file_dc       = spoor->dc;
     v->file_devno    = spoor->devno;
     v->file_qid_path = spoor->qid.path;
-    v->file_qid_vers = spoor->qid.vers;
     g_vmo_created++;
     return v;
 }

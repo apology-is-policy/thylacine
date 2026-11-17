@@ -236,10 +236,10 @@ struct Burrow {
     // the backing Chan is pinned at exec, never re-resolved at fault) and
     // spoor_clunks it in burrow_free_internal on the last unref. `file_offset`
     // is the segment's base byte offset in the backing file; the segment length
-    // is v->size. The cache-key scalars are the executable's file identity
-    // sampled at create — the R-3 Image-cache key AND the coherence token (a
-    // binary atomically replaced bumps qid.vers -> a fresh key; the running
-    // Proc stays pinned to the version it exec'd). `pm` is the sparse per-page
+    // is v->size. `file_devno` and `file_qid_path` name the backing file for
+    // the maps listing; the Image cache keys its own slots (image.c), so a
+    // binary replaced since keys afresh while the running Proc keeps the
+    // Burrow it exec'd. `pm` is the sparse per-page
     // pagemap (B-1a': page_count slots behind a charged, on-touch radix -- an
     // untouched map holds no node; each slot absent until the R-2 fault arm
     // dev->reads that page in); the slots are protected by v->lock
@@ -265,10 +265,8 @@ struct Burrow {
     // other mapping of the Burrow executes the page. vma_args_ok refuses an
     // executable mapping of a Burrow that is not exec-class.
     bool              file_exec;
-    int               file_dc;      // FILE: cache key — backing dc       (sampled at create)
-    u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
-    u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
-    u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
+    u64               file_devno;   // FILE: backing devno    (sampled at create)
+    u64               file_qid_path;// FILE: backing qid.path (sampled at create)
     // Votes 118 + 119 (I-32): the pages of a PRIVATE image (FILE) or of a
     // shared anonymous Burrow (ANON_SHARED) are their payer's. payer_record
     // is fixed before the Burrow is published (image_lookup_or_create's
@@ -464,8 +462,8 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
 //     — burrow_create_file takes NO ref on any error path.
 // `spoor` should be opened OEXEC (the R-2 fault arm dev->reads it) and is
 // pinned for the Burrow's life (the I-30 "pin at exec, never re-resolve at
-// fault" discipline). The cache-key scalars (dc/devno/qid.{path,vers}) are
-// sampled from `spoor` here — the R-3 Image-cache key + coherence token.
+// fault" discipline). The backing file's devno and qid.path are sampled from
+// `spoor` here, for the maps listing.
 // `exec` is the Burrow's exec class (file_exec): only an exec-class Burrow may
 // be mapped executable, and every page filled into one is I-cache synced.
 //

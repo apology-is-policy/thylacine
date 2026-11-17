@@ -43,7 +43,8 @@
 #include "../mm/phys.h"               // capacity_set_reclaim (B-1a' audit F8)
 
 // One cache slot. `burrow` holds the cache's single handle_count ref. The key
-// scalars are sampled from the Spoor at install (== the Burrow's file_* fields).
+// is the Spoor's file identity at install, at the content version the caller
+// passes (a mapping's probe, or the Spoor's qid.vers).
 struct image_entry {
     bool           used;
     bool           exec;            // #45 audit F1: key discriminator (X-ness)
@@ -165,9 +166,11 @@ struct Burrow *image_lookup_or_create_at(struct Spoor *spoor, u64 file_offset,
     // Any other file maps privately: its own Burrow, never registered, so its
     // Spoor -- and whatever state the server keeps for that open, a netd
     // connection slot -- lives exactly as long as a mapping of it, and no
-    // later mapper is served this one's bytes. A private image is never
-    // registered, so it never answers a hit; asking before the search also
-    // keeps an unversioned open from taking a versioned entry's Burrow.
+    // later mapper is served this one's bytes. dev9p answers false too for an
+    // open that can stage, whose read serves bytes the server may yet refuse
+    // (vote M29). A private image is never registered, so it never answers a
+    // hit; asking before the search also keeps an unversioned open from taking
+    // a versioned entry's Burrow.
     if (!spoor->dev || !spoor->dev->content_versioned ||
         !spoor->dev->content_versioned(spoor)) {
         struct Burrow *own = burrow_create_file(spoor, file_offset, length, exec);

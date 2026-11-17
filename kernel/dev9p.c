@@ -120,10 +120,13 @@ bool dev9p_spoor_remote(struct Spoor *c) {
 // Vote 114: a session is versioned content once its server has proven it the
 // way the Larder already requires (the L1e latch, set by an answered
 // Twalkgetattr). Before that, and for every server that never answers one
-// (netd, ptyfs, a Haul export), a mapping is private.
+// (netd, ptyfs, a Haul export), a mapping is private. So is one made through
+// an open that can stage (vote M29): its read serves staged bytes the server
+// may yet refuse. wb_eligible is fixed before the open is published.
 static bool dev9p_content_versioned(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
-    return p && p->client && __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED);
+    return p && p->client && !p->wb_eligible &&
+           __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED);
 }
 
 void dev9p_stamp_origin(struct Spoor *root, const struct Spoor *transport) {
@@ -491,6 +494,13 @@ static void wb_flush_wait(u64 *backoff) {
     if (*backoff < WB_FLUSH_WAIT_NS_MAX) *backoff *= 2;
 }
 
+// A refused run is reported as EIO unless the server refused for space (vote
+// M28, Linux's mapping_set_error): a server's EINTR or EAGAIN would tell the
+// caller to try again, and the retry would find nothing held and return 0.
+static int wb_refusal_errno(int err) {
+    return (err == -T_E_NOSPC || err == -T_E_DQUOT) ? err : -T_E_IO;
+}
+
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     u64 backoff = WB_FLUSH_WAIT_NS_MIN;
     while (p->wb_flushers != 0) {
@@ -547,10 +557,11 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
         // next flusher; resending a landed prefix rewrites the same bytes.
         if (wb_note_cancelled(err) || thread_die_pending(current_thread()))
             return err;
-        if (p->wb_err == 0) p->wb_err = (int)(-(long)err);   // positive errno
+        int rep = wb_refusal_errno(err);
+        if (p->wb_err == 0) p->wb_err = -rep;   // positive errno
         p->wb_len   = 0;
         p->wb_known = false;
-        return err;
+        return rep;
     }
     u64 fend = off + (u64)total;
     if (p->wb_known && fend > p->wb_base) p->wb_base = fend;
@@ -572,6 +583,80 @@ static void wb_release_dead_locked(struct dev9p_priv *p) {
     p->wb_buf = NULL;
     p->wb_cap = 0;
 }
+
+// A run a closer loses (LARDER-DESIGN 12.6, vote M27) reaches no program, so it
+// is recorded against the file on its client, as Linux's errseq records a
+// writeback error against the inode: an open samples the file's record at its
+// open, and an fsync whose sample is behind the record reports it once. The
+// table's lock is a leaf: taken under no other lock, and nothing under it.
+static void wb_loss_record(struct p9_client *cl, u64 path, int err) {
+    struct p9_wb_losses *t = &cl->wb_loss;
+    spin_lock(&t->lock);
+    struct p9_wb_loss *r = NULL;
+    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
+        if (t->rec[i].seq && t->rec[i].path == path) r = &t->rec[i];
+    // Else a free slot, else the oldest record, whose loss keeps only its
+    // console line.
+    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
+        if (!t->rec[i].seq) r = &t->rec[i];
+    if (!r) {
+        r = &t->rec[0];
+        for (u32 i = 1; i < P9_WB_LOSS_MAX; i++)
+            if (t->rec[i].seq < r->seq) r = &t->rec[i];
+    }
+    r->path = path;
+    r->err  = -wb_refusal_errno(err);
+    r->seen = false;
+    __atomic_store_n(&t->seq, t->seq + 1u, __ATOMIC_RELEASE);
+    r->seq  = t->seq;
+    spin_unlock(&t->lock);
+}
+
+// An open's sample: the record's sequence once some open has been told of it,
+// the one before while none has, so an open made after a loss nobody heard is
+// told too; 0 for a file with no record. A loss racing the open may be told to
+// it, as if the open came first.
+static u64 wb_loss_sample(struct p9_client *cl, u64 path) {
+    struct p9_wb_losses *t = &cl->wb_loss;
+    if (__atomic_load_n(&t->seq, __ATOMIC_ACQUIRE) == 0) return 0;
+    u64 s = 0;
+    spin_lock(&t->lock);
+    for (u32 i = 0; i < P9_WB_LOSS_MAX; i++) {
+        const struct p9_wb_loss *r = &t->rec[i];
+        if (r->seq && r->path == path) {
+            s = r->seen ? r->seq : r->seq - 1u;
+            break;
+        }
+    }
+    spin_unlock(&t->lock);
+    return s;
+}
+
+// fsync's report: the file's record, once, when this open's sample is behind it.
+static int wb_loss_report(struct dev9p_priv *p, u64 path) {
+    struct p9_wb_losses *t = &p->client->wb_loss;
+    if (__atomic_load_n(&t->seq, __ATOMIC_ACQUIRE) == 0) return 0;
+    int rc = 0;
+    spin_lock(&t->lock);
+    for (u32 i = 0; i < P9_WB_LOSS_MAX; i++) {
+        struct p9_wb_loss *r = &t->rec[i];
+        if (!r->seq || r->path != path) continue;
+        if (r->seq > p->wb_errseq) {
+            p->wb_errseq = r->seq;
+            r->seen      = true;
+            rc           = -r->err;
+        }
+        break;
+    }
+    spin_unlock(&t->lock);
+    return rc;
+}
+
+#ifdef KERNEL_TESTS
+void dev9p_wb_test_loss(struct p9_client *cl, u64 path, int err) {
+    wb_loss_record(cl, path, err);
+}
+#endif // KERNEL_TESTS
 
 // The dev9p_write staging decision. Returns:
 //   > 0  -- staged (== count); no wire op, no invalidate (moved to flush)
@@ -899,8 +984,9 @@ void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
 
 // A test that fails with a holder registered leaks the open, and its entry
 // outlives the client it names: a fixture reinitialised at the same address
-// would find a holder. Only the predecessor's link is rewritten for a pin, which
-// may be on a returned stack; the test pin is static.
+// would find a holder. A pin is counted, and only the static test pin unlinked:
+// any other belongs to an operation still running, whose wb_unpin would find it
+// gone.
 u32 dev9p_wb_test_purge(struct p9_client *cl) {
     u32 n = 0;
     for (u32 i = 0; i < WB_REG_BUCKETS; i++) {
@@ -919,13 +1005,11 @@ u32 dev9p_wb_test_purge(struct p9_client *cl) {
         struct wb_pin **qq = &b->pins;
         while (*qq) {
             struct wb_pin *q = *qq;
-            if (q->cl != cl) { qq = &q->next; continue; }
-            *qq = q->next;
-            if (q == &g_wb_test_pin) {
-                q->next   = NULL;
-                q->linked = false;
-            }
-            n++;
+            if (q->cl == cl) n++;
+            if (q != &g_wb_test_pin || q->cl != cl) { qq = &q->next; continue; }
+            *qq       = q->next;
+            q->next   = NULL;
+            q->linked = false;
         }
         spin_unlock(&b->lock);
     }
@@ -945,6 +1029,14 @@ static u64 g_wb_leg_sleeps;
 u64 dev9p_wb_leg_sleeps(void) {
     return __atomic_load_n(&g_wb_leg_sleeps, __ATOMIC_RELAXED);
 }
+
+static void (*g_wb_leg_window)(void *);
+static void  *g_wb_leg_window_arg;
+
+void dev9p_wb_test_leg_window(void (*fn)(void *), void *arg) {
+    g_wb_leg_window_arg = arg;
+    g_wb_leg_window     = fn;
+}
 #endif // KERNEL_TESTS
 
 static int wb_leg_wait(u64 *backoff) {
@@ -952,53 +1044,53 @@ static int wb_leg_wait(u64 *backoff) {
     if (thread_die_pending(t))        return -T_E_IO;
     if (thread_caught_note_unwinds(t)) return -T_E_INTR;
     __atomic_fetch_add(&g_wb_leg_waits, 1u, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_wb_leg_sleeps, 1u, __ATOMIC_RELAXED);
     struct Rendez r;
     rendez_init(&r);
     int sr = tsleep_noteintr(&r, wb_flush_wait_never, NULL, timer_now_ns() + *backoff);
     if (*backoff < WB_FLUSH_WAIT_NS_MAX) *backoff *= 2;
     if (sr == TSLEEP_INTR)     return -T_E_IO;
     if (sr == TSLEEP_NOTEINTR) return -T_E_INTR;
+    if (sr == TSLEEP_TIMEDOUT) __atomic_fetch_add(&g_wb_leg_sleeps, 1u, __ATOMIC_RELAXED);
     return 0;
 }
 
-// Before another open's operation on a plain file: land what the file's holder
+// Before an open's operation on a plain file: land what the file's holder
 // holds. `self` is the operating open (NULL for a stat by name); the holder's own
-// operations pass through. A changing leg (a write, a truncating open, a wstat, a
-// Loom registration) passes its `pin`: it also drops the holder's anchor, so its
-// later writes go through, and it pins the file from its first look until the
-// caller's wb_unpin, after the change's wire operation and drops, so no open
-// becomes the holder in between (votes M24, M24a). An observing leg passes NULL.
+// operations land nothing here. A changing leg (a write, a truncating open, a
+// wstat, a Loom registration) passes its `pin`: it pins the file from its first
+// look until the caller's wb_unpin, after the change's wire operation and drops,
+// so no open becomes the holder in between (votes M24, M24a), the holder's own
+// change included (vote M26: its wire operation runs outside its wb_lock, and
+// its entry can leave meanwhile); another open's change also drops the holder's
+// anchor, so the holder's later writes go through. An observing leg passes NULL.
+// A strict client runs no leg: it never stages, and `loose` is fixed at attach.
 // 0: nothing was held. 1: a run was flushed -- landed, or dropped on a server
 // failure, which latched on the holder for its next write, fsync or last close
-// and is also put in *refused when the caller asks (vote M25) -- or a run on its
-// way to a closer was waited out. Negative: the operation must not go on, the
-// pin is released, and a run this leg flushed stays held for the next flusher --
+// and is also put in *refused when the caller asks (vote M25), as is a refusal
+// that retired between this leg's look and its flush -- or a run on its way to a
+// closer was waited out. Negative: the operation must not go on, the pin is
+// released, and a run this leg flushed stays held for the next flusher --
 // -T_E_INTR when this thread's caught note cancelled the flush (flush(5): never
 // applied) or ended a wait, -T_E_IO when a death reached this thread.
 static int wb_holder_flush(struct p9_client *cl, u64 path,
                            const struct dev9p_priv *self, struct wb_pin *pin,
                            int *refused) {
+    if (!cl->loose) return 0;
     bool changing = pin != NULL;
     if (!changing && __atomic_load_n(&g_wb_reg_count, __ATOMIC_ACQUIRE) == 0)
         return 0;
     struct wb_reg_bucket *b = wb_reg_bucket_of(cl, path);
     u64 backoff = WB_FLUSH_WAIT_NS_MIN;
     int waited  = 0;
+    int err0    = 0;
     struct dev9p_priv *h;
     struct Spoor *s;
     for (;;) {
         spin_lock(&b->lock);
         struct dev9p_wb_reg *e = wb_reg_find_locked(b, cl, path);
         h = e ? e->holder : NULL;
-        if (h && h == self) {
-            // The holder's own operation: its wb_lock orders it, and no pin.
-            if (pin && pin->linked) wb_pin_unlink_locked(b, pin);
-            spin_unlock(&b->lock);
-            return waited;
-        }
         if (pin && !pin->linked) wb_pin_link_locked(b, pin, cl, path);
-        if (!e) {
+        if (!e || (h && h == self)) {
             spin_unlock(&b->lock);
             return waited;
         }
@@ -1006,6 +1098,7 @@ static int wb_holder_flush(struct p9_client *cl, u64 path,
         if (h) {
             spin_lock(&h->wb_lock);
             bool held = h->wb_len || h->wb_flushers;
+            err0 = h->wb_err;
             if (!held && changing && h->wb_known) {
                 h->wb_known = false;
                 wb_release_dead_locked(h);
@@ -1030,9 +1123,17 @@ static int wb_holder_flush(struct p9_client *cl, u64 path,
         waited = 1;
     }
 
+#ifdef KERNEL_TESTS
+    void (*window)(void *) = g_wb_leg_window;
+    if (window) {
+        g_wb_leg_window = NULL;
+        window(g_wb_leg_window_arg);
+    }
+#endif
     spin_lock(&h->wb_lock);
     int rc = 0;
     if (h->wb_len || h->wb_flushers) rc = wb_flush_locked(h, path);
+    else if (h->wb_err && !err0)     rc = -(h->wb_err);   // refused since the look
     int out = 1;
     if (rc != 0 && wb_note_cancelled(rc))                  out = -T_E_INTR;
     else if (rc != 0 && thread_die_pending(current_thread())) out = -T_E_IO;
@@ -1168,7 +1269,8 @@ int dev9p_loom_register(struct Spoor *c) {
     bool plain = c->qid.type == 0;
     // A ring's ops pass no holder leg (LARDER-DESIGN 12.6), so registering an
     // open that is not the file's holder lands the holder's bytes and stops it
-    // staging.
+    // staging; every registration pins the file until its drops are done, the
+    // holder's own included (vote M26).
     struct wb_pin pin = { .linked = false };
     if (plain) {
         int lr = wb_holder_flush(p->client, c->qid.path, p, &pin, NULL);
@@ -2081,6 +2183,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     }
     np->lock_gen     = cogen;
     np->lock_ident   = coident;
+    np->wb_errseq    = wb_loss_sample(client, leaf->qid_path);   // vote M27
     co->aux      = np;
     co->qid.path = leaf->qid_path;
     co->qid.vers = leaf->qid_vers;
@@ -2139,6 +2242,12 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     u32 iounit;
     int rc = p9_client_lopen(p->client, p->fid, flags, &qid, &iounit);
     if (rc != 0) {
+        // A failed truncating Tlopen may have truncated: drop as one that
+        // answered does, under the pin.
+        if (omode & 0x10) {
+            larder_attr_invalidate(&p->client->larder, c->qid.path);
+            larder_page_invalidate(&p->client->larder, c->qid.path);
+        }
         wb_unpin(&pin);
         p->open_errno = rc;
         return NULL;
@@ -2176,6 +2285,8 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
             (void)wb_register(p, c, &pin);
     }
     wb_unpin(&pin);                  // a no-op once the registration took it
+    // The closer losses of the file this open has not been told of (vote M27).
+    p->wb_errseq = wb_loss_sample(p->client, c->qid.path);
     c->flag |= COPEN;
     c->mode  = omode;
     c->offset = 0;
@@ -2345,6 +2456,7 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         c->qid.type == 0 &&
         !(omode & SYS_WALK_OPEN_OAPPEND))
         (void)wb_register(p, c, NULL);
+    p->wb_errseq = wb_loss_sample(p->client, c->qid.path);   // vote M27
     return c;
 }
 
@@ -2359,6 +2471,8 @@ struct dev9p_close_job {
     u32                 len;
     u64                 off;
     u64                 qid_path;
+    struct p9_client   *cl;
+    int                 err;     // the last run's answer
     struct dev9p_wb_reg reg;
 };
 
@@ -2370,11 +2484,16 @@ static int dev9p_close_job_run(struct p9_close_job *job, struct p9_client *c,
     // after the close returned, unordered with the file's later writers.
     larder_attr_invalidate(&c->larder, j->qid_path);
     larder_page_invalidate(&c->larder, j->qid_path);
+    j->err = err;
     return err;
 }
 
 static void dev9p_close_job_release(struct p9_close_job *job) {
     struct dev9p_close_job *j = (struct dev9p_close_job *)job;
+    // A run the closer's last try lost reached no program: the file's other
+    // opens hear it at their next fsync (vote M27), recorded before they stop
+    // waiting for it.
+    if (j->err) wb_loss_record(j->cl, j->qid_path, j->err);
     // The run has landed, or is lost and was reported: the client's other opens
     // stop waiting for it (12.6).
     wb_reg_leave(&j->reg);
@@ -2425,24 +2544,30 @@ static void wb_close_swap(struct dev9p_priv *p, struct dev9p_close_job *j,
 // Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
 // negative errno when it cannot -- the priv owns no fid or no session
 // reference (a test's bare client), or no memory. Either way p has left the
-// holder registry; on success the job stands in its place.
+// holder registry, a run it could not hand on recorded as lost first (vote
+// M27); on success the job stands in its place.
 static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
     if (!p->fid_owned || !p->attached_owner) {
+        wb_loss_record(p->client, qid_path, -T_E_IO);
         wb_unregister(p);
         return -T_E_IO;
     }
     struct dev9p_close_job *j = kmalloc(sizeof(*j), 0);
     if (!j) {
+        wb_loss_record(p->client, qid_path, -T_E_NOMEM);
         wb_unregister(p);
         return -T_E_NOMEM;
     }
     j->job.run     = dev9p_close_job_run;
     j->job.release = dev9p_close_job_release;
     j->qid_path    = qid_path;
+    j->cl          = p->client;
+    j->err         = 0;
     wb_close_swap(p, j, qid_path);
     if (p9_attached_defer_close(p->attached_owner, p->fid, &j->job) != 0) {
         // Lost, and reported by the caller: the buffer goes back to p, whose
         // close frees it.
+        wb_loss_record(p->client, qid_path, -T_E_NOMEM);
         wb_reg_leave(&j->reg);
         p->wb_buf = j->buf;
         p->wb_len = j->len;
@@ -2822,8 +2947,10 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
     u64 offset = (off < 0) ? 0 : (u64)off;
     // LARDER-DESIGN 12.6: a write through an open that is not the file's holder
-    // lands the holder's older bytes first and stops it staging, and pins the
-    // file until the write has landed and its drops are done.
+    // lands the holder's older bytes first and stops it staging. Every write
+    // pins the file until it has landed and its drops are done, the holder's own
+    // included (vote M26); one the holder stages holds the pin only while it
+    // stages.
     struct wb_pin pin = { .linked = false };
     if (c->qid.type == 0) {
         int lr = wb_holder_flush(p->client, c->qid.path, p, &pin, NULL);
@@ -2961,6 +3088,10 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
         int lr = wb_holder_flush(p->client, c->qid.path, p, NULL, &refused);
         if (lr < 0) return lr;
         if (refused != 0) return refused;
+        // A run of the file a closer lost since this open was last told of one
+        // (vote M27).
+        int lost = wb_loss_report(p, c->qid.path);
+        if (lost != 0) return lost;
     }
     // FID-LIFECYCLE cached-open: a read-only open reaches here (fsync takes
     // either right, vote M22). Nothing is staged and no fid is opened, but the
@@ -3114,6 +3245,9 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     bool gone = p->wb_len == 0 && p->wb_flushers == 0;
     spin_unlock(&p->wb_lock);
     if (!j->release_locks) return rc;
+    // Past the last close nobody reads the latch: a refused run is recorded for
+    // the file's other opens (vote M27) before this one leaves.
+    if (rc != 0) wb_loss_record(p->client, c->qid.path, rc);
     // Past the last close nothing stages again, so with its run gone the open
     // leaves the registry now, not at its last reference (12.6): another open
     // may hold the file meanwhile. This job's reference keeps p alive.
@@ -3772,7 +3906,8 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     }
     // LARDER-DESIGN 12.6: a wstat through an open that is not the file's holder
     // (a truncate or a chmod by name among them) lands the holder's older bytes
-    // first and stops it staging.
+    // first and stops it staging. Every wstat pins the file until its Tsetattr
+    // has answered and its drops are done, the holder's own included (vote M26).
     struct wb_pin pin = { .linked = false };
     if (c->qid.type == 0) {
         int lr = wb_holder_flush(p->client, c->qid.path, p, &pin, NULL);
@@ -3824,7 +3959,15 @@ static int dev9p_wstat_on(struct dev9p_priv *p, struct Spoor *c, u32 valid, u32 
         sa.mtime_nsec = (u64)times[1].tv_nsec;
     }
     int rc = p9_client_setattr(p->client, lock_fid(p), &sa);
-    if (rc != 0) { p->fid_suspect = true; return dev9p_wire_errno(rc); }
+    if (rc != 0) {
+        // A failed Tsetattr may have applied (a reply this thread never read),
+        // as a failed write may have landed: drop what it would have staled.
+        p->fid_suspect = true;
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        if (valid & T_WSTAT_SIZE)
+            larder_page_invalidate(&p->client->larder, c->qid.path);
+        return dev9p_wire_errno(rc);
+    }
     // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown changed
     // mode/uid/gid; a time change the times; a T_WSTAT_SIZE truncate changed
     // CONTENT + size. The attr drop covers every axis. CRITICAL -- the base

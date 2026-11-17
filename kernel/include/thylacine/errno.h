@@ -407,6 +407,12 @@
 #define T_E_ROFS       30
 #define T_E_NAMETOOLONG 36
 
+// Disk quota exceeded: a server's answer, crossing by value before this name.
+// Named with the operator's signoff (vote M28, 2026-11-17), minting no new ABI
+// value, because a refused write-behind run reports it unchanged, as ENOSPC.
+// POSIX: EDQUOT.
+#define T_E_DQUOT      122
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -435,6 +441,7 @@ _Static_assert(T_E_XDEV           == 18,  "T_E_XDEV ABI pin (POSIX EXDEV)");
 _Static_assert(T_E_FBIG           == 27,  "T_E_FBIG ABI pin (POSIX EFBIG)");
 _Static_assert(T_E_ROFS           == 30,  "T_E_ROFS ABI pin (POSIX EROFS)");
 _Static_assert(T_E_NAMETOOLONG    == 36,  "T_E_NAMETOOLONG ABI pin (POSIX ENAMETOOLONG)");
+_Static_assert(T_E_DQUOT          == 122, "T_E_DQUOT ABI pin (POSIX EDQUOT)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
 _Static_assert(T_E_NOEXEC    == 8,   "T_E_NOEXEC ABI pin (POSIX ENOEXEC)");
