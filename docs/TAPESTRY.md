@@ -883,10 +883,13 @@ records it.
 from production builds** -- operator vote 136, 2026-11-17, #880: a conn is
 admitted only if its live peer is the console renderer, or is in the session
 that owns the console with a user principal -- AURORA-CONFIG.md 3.3's cfg-3
-bullet has the rule; the `TEST_LEVERS=n` production build compiles the verbs
-out to E_OPNOTSUPP, proven by content in `tools/check-production.sh`). The
-same gate covers `tick` and the `probe-screen` pixel oracle, which reads the
-composed screen:
+bullet has the rule and who it admits on each image; the `TEST_LEVERS=n`
+production build compiles the verbs out, so an admitted caller gets
+E_OPNOTSUPP, proven by content in build.sh and `tools/check-production.sh`;
+the mode ends when the conn that turned it on closes). The same gate covers
+`tick` and the `probe-screen` pixel oracle, which reads a texel of the
+composed screen and says it on tapestryd's console (it returns nothing to the
+caller):
 
 - freezes the FRAME clock (ticks only on `tick` ctl writes — the test drives
   time), suppresses cursor blink + animation timers tapestryd owns, and
@@ -1215,8 +1218,8 @@ registered-buffer intent with zero extra machinery. (g) **Determinism
 mode** (§18.6 + F13 + F15) behind the `test-mode` cargo feature
 (default-on for the dev tree; the production build strips it --
 `TEST_LEVERS=n` builds the crate `--no-default-features` -- and every verb
-answers E_OPNOTSUPP, the #880 class; in the images that keep it, the verbs
-are gated on the renderer-or-console-owner axis of 18.6, vote 136): `test-mode on` freezes the FRAME clock (the serve loop stops
+answers E_OPNOTSUPP to a caller the gate admits, the #880 class; the gate
+runs in every image, on the renderer-or-console-owner axis of 18.6, vote 136): `test-mode on` freezes the FRAME clock (the serve loop stops
 wall-clock ticks — queued FRAME events drain normally, which IS the
 F15 transition discipline for a synchronous single-threaded engine;
 the anchor re-seats on unfreeze so no backlog fires), `tick` drives

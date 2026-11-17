@@ -703,7 +703,21 @@ gates: admitted with the mode off it answers E_INVAL, refused it answers E_PERM.
 The scenario waits for two lines from two processes: tapestryd's refusal line,
 which shows which gate fired, and the child's verdict line. They can arrive in
 either order, so one regex alternation collects both, because two separate
-arms could consume one of them unseen.
+arms could consume one of them unseen. The arm classifies each match on
+`expect_out(0,string)`, the whole match, never on a numbered group: expect 5.45
+leaves a group that took no part in a match at its previous value, so a test
+such as `expect_out(1,string) ne ""` stays true after any earlier regex set
+group 1, and the first version of this leg could therefore never see its
+verdict line (round 42, F1). The leg was simulated both ways before it ran: the
+whole-match loop passes with either line first or both in one burst and fails
+with the child's own reason, and the group-based loop timed out in all four.
+
+After `hold OK` the battery checks that determinism mode ends with the conn
+that turned it on: a second `/srv/tapestry` conn writes `test-mode on`, the ctl
+read must say so, the conn closes, and within 3 s the ctl read must say
+`test-mode off`. The scenario waits for `battery: test-mode ends with the conn
+that turned it on`; a battery FAIL in that window fails it with the guest's
+reason.
 
 ## Session media and backend verification
 

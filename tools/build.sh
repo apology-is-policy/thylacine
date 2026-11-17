@@ -536,6 +536,53 @@ PY
     chmod 0755 "$1"
 }
 
+# TEST_LEVERS (BUILD-CONFIG-DESIGN.md 4.2, vote 136, #880): the display stack's
+# test levers live behind each crate's `test-mode` feature, and each binary says
+# TEST_LEVER_LINE at startup from code under that feature.
+TEST_LEVER_BINS=(tapestryd halcyond lictor)
+TEST_LEVER_LINE="test levers compiled in"
+
+test_levers_resolved() {
+    case "${THYLACINE_TEST_LEVERS:-1}" in
+        1|0) echo "${THYLACINE_TEST_LEVERS:-1}" ;;
+        *) echo "THYLACINE_TEST_LEVERS must be 0 or 1" >&2; return 1 ;;
+    esac
+}
+
+# test_levers_verdict <dir> <where> <require>: judge the lever binaries in <dir>
+# by content, both ways -- a stripped build that still carries the line did not
+# strip, and a default build that lacks it would make the stripped build's
+# absence prove nothing. <require>=1: a missing binary fails (it was just
+# built); 0: a missing binary is skipped (an image may stage none).
+test_levers_verdict() {
+    local dir=$1 where=$2 require=$3 levers lb lf
+    levers=$(test_levers_resolved) || return 1
+    for lb in "${TEST_LEVER_BINS[@]}"; do
+        lf="$dir/$lb"
+        if [[ ! -f "$lf" ]]; then
+            if (( require )); then echo "TEST_LEVERS: $lf was not built" >&2; return 1; fi
+            continue
+        fi
+        if grep -a -q -F "$TEST_LEVER_LINE" "$lf"; then
+            if (( levers == 0 )); then
+                echo "TEST_LEVERS=n: $lb ($where) still carries '$TEST_LEVER_LINE' -- the strip did not take" >&2; return 1
+            fi
+        elif (( levers == 1 )); then
+            echo "TEST_LEVERS=y: $lb ($where) lacks '$TEST_LEVER_LINE' -- the production check would prove nothing" >&2; return 1
+        fi
+    done
+}
+
+# test_mode_packages <cargo selection + feature args...>: the packages cargo's
+# resolver turns `test-mode` on for in that one invocation, space-separated.
+test_mode_packages() {
+    local tree
+    tree=$( cd "$REPO_ROOT/usr" && cargo tree --target "$USR_RS_TARGET" "$@" -e normal,build \
+                --prefix none -f '{p}|{f}' ) || { echo "TEST_LEVERS: cargo tree failed ($*)" >&2; return 1; }
+    awk -F'|' '{ n = split($2, f, ","); for (i = 1; i <= n; i++) if (f[i] == "test-mode") { split($1, p, " "); print p[1] } }' \
+        <<<"$tree" | sort -u | tr '\n' ' '
+}
+
 build_ramfs() {
     local ramfs_src="$BUILD_DIR/ramfs-src"
     local ramfs_out="$BUILD_DIR/ramfs.cpio"
@@ -678,6 +725,9 @@ EOF
             chmod 0755 "$ramfs_bin/$bin"
         fi
     done
+    # At the consumer too: `build.sh ramfs`, or a host that skipped the Rust
+    # build, stages whatever an earlier build left in $rs_release.
+    test_levers_verdict "$ramfs_bin" "staged in the ramfs; rebuild userspace under this config" 0 || exit 1
 
     # Warp V-3b-3a (WARP-V3-DESIGN section 0.14): the Mesa Venus vn_renderer
     # backend loader-less ICD proof. A pouch/musl static ET_EXEC cross-built by
@@ -1374,61 +1424,67 @@ build_userspace() {
     rs_targets=$(rustup target list --installed 2>/dev/null || true)
     if grep -q "^$USR_RS_TARGET$" <<<"$rs_targets"; then
         echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
-        local hi_features=()
+        # TEST_LEVERS=n (BUILD-CONFIG-DESIGN.md 4.2): the workspace build
+        # leaves out the lever crates, which take test-mode by default, and
+        # one stripped invocation builds them without it. Leaving them out
+        # matters for the crates that stay: resolver 2 unifies a shared
+        # dependency's features across one invocation, so building lictor
+        # (or tapestryd, whose test-mode turns lictor's on) with its defaults
+        # would hand corvus and caps-probe a test-mode lictor library that no
+        # by-content check of theirs can see.
+        local levers lb
+        levers=$(test_levers_resolved) || return 1
+        local ws_sel=() strip_sel=() hi_features=()
+        local strip_features=tapestryd/guest,halcyond/guest,lictor/backend
+        if (( levers == 0 )); then
+            ws_sel=(--workspace)
+            for lb in "${TEST_LEVER_BINS[@]}"; do ws_sel+=(--exclude "$lb"); strip_sel+=(-p "$lb"); done
+        fi
         case "${THYLACINE_INTERACTION_QUALIFICATION:-0}" in
             0) ;;
-            1) hi_features=(--features halcyond/interaction-qualification)
+            1) if (( levers == 1 )); then hi_features=(--features halcyond/interaction-qualification)
+               else strip_features+=,halcyond/interaction-qualification; fi
                echo "==> Halcyon interaction qualification ENABLED (not a release default)" ;;
             *) echo "THYLACINE_INTERACTION_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
         esac
         case "${THYLACINE_READINESS_QUALIFICATION:-0}" in
             0) ;;
-            1) hi_features+=(--features kaua-term-probe/readiness-qualification)
+            1) if (( levers == 0 )); then
+                   echo "THYLACINE_READINESS_QUALIFICATION=1 cannot combine with THYLACINE_TEST_LEVERS=0: the readiness probe puts libthyla-rs's test hooks in every binary" >&2
+                   return 1
+               fi
+               hi_features+=(--features kaua-term-probe/readiness-qualification)
                echo "==> Native readiness qualification probe ENABLED (libthyla-rs test hooks in every binary; not a release default)" ;;
             *) echo "THYLACINE_READINESS_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
         esac
-        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${hi_features[@]+"${hi_features[@]}"} )
-        # TEST_LEVERS (BUILD-CONFIG-DESIGN.md 4.2, vote 136, #880): the display
-        # stack's test levers live behind each crate's `test-mode` feature,
-        # which is a DEFAULT feature, so the workspace build above always has
-        # them. n rebuilds the three crates without default features; one
-        # invocation, so lictor's library is resolved without test-mode for
-        # tapestryd too (no workspace member takes these crates with default
-        # features -- caps-probe and corvus take lictor default-features =
-        # false).
-        local lever_bins=(tapestryd halcyond lictor) levers
-        case "${THYLACINE_TEST_LEVERS:-1}" in
-            1) levers=1 ;;
-            0) levers=0
-               local strip_features=tapestryd/guest,halcyond/guest,lictor/backend
-               [[ "${THYLACINE_INTERACTION_QUALIFICATION:-0}" == 1 ]] && strip_features+=,halcyond/interaction-qualification
-               echo "==> Stripping the test levers (TEST_LEVERS=n): ${lever_bins[*]} without test-mode"
-               ( cd "$REPO_ROOT/usr" && cargo build --release $verbose -p tapestryd -p halcyond -p lictor \
-                     --no-default-features --features "$strip_features" ) || return 1 ;;
-            *) echo "THYLACINE_TEST_LEVERS must be 0 or 1" >&2; return 1 ;;
-        esac
-        # The verdict, by content, both ways: each crate says this line at
-        # startup from code under its test-mode feature. A stripped build that
-        # still carries it did not strip; a default build that lacks it would
-        # make the stripped build's absence prove nothing.
-        local lever_line="test levers compiled in" lb lf
-        for lb in "${lever_bins[@]}"; do
-            lf="$USR_RS_BUILD/$USR_RS_TARGET/release/$lb"
-            if [[ ! -f "$lf" ]]; then
-                echo "TEST_LEVERS: $lf was not built" >&2; return 1
+        # Cargo's own resolver says which crates get test-mode, both ways: none
+        # in either stripped invocation, and every lever crate in the default
+        # build (else this check could not have fired).
+        local tm_pkgs
+        tm_pkgs=" $(test_mode_packages ${ws_sel[@]+"${ws_sel[@]}"} ${hi_features[@]+"${hi_features[@]}"})" || return 1
+        if (( levers == 0 )); then
+            tm_pkgs+="$(test_mode_packages "${strip_sel[@]}" --no-default-features --features "$strip_features")" || return 1
+            if [[ -n "${tm_pkgs// /}" ]]; then
+                echo "TEST_LEVERS=n: cargo resolves test-mode on for:$tm_pkgs" >&2; return 1
             fi
-            if grep -a -q -F "$lever_line" "$lf"; then
-                if (( levers == 0 )); then
-                    echo "TEST_LEVERS=n: $lb still carries '$lever_line' -- the strip did not take" >&2; return 1
-                fi
-            elif (( levers == 1 )); then
-                echo "TEST_LEVERS=y: $lb lacks '$lever_line' -- the production check would prove nothing" >&2; return 1
-            fi
-        done
-        if (( levers == 1 )); then
-            ledger "test levers: COMPILED IN (TEST_LEVERS=y; ${lever_bins[*]} each carry '$lever_line')"
         else
-            ledger "test levers: STRIPPED (TEST_LEVERS=n; none of ${lever_bins[*]} carries '$lever_line')"
+            for lb in "${TEST_LEVER_BINS[@]}"; do
+                if [[ "$tm_pkgs " != *" $lb "* ]]; then
+                    echo "TEST_LEVERS=y: cargo does not resolve test-mode on for $lb (got:$tm_pkgs) -- the TEST_LEVERS=n check would prove nothing" >&2; return 1
+                fi
+            done
+        fi
+        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${ws_sel[@]+"${ws_sel[@]}"} ${hi_features[@]+"${hi_features[@]}"} )
+        if (( levers == 0 )); then
+            echo "==> Stripping the test levers (TEST_LEVERS=n): ${TEST_LEVER_BINS[*]} without test-mode"
+            ( cd "$REPO_ROOT/usr" && cargo build --release $verbose "${strip_sel[@]}" \
+                  --no-default-features --features "$strip_features" ) || return 1
+        fi
+        test_levers_verdict "$USR_RS_BUILD/$USR_RS_TARGET/release" "built" 1 || return 1
+        if (( levers == 1 )); then
+            ledger "test levers: COMPILED IN (TEST_LEVERS=y; ${TEST_LEVER_BINS[*]} each carry '$TEST_LEVER_LINE'; cargo resolves test-mode on for each)"
+        else
+            ledger "test levers: STRIPPED (TEST_LEVERS=n; none of ${TEST_LEVER_BINS[*]} carries '$TEST_LEVER_LINE'; cargo resolves test-mode on for no crate)"
         fi
         echo "==> Userspace Rust built under $USR_RS_BUILD"
         ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true

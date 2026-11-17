@@ -935,31 +935,55 @@ any edit.
 `peer_may_drive_determinism` holds: the live peer is the console
 renderer, or its session owns the console (`SRV_PEER_FLAG_CONSOLE_OWNER`)
 and its principal is a user principal. `test-mode on` stalls every
-surface's FRAME clock and `probe-screen` reads the composed screen, so
-the person at the keyboard is the narrowest party that still includes
-the in-guest battery, which runs from the logged-in shell. The flag is
-keyed on the session, which is why the principal half exists: it
-refuses a SYSTEM or `none` process inside the console session. No
-user-reachable path puts one there today (spawning as `none` needs
-CAP_SET_IDENTITY, and spawn cannot stamp SYSTEM at all), so that half
-is reviewed, not witnessed: no runtime leg constructs it. The
-peer is read fresh per write, like `peer_is_renderer`, and the check
-runs before any verb arm, so a refused caller sees E_PERM in every
-build and never learns the build shape from the stripped build's
-E_OPNOTSUPP. The first refusal on a conn says `tapestryd: determinism
-verb refused: conn N (principal P) is neither the console renderer nor
-the console owner`, once per conn (`determinism_refusal_said`), so a
-refused client cannot flood the console. The witness is
+surface's FRAME clock; `probe-screen` reads a texel of the composed
+screen (a GPU readback on a 3D screen) and says it on tapestryd's
+console, up to 64 per tick, returning nothing to the caller. So the
+person at the keyboard is the narrowest party that still includes the
+in-guest battery. Who that is depends on the image: on the shell (`ut`)
+image login makes the user's shell the console owner, and the battery
+runs from it; on the Halcyon session image no session owns the console
+during a graphical session (login grants ownership only to `ut`), so
+there only the renderer is admitted. The flag is keyed on the session,
+which is why the principal half exists: it refuses a SYSTEM or `none`
+process inside the console session. No user-reachable path puts one
+there today (spawning as `none` needs CAP_SET_IDENTITY, and spawn
+cannot stamp SYSTEM at all), so that half is reviewed, not witnessed:
+no runtime leg or mutant constructs it. The peer is read fresh per
+write, like `peer_is_renderer`, and the check runs before any verb arm,
+so a refused caller sees E_PERM in every build and the stripped build's
+E_OPNOTSUPP reaches only admitted callers. That does not hide the build
+shape, and is not meant to: the ctl read prints `test-mode on|off` only
+when the feature is compiled in, and `release` -- the only ungated
+write verb besides the reads, matched as the whole word or `release
+<surface>` (`is_release_ctl`), never as a prefix -- answers E_OPNOTSUPP
+in a stripped build. A refusal says `tapestryd: determinism verb
+refused: conn N (principal P) is neither the console renderer nor the
+console owner` once per conn (`determinism_refusal_said`) and at most
+`DETERMINISM_REFUSALS_SAID` (8) times Comp-wide; the next one says that
+later refusals go unsaid, and then the console stays quiet, so a client
+that reconnects in a loop cannot flood it. The witness is
 tapestry-battery's `--not-console-owner` child in `ls-gfx-panes`: the
 probe is admitted, the child calls `setsid`, and the same conn's probe,
 `test-mode on` and `tick` are refused while the ctl read stays at
 `test-mode off`.
 
+**Determinism mode ends with the conn that turned it on.**
+`test-mode on` records its conn in `Comp.test_mode_conn`; when that conn
+retires, `retire_conn` runs `test_mode_end` (every hold released, the
+clock running again, the owner cleared) and says `tapestryd: test-mode
+off: conn N that turned it on closed`. Before this, a battery that died
+with the mode on left every surface frozen until an admitted conn said
+`test-mode off` -- and on the Halcyon image only the renderer is
+admitted, and it never does. A later `test-mode on` from another
+admitted conn moves the ownership to it. The witness is the battery's
+test-mode owner leg: a second conn turns the mode on and closes, and
+the ctl read must say `test-mode off` within 3 s.
+
 A build with the `test-mode` feature says `tapestryd: test levers
 compiled in` just after `serving`. build.sh's `TEST_LEVERS` verdict keys
-on that text in the binary: present in every image but production,
-absent from the production build, which compiles the feature out
-([[sub-substrate-build]]).
+on that text in the binary, both as built and as staged into the ramfs:
+present in every image but production, absent from the production
+build, which compiles the feature out ([[sub-substrate-build]]).
 
 ## Error paths
 

@@ -170,15 +170,29 @@ of tapestryd (the determinism verbs and the `probe-screen` pixel oracle),
 halcyond (the `#wedge` verb rule) and lictor (the broker's test requests).
 `y` is the default and every preset but production keeps it, because the gate
 scenarios drive those levers. `n` -- `configs/production.config` -- makes
-build.sh build those three crates `--no-default-features` with only their
-non-test features, after the workspace build. Before this symbol the levers
-were documented as "stripped for production" while every build, production
-included, compiled them in. `tools/check-production.sh` proves the strip BY
-CONTENT: each crate announces `test levers compiled in` at startup from code
-under the feature, so a production binary must not contain that string, and
-the same check finds it in the default shape (the positive control). The strip
-is the second layer: tapestryd also gates the determinism verbs at runtime in
-every image (TAPESTRY.md 18.6).
+build.sh leave those three crates out of the workspace build
+(`--workspace --exclude ...`) and build them in one more invocation,
+`--no-default-features` with only their non-test features. Leaving them out
+of the workspace build matters for the crates that stay: Cargo's resolver 2
+unifies a shared dependency's features across one invocation, so building
+lictor (or tapestryd, whose `test-mode` turns lictor's on) with its defaults
+would hand corvus and caps-probe, which link lictor's library, a test-mode
+lictor. build.sh therefore asks Cargo's own resolver (`cargo tree -e
+features`) which crates get `test-mode` in each invocation: none under `n`,
+and every lever crate under `y` (the positive control). `READINESS_QUAL=y`
+is refused with `TEST_LEVERS=n`: the readiness probe puts libthyla-rs's test
+hooks in every binary, the opposite of what `n` promises. Before this symbol
+the levers were documented as "stripped for production" while every build,
+production included, compiled them in. The strip is also proven BY CONTENT:
+each lever crate announces `test levers compiled in` at startup from code
+under the feature, so a stripped binary must not contain that string, and a
+default one must (the positive control). build.sh checks it twice -- on the
+binaries it just built, and in `build_ramfs` on the binaries it stages, so
+`build.sh ramfs` or a host that skipped the Rust build cannot stage an
+earlier build's levers into a `TEST_LEVERS=n` image -- and
+`tools/check-production.sh --all` requires the build's `STRIPPED` ledger
+line. The strip is the second layer: tapestryd also gates the determinism
+verbs at runtime in every image (TAPESTRY.md 18.6).
 
 **The display group carries two decisions worth stating, because both look
 like arbitrary choices and are not.**
