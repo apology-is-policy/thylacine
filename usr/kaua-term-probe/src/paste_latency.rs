@@ -18,7 +18,7 @@ use core::time::Duration;
 use libthyla_rs::{fs::File, io::Read, procs, *};
 
 const SECS_MAX: u64 = 600;
-const SETTLE_SECS: u64 = 2;
+const SETTLE_SECS: u64 = 3;
 const FILL_MAX: usize = 1 << 20;
 
 fn number(n: usize, what: &'static str) -> Result<u64, &'static str> {
@@ -115,7 +115,8 @@ fn wakes(leg: &str) -> Result<(), &'static str> {
     }
     let me = unsafe { t_getpid() } as u32;
     // The keys that ran this command opened a burst in halcyond's test builds; it
-    // ends (and says its line) inside this pause, not inside the window.
+    // ends (and says its line) inside this pause, not inside the window: a burst
+    // outlasts its last output by 2 s (latency.rs OUTPUT_QUIET_NS).
     let _ = time::sleep(Duration::from_secs(SETTLE_SECS));
     let (before, _) = snapshot(me)?;
     if before.is_empty() {

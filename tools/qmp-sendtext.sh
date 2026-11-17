@@ -137,8 +137,13 @@ def send_events(events):
 
 
 def chord(codes, hold_ms=0):
-    # Whatever went down comes up, even when a later qcode is refused.
+    # Whatever went down comes up, even when a later qcode is refused. A
+    # release that fails fails the helper, unless an earlier failure is
+    # already on its way out; with no session (the reconnect after a hold
+    # failed) there is nothing to release on, so the held keys are named.
     pressed = []
+    connected = True
+    failure = None
     try:
         for q in codes:
             key(q, True)
@@ -146,15 +151,29 @@ def chord(codes, hold_ms=0):
             time.sleep(0.03)
         if hold_ms:
             s.close()
+            connected = False
             time.sleep(hold_ms / 1000.0)
             connect()
+            connected = True
+    except BaseException as e:
+        failure = e
+        raise
     finally:
-        for q in reversed(pressed):
-            try:
-                key(q, False)
-            except BaseException:
-                pass
-            time.sleep(0.03)
+        released = None
+        if not connected:
+            if pressed:
+                print("qmp-sendtext: no QMP session to release " + " ".join(pressed) + " on",
+                      file=sys.stderr)
+        else:
+            for q in reversed(pressed):
+                try:
+                    key(q, False)
+                except Exception as e:
+                    if released is None:
+                        released = e
+                time.sleep(0.03)
+        if released is not None and failure is None:
+            raise released
 
 
 connect()

@@ -444,5 +444,6 @@ The client's rules, each from a rule above it:
   on the paste image and on a control image without the interaction work, for a before and an
   after, and fails only on a record that is missing or does not add up. Its runs found an idle
   halcyond dispatched about 100-125 times a second over its two threads in both images: the UI
-  thread on tapestryd's frame ticks, which it drops, and the service worker for a cause not yet
-  observed (OPEN-BUGS 2026-11-17T11:10Z); the numbers are owed by a run on the round-45 close.
+  thread on tapestryd's frame ticks, which it drops, and the service worker on its control
+  channel, which the session loop pokes on most passes (OPEN-BUGS 2026-11-17T11:10Z); the numbers
+  are owed by the run that lands this record.

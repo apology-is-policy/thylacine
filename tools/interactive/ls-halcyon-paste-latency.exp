@@ -24,11 +24,12 @@
 # missing or does not add up: no line for a burst, a key count that is not the keys
 # typed, a key halcyond's queue refused, a tile still owed an answer or still holding a
 # typed key, no output after the last key, a burst cut at its span, samples past the cap,
-# halcyond's counters unreadable, fewer than two idle tallies, an image that is not the
-# one the run was told it is, a paste that failed or landed after its burst, and (ut) a
-# line that is not every typed key plus the whole paste. Keys lost below halcyond's queue
-# are caught for ut only; a key that rides behind an answered one is not checked one by
-# one, and settle covers the backlog it makes.
+# halcyond's counters unreadable, fewer than two idle tallies said on the loop's own
+# count or clock, an image that is not the one the run was told it is, a paste into Nora
+# that failed or landed after its burst, and (ut) a line that is not every typed key plus
+# the whole paste. Keys lost below halcyond's queue are caught on ut's paste line only
+# (the ut typing line is cleared, never run); a key that rides behind an answered one is
+# not checked one by one, and settle covers the backlog it makes.
 # Both images run the baselines (an idle shell, typing into ut, typing into Nora, Nora
 # idle beside a shell). The paste image adds a 24,399-byte paste into Nora (400 lines of
 # 60) and a 4,000-byte one into ut, each with forty keys typed straight after it in one
@@ -48,11 +49,17 @@ proc record {msg} {
     lc_step $msg
     send_user "\nLS-CI RECORD: $msg\n"
 }
-# A thread's wake tally; the session loop's are counted.
-set idle_said 0
+# A thread's wake tally. The session loop's lines said on its own poll count or clock
+# are counted; one said because a burst ended its stretch proves nothing about either.
+set idle_timed 0
 proc idle {line} {
     record "IDLE $line"
-    if {[string match "halcyond: idle wakes:*" $line]} { incr ::idle_said }
+    if {[regexp {^halcyond: idle wakes: .* said=(?:time|polls)$} $line]} { incr ::idle_timed }
+}
+# The key count of a burst line, or -1.
+proc burst_keys {m} {
+    if {[regexp {^halcyond: latency: keys=([0-9]+) } $m -> k]} { return $k }
+    return -1
 }
 # The seconds left before `until`; past it the wait has failed with `what`.
 proc left {until what} {
@@ -82,23 +89,67 @@ proc chord_type {c text} {
     global repo qmp
     if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -c $c $text} e]} { lc_fail $e }
 }
-proc verdict {leg} {
+# The probe's verdict on `leg`. With `typed` set, the burst that typed the command (at
+# least `typed` keys) is recorded too, waited for after the verdict if it had not ended
+# by then, so the next burst cannot merge with it.
+proc verdict {leg {typed 0}} {
     global lc_cmd_timeout
     set until [expr {[clock seconds] + $lc_cmd_timeout}]
+    set lat [expr {$typed ? {halcyond: latency: [^\r\n]*over=[0-9]+|} : {}}]
+    set seen 0
     while 1 {
         set m ""
         lc_within [left $until "$leg: no verdict"] {
-            -re "(paste-latency: $leg PASS|paste-latency: $leg: \[^\r\n\]+|paste-latency: FAIL $leg -- \[^\r\n\]+|halcyond: (?:idle|owner) wakes: polls=\[^\r\n\]+)\[\r\n\]" {
+            -re "(${lat}paste-latency: $leg PASS|paste-latency: $leg: \[^\r\n\]+|paste-latency: FAIL $leg -- \[^\r\n\]+|halcyond: (?:idle|owner) wakes: polls=\[^\r\n\]+)\[\r\n\]" {
                 set m $expect_out(1,string)
             }
             -re {EXTINCTION:} { lc_extinction_fail $leg }
             timeout { lc_fail "$leg: no verdict" }
             eof { lc_fail "EOF at $leg" }
         }
+        if {[string match "halcyond: latency: *" $m]} {
+            if {[burst_keys $m] >= $typed} {
+                record "LATENCY $leg: $m"
+                set seen 1
+            } else {
+                lc_step "$leg: an earlier burst passed over: $m"
+            }
+            continue
+        }
         if {[string match "halcyond: *" $m]} { idle $m; continue }
-        if {$m eq "paste-latency: $leg PASS"} { lc_step "$leg passed"; return }
+        if {$m eq "paste-latency: $leg PASS"} {
+            lc_step "$leg passed"
+            if {$typed && !$seen} { drain_burst $leg $typed }
+            return
+        }
         if {[string match "paste-latency: $leg: *" $m]} { record [string range $m 15 end]; continue }
         lc_fail "$leg: [string range $m [string length "paste-latency: FAIL $leg -- "] end]"
+    }
+}
+# The burst line of `leg`'s command (at least `typed` keys), recorded, not judged.
+proc drain_burst {leg typed} {
+    global lc_cmd_timeout
+    set until [expr {[clock seconds] + $lc_cmd_timeout}]
+    set passed {}
+    while 1 {
+        set why "$leg: no latency line for the command's burst -- wanted $typed keys or more, passed over: [expr {[llength $passed] ? [join $passed ,] : {none}}]"
+        set m ""
+        lc_within [left $until $why] {
+            -re {(halcyond: latency: [^\r\n]*over=[0-9]+|halcyond: (?:idle|owner) wakes: polls=[^\r\n]+)[\r\n]} {
+                set m $expect_out(1,string)
+            }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail $why }
+            eof { lc_fail "EOF at $leg" }
+        }
+        if {![string match "halcyond: latency: *" $m]} { idle $m; continue }
+        if {[burst_keys $m] < $typed} {
+            lappend passed [burst_keys $m]
+            lc_step "$leg: an earlier burst passed over: $m"
+            continue
+        }
+        record "LATENCY $leg: $m"
+        return
     }
 }
 # The next burst line with `want` keys; a line with another count is an earlier burst
@@ -109,8 +160,9 @@ proc burst {leg want {pasted 0}} {
     global lc_cmd_timeout
     set landed 0
     set until [expr {[clock seconds] + $lc_cmd_timeout}]
-    set none "$leg: no latency line or no paste (only halcyond's test-mode builds say a line)"
+    set passed {}
     while 1 {
+        set none "$leg: no latency line with $want keys or no paste (only halcyond's test-mode builds say a line) -- passed over: [expr {[llength $passed] ? [join $passed ,] : {none}}]"
         set m ""
         lc_within [left $until $none] {
             -re {(halcyond: latency: [^\r\n]*over=[0-9]+|halcyond: (?:idle|owner) wakes: polls=[^\r\n]+|nora: clipboard pasted|nora: clipboard paste not applied|nora: clipboard paste failed: [^\r\n]+)[\r\n]} {
@@ -131,6 +183,7 @@ proc burst {leg want {pasted 0}} {
             lc_fail "$leg: a latency line that does not parse: $m"
         }
         if {$keys != $want} {
+            lappend passed $keys
             lc_step "$leg: an earlier burst passed over: $m"
             continue
         }
@@ -230,9 +283,10 @@ proc login_to_session {user password} {
     global iq_said
     set iq_said 0
     set ready 0
+    set until [expr {[clock seconds] + 60}]
     while {!$ready} {
         set m ""
-        lc_within 60 {
+        lc_within [left $until "the session did not become ready for $user"] {
             -re {(login: session compositor \(halcyond\) spawned|halcyond: interaction qualification enabled|halcyond: status bar [^\r\n]*running false panes 2|Thylacine textual shell)} {
                 set m $expect_out(1,string)
             }
@@ -296,9 +350,9 @@ if {$paste_image} {
     # 4,000 capitals into ut, Alt-P and forty keys in one QMP session: 41 keys. The
     # probe's `mark` line is typed first (its own burst), so Enter runs it whichever
     # order the paste and the keys landed in, and `mark` checks the line holds them all.
-    type "kaua-term-probe --paste-latency fill-pad 4000 fill-ut\n"
-    verdict fill-ut
-    settle 2
+    set cmd "kaua-term-probe --paste-latency fill-pad 4000 fill-ut\n"
+    type $cmd
+    verdict fill-ut [string length $cmd]
     set prefix "kaua-term-probe --paste-latency mark ut-landed 4000 40 "
     type $prefix
     burst ut-line [string length $prefix]
@@ -307,13 +361,13 @@ if {$paste_image} {
     key "ret"
     verdict ut-landed
     settle 2
-    if {$idle_said < 2} { lc_fail "the session loop's idle tally said $idle_said line(s), fewer than two" }
+    if {$idle_timed < 2} { lc_fail "the session loop's idle tally said $idle_timed line(s) on its own count or clock, fewer than two" }
     lc_pass "paste latency: baselines and both pastes recorded (paste image)"
 } else {
     key "meta_l+left"
     settle 2
     leave
-    if {$idle_said < 2} { lc_fail "the session loop's idle tally said $idle_said line(s), fewer than two" }
+    if {$idle_timed < 2} { lc_fail "the session loop's idle tally said $idle_timed line(s) on its own count or clock, fewer than two" }
     lc_pass "paste latency: baselines recorded (control image)"
 }
 lc_quit

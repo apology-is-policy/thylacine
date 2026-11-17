@@ -243,10 +243,11 @@ impl Latency {
     }
 }
 
-/// An idle stretch says why it woke after this many polls...
+/// An idle stretch says why it woke after this many polls (`said=polls`)...
 pub const IDLE_POLLS_SAID: u32 = 1000;
-/// ...or at its first poll this long after it began, whichever comes first; and
-/// when a burst ends it. No line is said without a wake that came anyway.
+/// ...or at its first poll this long after it began (`said=time`), whichever
+/// comes first; and when a burst ends it (`said=burst`). No line is said without
+/// a wake that came anyway.
 pub const IDLE_SAY_NS: u64 = 5_000_000_000;
 /// Distinct surface event kinds an idle tally names; later kinds count in `events`.
 pub const IDLE_KINDS: usize = 4;
@@ -318,7 +319,7 @@ impl IdleTally {
     /// A burst is open at `now`: the stretch it ended says its line (once), and
     /// the tally starts afresh.
     pub fn stretch_end(&mut self, now: u64) -> Option<String> {
-        let line = (self.polls > 0).then(|| self.line(now));
+        let line = (self.polls > 0).then(|| self.line(now, "burst"));
         *self = Self::default();
         line
     }
@@ -346,15 +347,19 @@ impl IdleTally {
         self.ring += ring as u32;
         self.up += up as u32;
         self.other += other as u32;
-        if self.polls < IDLE_POLLS_SAID && now.saturating_sub(self.since_ns) < IDLE_SAY_NS {
+        let said = if self.polls >= IDLE_POLLS_SAID {
+            "polls"
+        } else if now.saturating_sub(self.since_ns) >= IDLE_SAY_NS {
+            "time"
+        } else {
             return None;
-        }
-        let line = self.line(now);
+        };
+        let line = self.line(now, said);
         *self = Self::default();
         Some(line)
     }
 
-    fn line(&self, now: u64) -> String {
+    fn line(&self, now: u64, said: &str) -> String {
         let mut kinds = String::new();
         for (kind, n) in self.kinds.iter().filter(|k| k.1 > 0) {
             if !kinds.is_empty() {
@@ -366,7 +371,7 @@ impl IdleTally {
             kinds.push('-');
         }
         format!(
-            "halcyond: idle wakes: polls={} ms={} iterations={} long={} short={} timeout={} ring={} bare={} up={} other={} events={} kinds={} presents={}",
+            "halcyond: idle wakes: polls={} ms={} iterations={} long={} short={} timeout={} ring={} bare={} up={} other={} events={} kinds={} presents={} said={}",
             self.polls,
             now.saturating_sub(self.since_ns) / 1_000_000,
             self.iterations,
@@ -379,7 +384,8 @@ impl IdleTally {
             self.other,
             self.events,
             kinds,
-            self.presents
+            self.presents,
+            said
         )
     }
 }
@@ -482,7 +488,7 @@ mod tests {
         let line = t.polled(1_000 * MS + 999 * MS, 0, 1, false, true, false).unwrap();
         assert_eq!(
             line,
-            "halcyond: idle wakes: polls=1000 ms=999 iterations=999 long=333 short=334 timeout=500 ring=499 bare=499 up=1 other=250 events=0 kinds=- presents=1"
+            "halcyond: idle wakes: polls=1000 ms=999 iterations=999 long=333 short=334 timeout=500 ring=499 bare=499 up=1 other=250 events=0 kinds=- presents=1 said=polls"
         );
         assert_eq!(t.polled(5_000 * MS, -1, 0, false, false, false), None);
     }
@@ -495,6 +501,7 @@ mod tests {
         assert_eq!(t.polled(10_000 * MS + IDLE_SAY_NS - 1, IDLE_LONG_MS, 0, false, false, false), None);
         let line = t.polled(10_000 * MS + IDLE_SAY_NS, -1, 0, false, false, false).unwrap();
         assert!(line.starts_with("halcyond: idle wakes: polls=3 ms=5000 iterations=1 long=2 short=0 timeout=3 "), "{}", line);
+        assert!(line.ends_with(" said=time"), "{}", line);
     }
 
     #[test]
@@ -518,6 +525,7 @@ mod tests {
         let _ = t.polled(10 * MS, -1, 1, true, false, false); // no iteration() first: the pass began inside a burst
         let line = t.stretch_end(20 * MS).unwrap();
         assert!(line.starts_with("halcyond: idle wakes: polls=1 ms=10 iterations=1 "), "{}", line);
+        assert!(line.ends_with(" said=burst"), "{}", line);
         assert_eq!(t.stretch_end(30 * MS), None);
     }
 
@@ -531,7 +539,7 @@ mod tests {
             assert_eq!(t.polled(0, -1, 1, true, false, false), None);
         }
         let line = t.polled(MS, -1, 1, true, false, false).unwrap();
-        assert!(line.contains(" events=9 kinds=7:3,3:2,9:1,11:1 presents=0"), "{}", line);
+        assert!(line.contains(" events=9 kinds=7:3,3:2,9:1,11:1 presents=0 said=polls"), "{}", line);
         t.event(5);
         for _ in 0..IDLE_POLLS_SAID {
             let _ = t.polled(0, -1, 1, true, false, false);
@@ -760,5 +768,25 @@ mod tests {
         l.answered(61 * MS, 65 * MS);
         let line = l.end(70 * MS + QUIET_NS, 0).unwrap();
         assert!(line.contains("busy-max-us=10000 wakes=0"), "{}", line);
+    }
+
+    #[test]
+    fn output_before_a_burst_neither_holds_it_open_nor_settles_it() {
+        let mut l = Latency::new();
+        l.output_presented(1_000 * MS);
+        l.key(1_500 * MS, true);
+        l.answered(1_500 * MS, 1_510 * MS);
+        let line = l.end(1_510 * MS + QUIET_NS, 0).unwrap();
+        assert!(line.contains(" settle-us=- "), "{}", line);
+    }
+
+    #[test]
+    fn the_polls_rule_names_a_line_due_by_both() {
+        let mut t = IdleTally::new();
+        for i in 0..(IDLE_POLLS_SAID - 1) {
+            assert_eq!(t.polled(i as u64 * MS, -1, 1, true, false, false), None);
+        }
+        let line = t.polled(IDLE_SAY_NS, -1, 1, true, false, false).unwrap();
+        assert!(line.ends_with(" said=polls"), "{}", line);
     }
 }

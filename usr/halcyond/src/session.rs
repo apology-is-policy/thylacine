@@ -2001,6 +2001,10 @@ pub fn run(home: Option<String>) -> i64 {
     let mut lat = halcyond::latency::Latency::new();
     #[cfg(feature = "test-mode")]
     let mut idle = halcyond::latency::IdleTally::new();
+    // The idle line a burst's first wake ended, said after that burst's own
+    // line: said at once, its console write would sit inside the burst.
+    #[cfg(feature = "test-mode")]
+    let mut idle_line: Option<String> = None;
 
     loop {
         #[cfg(feature = "test-mode")]
@@ -3043,6 +3047,9 @@ pub fn run(home: Option<String>) -> i64 {
             let queued = tiles.values().filter(|t| t.lat_took && !t.down.is_empty()).count() as u32;
             if let Some(line) = lat.end(now, queued) {
                 say!("{}", line);
+                if let Some(line) = idle_line.take() {
+                    say!("{}", line);
+                }
                 for t in tiles.values_mut() {
                     t.lat_key_ns = 0;
                     t.lat_echoed = false;
@@ -3062,7 +3069,7 @@ pub fn run(home: Option<String>) -> i64 {
             lat.woke(now);
             if lat.is_open() {
                 if let Some(line) = idle.stretch_end(now) {
-                    say!("{}", line);
+                    idle_line = Some(line);
                 }
             } else if polled >= 0 {
                 let n_up = up_leaves.len();

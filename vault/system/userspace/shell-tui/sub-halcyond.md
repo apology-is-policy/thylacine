@@ -536,8 +536,10 @@ unbounded today -- `short` under 50 ms), poll returns by cause (timeout, the rin
 an up-pipe, anything else), `bare` ring wakes after which no tile event was drained
 (the chrome, status and rail surfaces share the ring and are not counted by kind),
 the tile surface events drained (`events`, `kinds` naming the first four with
-counts) and tile presents: `halcyond: idle wakes: polls= ms= ...`, said after 1000
-polls, at the first poll 5 s into a stretch, and when a burst ends the stretch. The
+counts) and tile presents: `halcyond: idle wakes: polls= ms= ... said=`, said after
+1000 polls (`said=polls`), at the first poll 5 s into a stretch (`said=time`), and
+when a burst ends the stretch (`said=burst`, said after that burst's own line, so its
+console write is not inside the burst it describes). The
 service worker's (`OwnerTally`, the place service's owner thread in
 `paneplace.rs`, always): waits armed zero (something runnable) / short / long,
 timeouts, and which entries were ready (control, seat, admission, listener, a
@@ -553,7 +555,9 @@ tapestryd or the system services, which it counts as `skipped`).
 without the interaction work (checked against halcyond's own interaction line),
 says every number as an `LS-CI RECORD:` line in the transcript (lc_step reaches
 only the steps file), gives every wait one deadline fixed when it starts, and
-fails only on a record that is missing or does not add up. Its ut paste checks the
+fails only on a record that is missing or does not add up. A command typed just
+before a judged burst has its own burst line seen through first, so the two cannot
+merge (they did under a 150 ms per-key stall: one 114-key burst). Its ut paste checks the
 content end to end: the probe's `mark` line is typed first, the 4,000-capital
 paste and forty keys follow in one burst, and Enter runs `mark`, which requires
 every typed key in order plus the whole paste and says after how many keys the
@@ -561,8 +565,9 @@ paste landed. Its runs (2026-11-17: 8fe41cb57, 6a2dda6d6) measured an idle
 halcyond at 99-125 dispatches a second over its two threads in both images: the
 UI thread ~70 polls a second, ~60 of them a TEV_FRAME on a tile surface that it
 drops (tapestryd ticks every visible surface, at 15 Hz once the console is
-quiet), and the service worker ~46-57 a second, cause not yet observed (OPEN-BUGS
-2026-11-17T11:10Z).
+quiet), and the service worker ~46-57 a second, nearly all on its control channel
+(the session loop pokes it on most passes) plus the seat at ~8 a second (owner
+tallies, 550564b07; OPEN-BUGS 2026-11-17T11:10Z).
 
 ### The console data flow
 
