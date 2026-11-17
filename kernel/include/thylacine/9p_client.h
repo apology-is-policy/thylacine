@@ -206,9 +206,10 @@ struct p9_client_progress {
     bool rx_next;
 };
 
-// Runs a closer lost (LARDER-DESIGN 12.6, vote M27): one record per file, for
-// the next fsync of each open not yet told, as Linux's errseq. dev9p keeps the
-// policy; this is only the table. The lock is a pure leaf.
+// Lost write-behind runs (LARDER-DESIGN 12.6, votes M27, M30a): one record per
+// file, for the next fsync of each open not yet told, as Linux's errseq. dev9p
+// keeps the policy; this is only the table. The lock is a leaf: nothing is taken
+// under it (dev9p takes it under an open's wb_lock at a refusal).
 #define P9_WB_LOSS_MAX 16u
 struct p9_wb_loss {
     u64  path;

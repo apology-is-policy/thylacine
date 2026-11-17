@@ -2117,6 +2117,8 @@ void test_dev9p_m25_refusal_inside_the_leg_window(void);
 void test_dev9p_m26_holder_changes_pin(void);
 void test_dev9p_m27_lost_run_reaches_the_next_fsync(void);
 void test_dev9p_m27_unhanded_run_is_recorded(void);
+void test_dev9p_m30_closing_refusal_reaches_a_peer(void);
+void test_dev9p_m30a_a_loss_is_told_once(void);
 void test_dev9p_m29_holder_maps_privately(void);
 void test_dev9p_mapping_keys_on_the_probe_version(void);
 void test_dev9p_m23_stalk_eintr_names_no_component(void);

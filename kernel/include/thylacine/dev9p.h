@@ -245,8 +245,8 @@ struct dev9p_priv {
     // one holder on this client, and its own Spoor for a leg's reference.
     struct dev9p_wb_reg       wb_reg;
     struct Spoor             *wb_spoor;
-    // Vote M27: the sequence of the last closer loss of this file the open has
-    // been told of, sampled at open; under the client's wb_loss lock after.
+    // Votes M27, M30a: the sequence of the last lost run of this file the open
+    // has been told of, sampled at open; under the client's wb_loss lock after.
     u64                       wb_errseq;
 };
 
@@ -306,7 +306,7 @@ void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on);
 void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on);
 u32  dev9p_wb_test_purge(struct p9_client *cl);
 // A hook run once, on the next leg that found a run held, between its look and
-// its flush, with no lock held; and a closer loss recorded by hand (vote M27).
+// its flush, with no lock held; and a lost run recorded by hand (vote M27).
 void dev9p_wb_test_leg_window(void (*fn)(void *), void *arg);
 void dev9p_wb_test_loss(struct p9_client *cl, u64 path, int err);
 

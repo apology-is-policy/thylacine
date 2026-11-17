@@ -501,6 +501,35 @@ static int wb_refusal_errno(int err) {
     return (err == -T_E_NOSPC || err == -T_E_DQUOT) ? err : -T_E_IO;
 }
 
+// A lost run (LARDER-DESIGN 12.6, votes M27, M30a) is recorded against the file
+// on its client, as Linux's errseq records a writeback error against the inode:
+// a refused run at its refusal, under the holder's wb_lock, and a closer's run
+// where its job gives it up. An open samples the file's record at its open, and
+// an fsync whose sample is behind the record reports it once. The table's lock
+// is a leaf: nothing is taken under it.
+static void wb_loss_record(struct p9_client *cl, u64 path, int err) {
+    struct p9_wb_losses *t = &cl->wb_loss;
+    spin_lock(&t->lock);
+    struct p9_wb_loss *r = NULL;
+    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
+        if (t->rec[i].seq && t->rec[i].path == path) r = &t->rec[i];
+    // Else a free slot, else the oldest record, whose loss keeps only its
+    // console line.
+    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
+        if (!t->rec[i].seq) r = &t->rec[i];
+    if (!r) {
+        r = &t->rec[0];
+        for (u32 i = 1; i < P9_WB_LOSS_MAX; i++)
+            if (t->rec[i].seq < r->seq) r = &t->rec[i];
+    }
+    r->path = path;
+    r->err  = -wb_refusal_errno(err);
+    r->seen = false;
+    __atomic_store_n(&t->seq, t->seq + 1u, __ATOMIC_RELEASE);
+    r->seq  = t->seq;
+    spin_unlock(&t->lock);
+}
+
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     u64 backoff = WB_FLUSH_WAIT_NS_MIN;
     while (p->wb_flushers != 0) {
@@ -559,6 +588,9 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
             return err;
         int rep = wb_refusal_errno(err);
         if (p->wb_err == 0) p->wb_err = -rep;   // positive errno
+        // Recorded for the file's other opens before the latch can be seen: a
+        // leg reads it under this lock (vote M30a).
+        wb_loss_record(p->client, qid_path, rep);
         p->wb_len   = 0;
         p->wb_known = false;
         return rep;
@@ -582,34 +614,6 @@ static void wb_release_dead_locked(struct dev9p_priv *p) {
     wb_budget_uncharge((u64)p->wb_cap);
     p->wb_buf = NULL;
     p->wb_cap = 0;
-}
-
-// A run a closer loses (LARDER-DESIGN 12.6, vote M27) reaches no program, so it
-// is recorded against the file on its client, as Linux's errseq records a
-// writeback error against the inode: an open samples the file's record at its
-// open, and an fsync whose sample is behind the record reports it once. The
-// table's lock is a leaf: taken under no other lock, and nothing under it.
-static void wb_loss_record(struct p9_client *cl, u64 path, int err) {
-    struct p9_wb_losses *t = &cl->wb_loss;
-    spin_lock(&t->lock);
-    struct p9_wb_loss *r = NULL;
-    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
-        if (t->rec[i].seq && t->rec[i].path == path) r = &t->rec[i];
-    // Else a free slot, else the oldest record, whose loss keeps only its
-    // console line.
-    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
-        if (!t->rec[i].seq) r = &t->rec[i];
-    if (!r) {
-        r = &t->rec[0];
-        for (u32 i = 1; i < P9_WB_LOSS_MAX; i++)
-            if (t->rec[i].seq < r->seq) r = &t->rec[i];
-    }
-    r->path = path;
-    r->err  = -wb_refusal_errno(err);
-    r->seen = false;
-    __atomic_store_n(&t->seq, t->seq + 1u, __ATOMIC_RELEASE);
-    r->seq  = t->seq;
-    spin_unlock(&t->lock);
 }
 
 // An open's sample: the record's sequence once some open has been told of it,
@@ -2285,7 +2289,7 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
             (void)wb_register(p, c, &pin);
     }
     wb_unpin(&pin);                  // a no-op once the registration took it
-    // The closer losses of the file this open has not been told of (vote M27).
+    // The lost runs of the file this open has not been told of (votes M27, M30a).
     p->wb_errseq = wb_loss_sample(p->client, c->qid.path);
     c->flag |= COPEN;
     c->mode  = omode;
@@ -3087,10 +3091,11 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
         int refused = 0;
         int lr = wb_holder_flush(p->client, c->qid.path, p, NULL, &refused);
         if (lr < 0) return lr;
-        if (refused != 0) return refused;
-        // A run of the file a closer lost since this open was last told of one
-        // (vote M27).
+        // Every run of the file lost since this open was last told, once (votes
+        // M27, M30a): a refusal the leg met was recorded before the leg saw it,
+        // so the report catches this open up past it too.
         int lost = wb_loss_report(p, c->qid.path);
+        if (refused != 0) return refused;
         if (lost != 0) return lost;
     }
     // FID-LIFECYCLE cached-open: a read-only open reaches here (fsync takes
@@ -3245,17 +3250,15 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     bool gone = p->wb_len == 0 && p->wb_flushers == 0;
     spin_unlock(&p->wb_lock);
     if (!j->release_locks) return rc;
-    // Past the last close nobody reads the latch: a refused run is recorded for
-    // the file's other opens (vote M27) before this one leaves.
-    if (rc != 0) wb_loss_record(p->client, c->qid.path, rc);
     // Past the last close nothing stages again, so with its run gone the open
     // leaves the registry now, not at its last reference (12.6): another open
     // may hold the file meanwhile. This job's reference keeps p alive.
     if (gone) wb_unregister(p);
 
     // Past the last close. Nobody reads the latch from here on, so a failure is
-    // reported now; wb_flush_locked dropped the run, so there is nothing to
-    // retry. A flush that stood at that close installed its pages as the open's:
+    // reported now (the file's other opens hear it at their next fsync: it was
+    // recorded at its refusal, votes M27, M30a); wb_flush_locked dropped the
+    // run, so there is nothing to retry. A flush that stood at that close installed its pages as the open's:
     // they go too, as the hand-off's do (dev9p_close_job_run). One that starts
     // later finds the anchor gone and installs nothing.
     if (j->staged) {
@@ -3477,7 +3480,9 @@ static int dev9p_fd_close(struct Spoor *c, bool heard) {
     }
     // The run has gone, write() said those bytes were written, and this answer
     // reaches no program: an exit's close, or a thread that never returns to EL0.
-    // A latch a write or an fsync already returned prints again, which costs a line.
+    // The file's other opens hear it at their next fsync: it was recorded at its
+    // refusal (vote M30a). A latch a write or an fsync already returned prints
+    // again, which costs a line.
     if (rc != 0 && (!heard || !close_may_wait()) &&
         p9_client_fid_held(p->client, p->fid))
         p9_close_job_lost(p->fid, rc);

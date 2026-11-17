@@ -5674,7 +5674,8 @@ void test_dev9p_m24_guard_skips_the_own_install(void) {
 // An fsync through another open writes back what the holder holds, and when the
 // server refuses that run the fsync returns the refusal, as Linux reports a
 // failed writeback to every descriptor's next fsync; the holder keeps its latch
-// for its own report. A third open's fsync, which flushes nothing, returns 0.
+// for its own report. A third open's fsync, which flushes nothing, is told of it
+// by the record made at the refusal (vote M30a).
 void test_dev9p_m25_peer_fsync_reports_a_refused_run(void) {
     u8 *chunk = m23_chunk();
     TEST_ASSERT(chunk != NULL, "scratch");
@@ -5700,7 +5701,7 @@ void test_dev9p_m25_peer_fsync_reports_a_refused_run(void) {
     TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
     TEST_EXPECT_EQ((u64)(s64)(-fo), 28ull, "the peer's fsync returns the refusal of the run it flushed");
     TEST_EXPECT_EQ((u64)seen1, 1ull, "one Twrite: the refused run");
-    TEST_EXPECT_EQ((u64)(s64)fo2, 0ull, "a third open's fsync flushes nothing and returns 0");
+    TEST_EXPECT_EQ((u64)(s64)(-fo2), 28ull, "a third open's fsync flushes nothing and is told of the refusal (M30a)");
     TEST_EXPECT_EQ((u64)seen2, 1ull, "and sends no Twrite");
     TEST_EXPECT_EQ((u64)(-we), 28ull, "the holder's next write reports the loss too");
     TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "the peer closes");
@@ -5817,6 +5818,100 @@ void test_dev9p_m27_unhanded_run_is_recorded(void) {
     TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "the peer's next fsync hears the loss");
     TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
     TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+}
+
+// Votes M30, M30a: a refused run is recorded at its refusal, so a last close
+// whose flush the server refuses tells the file's other opens at their next
+// fsync, once, whether or not its own answer reaches a program (an exit's close
+// reaches none). The control, one variable away: the server takes the run, and
+// the peer hears nothing.
+void test_dev9p_m30_closing_refusal_reaches_a_peer(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 3; i++) {
+        bool refuse = i != 0, heard = i == 1;
+        struct Spoor *root = NULL;
+        struct Spoor *f = wb_make_created(&root);
+        TEST_ASSERT(f != NULL, "create");
+        struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+        wb_wire_reset();
+        long w0 = dev9p.write(f, chunk, 256, 0);
+        g_twrite_fail_ecode = refuse ? 28u : 0u;   // ENOSPC
+        p9_close_flush_quiet_for_test(true);
+        int frc = dev9p.fd_close(f, heard);
+        p9_close_flush_quiet_for_test(false);
+        int crc  = spoor_clunk_rc(f);
+        u32 seen = g_twrite_seen;
+        int f1   = o ? dev9p.fsync(o, 0) : 1;
+        int f2   = o ? dev9p.fsync(o, 0) : 1;
+        int occ  = o ? d9_close(o) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "a peer opened before the close");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        TEST_EXPECT_EQ((u64)seen, 1ull, "its last close sends the run");
+        TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the slot's reference goes");
+        if (!refuse) {
+            TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "the server takes the run (control)");
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull, "and the peer hears nothing");
+        } else {
+            TEST_EXPECT_EQ((u64)(s64)(-frc), 28ull,
+                           heard ? "the heard close reports the refusal to its program"
+                                 : "the unheard close reports it to nobody");
+            TEST_EXPECT_EQ((u64)(s64)(-f1), 28ull,
+                           heard ? "the peer's next fsync hears it too, ENOSPC as it is"
+                                 : "the peer's next fsync hears it, ENOSPC as it is");
+            TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+        }
+        TEST_EXPECT_EQ((u64)(s64)occ, 0ull, "the peer closes");
+    }
+}
+
+// Vote M30a: a refused run is recorded once, at its refusal, under the holder's
+// lock. A peer whose fsync's leg met the refusal returns it and is caught up, so
+// it is not told again -- not by its next fsync, nor after the holder's unheard
+// last close reports the latch again. A third open made before is told by the
+// record, once; an open made after one was told hears nothing.
+void test_dev9p_m30a_a_loss_is_told_once(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    struct Spoor *q = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    long w0 = dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = T_E_BADF;
+    int fo1 = o ? dev9p.fsync(o, 0) : 1;      // its leg meets the refusal
+    int fo2 = o ? dev9p.fsync(o, 0) : 1;
+    int fq1 = q ? dev9p.fsync(q, 0) : 1;
+    int fq2 = q ? dev9p.fsync(q, 0) : 1;
+    p9_close_flush_quiet_for_test(true);
+    int frc = dev9p.fd_close(f, false);       // an exit's close: the latch again
+    p9_close_flush_quiet_for_test(false);
+    int crc = spoor_clunk_rc(f);
+    int fo3 = o ? dev9p.fsync(o, 0) : 1;
+    int fq3 = q ? dev9p.fsync(q, 0) : 1;
+    struct Spoor *r = m23_peer(root, 0 /*OREAD*/);
+    int fr1  = r ? dev9p.fsync(r, 0) : 1;
+    u32 seen = g_twrite_seen;
+    int oc = o ? d9_close(o) : -1, qc = q ? d9_close(q) : -1, rcl = r ? d9_close(r) : -1;
+    m23_end(root);
+
+    TEST_ASSERT(o && q && r, "three peers");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(s64)fo1, (u64)(s64)-T_E_IO, "the peer whose leg met the refusal returns it, as EIO");
+    TEST_EXPECT_EQ((u64)(s64)fo2, 0ull, "and is not told it again");
+    TEST_EXPECT_EQ((u64)(s64)fq1, (u64)(s64)-T_E_IO, "a third open made before is told by the record");
+    TEST_EXPECT_EQ((u64)(s64)fq2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)(s64)frc, (u64)(s64)-T_E_IO, "the holder's unheard last close reports its latch");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and its slot's reference goes");
+    TEST_EXPECT_EQ((u64)(s64)fo3, 0ull, "which tells the peer nothing new");
+    TEST_EXPECT_EQ((u64)(s64)fq3, 0ull, "nor the third open");
+    TEST_EXPECT_EQ((u64)(s64)fr1, 0ull, "an open made after one was told hears nothing");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "one Twrite: the refused run");
+    TEST_ASSERT(oc == 0 && qc == 0 && rcl == 0, "every peer closes");
 }
 
 // Vote M29: a mapping made through an open that can stage is its own private
