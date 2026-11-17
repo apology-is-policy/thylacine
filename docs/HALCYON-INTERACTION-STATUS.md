@@ -1056,8 +1056,8 @@ Still open: explicit application relative-pointer capture and its client
 migration (relative motion is not capture); direct-scanout qualification;
 additional scales/modes and failure-injection matrix; the idle wakeups the
 latency record found (an idle halcyond 107-141 dispatches a second in both images:
-tapestryd's frame ticks (vote 144, answered 2026-11-17: FRAME becomes opt-in per surface, not yet built), and the service worker woken on every UI pass;
-OPEN-BUGS 2026-11-17T11:10Z); production-feature and full sanitizer qualification; Pi bare-metal backends.
+tapestryd's frame ticks (vote 144, answered 2026-11-17: FRAME becomes opt-in per surface, not yet built), and the service worker woken on every UI pass,
+fixed by 76bd5710b -- 60-75 a second after it; OPEN-BUGS 2026-11-17T11:10Z); production-feature and full sanitizer qualification; Pi bare-metal backends.
 The existing `ls-gfx-panes` direct-scanout harness assumes the legacy console
 image and hard-codes HVF, so the Halcyon image cannot honestly substitute for
 that row. `docs/manual-drafts/19-pointer.md` remains a draft, not installed help.
