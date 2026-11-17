@@ -1176,9 +1176,8 @@ impl PanePlaceServer {
             }
         }
         drop(m);
-        // Only a freed slot changes the owner's admission budget. The session
-        // loop calls this on every pass; an unconditional wake made each of its
-        // wakes the owner's too.
+        // Only a freed slot changes the owner's admission budget, and this runs
+        // on every session pass: anything else here is no news to the owner.
         if freed {
             let _ = self.owner.wake();
         }

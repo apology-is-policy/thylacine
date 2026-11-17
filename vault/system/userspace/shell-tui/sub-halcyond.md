@@ -193,7 +193,9 @@ retires scopes even when a later join carries the same generation.
 
 While the seat is away from normal the compositor answers nothing, so neither kind of
 deadline below runs out against it. `Interaction::age` gives an unreported flight its
-full time back while the Link reads the seat parked, and `paneplace`'s bring-up loop
+full time back while the Link reads the seat parked and once more at the first pass
+that reads it not parked, however long after the last parked pass that comes (the
+owner runs on the seat's replies, never on a clock of the seat's), and `paneplace`'s bring-up loop
 refreshes its 4 s and tells the thread waiting in `ServiceWorker::new` that it is
 alive. Both stop at `seat_control::PARKED_CEILING_MS`, so a session that cannot start
 still reaches login's console fallback. A stopping owner's flight keeps aging. No
