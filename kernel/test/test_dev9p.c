@@ -6974,16 +6974,17 @@ void test_dev9p_f3_plain_walk_note_fails_the_walk(void) {
 
 // Vote M36: the plain walk's one Tgetattr asks the basic attributes with the
 // generation, and its reply fills the Larder, so an fstat through the walked open
-// is served with no second Tgetattr. The control, one variable away (the reply
-// leaves the basic attributes out of `valid`): nothing fills, and the fstat asks.
+// is served with no second Tgetattr. Two arms one variable from it fill nothing,
+// and the fstat asks: the reply leaves the basic attributes out of `valid`, or it
+// names another file than the one the walk bound (the install's guard).
 void test_dev9p_m36_plain_walk_fills_the_larder(void) {
-    for (u32 i = 0; i < 2; i++) {
-        bool filled = i == 0;
+    for (u32 i = 0; i < 3; i++) {
+        bool filled = i == 0, other = i == 2;
         struct Spoor *root = m31_root();
         TEST_ASSERT(root != NULL, "root");
-        g_ga_valid = filled ? (P9_GETATTR_BASIC | P9_GETATTR_GEN) : P9_GETATTR_GEN;
+        g_ga_valid = (filled || other) ? (P9_GETATTR_BASIC | P9_GETATTR_GEN) : P9_GETATTR_GEN;
         g_ga_gen   = 0x5au;
-        g_ga_path  = M23_PATH;
+        g_ga_path  = other ? 0x33u : M23_PATH;
         g_tgetattr_mask = 0;
         u32 ga0 = g_tgetattr_seen;
         struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
@@ -7010,6 +7011,8 @@ void test_dev9p_m36_plain_walk_fills_the_larder(void) {
         TEST_EXPECT_EQ(st.size, 0x100ull, "the server's size");
         if (filled)
             TEST_EXPECT_EQ((u64)all, 1ull, "and is served: one Tgetattr in all");
+        else if (other)
+            TEST_EXPECT_EQ((u64)all, 2ull, "a reply naming another file fills nothing: the fstat asks");
         else
             TEST_EXPECT_EQ((u64)all, 2ull, "CONTROL: a reply without the basic attributes fills nothing: the fstat asks");
         TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "it closes");
