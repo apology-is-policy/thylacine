@@ -1871,6 +1871,9 @@ pub struct Comp {
     teardown_conn: Option<u64>,
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
+    /// Ticks that fell due inside a pass that had already ticked, folded into
+    /// it: `tick + ticks_coalesced` counts every tick that fell due.
+    pub ticks_coalesced: u64,
     pub clock_hz: u32,
     /// HALCYON-INSTRUMENT 10 + 9.5 as amended: do the compositor's own
     /// transitions run? Pushed by the DECLARED session as the `motion` verb,
@@ -2728,6 +2731,7 @@ impl Comp {
             session_conns: Vec::new(),
             teardown_conn: None,
             tick: 0,
+            ticks_coalesced: 0,
             clock_hz: 60,
             motion: true,
             present_bucket_start: None,
@@ -17184,6 +17188,17 @@ impl Conn {
                     comp.layout.live_ids().len(),
                     comp.layout.id_of(comp.layout.focused).unwrap_or(0),
                     comp.menu_text()
+                ),
+            );
+            // The clock's rate, measured in the guest: the tick counters and
+            // the monotonic time of this same render (ls-gfx-throttle).
+            #[cfg(feature = "test-mode")]
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "clock-ns {}\ncoalesced {}\n",
+                    Instant::now().since_boot().as_nanos(),
+                    comp.ticks_coalesced
                 ),
             );
             match comp.cursor_sent {

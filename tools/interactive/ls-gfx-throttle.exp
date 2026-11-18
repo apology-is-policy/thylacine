@@ -33,11 +33,15 @@
 #
 # THE CLOCK'S RATE (TAPESTRY 18.4: ticks fall due at exactly clock-rate a
 # second). While Leg B's pin holds the clock at 60, the compositor's own tick
-# counter (`tick` in /dev/tapestry/ctl, one per delivered tick) is read twice
-# ten seconds apart, timed on the host: 59..61 Hz passes. A client cannot be
+# counters (`tick` + `coalesced` in a test build's /dev/tapestry/ctl, every
+# tick that fell due) are read twice ten seconds apart with the guest's own
+# `clock-ns` from the same render: 59.7..60.3 Hz passes, and the host-timed
+# figure must agree within 5%. A client cannot be
 # the witness -- a game's timedemo reads under the clock whenever a frame misses
 # a tick, so an integer-millisecond tick (62.5 Hz) read 60.9 once and passed a
 # 61 fps ceiling. SABOTAGE: restore the integer-ms tick; this leg reads ~62.5.
+# The figures go out as an `LS-CI RECORD: CLOCK` line, so a green spread can be
+# read off the transcript.
 #
 # HVF (the ls-gfx sibling; TCG cannot pace a realistic clock). SKIPs (77) when
 # tapestry-demo is not baked.
@@ -149,27 +153,59 @@ expect {
                  frame-intent DYNAMIC pin holds the clock (the fix)"
     }
 }
-# The clock's rate, while the pin holds it at 60. The anchor is the ctl's
-# `clock-rate 60` line, so the capture is this read's own tick line.
+# The clock's rate, while the pin holds it at 60, timed in the GUEST: a test
+# build's /dev/tapestry/ctl renders `tick` (delivered ticks), `coalesced`
+# (ticks folded into a pass that had already ticked) and `clock-ns` (monotonic
+# time) in one render, so the serial path's latency never enters the rate.
+# This read's own values are the last of each key before its tag (only this
+# leg dumps the ctl); leaving 60 inside the window fails the leg outright.
 proc read_tick {tag} {
+    global lc_cmd_timeout
+    set timeout $lc_cmd_timeout
     lc_send "cat /dev/tapestry/ctl; echo $tag"
     expect {
-        -re "\nclock-rate 60\[\r\n\]+tick (\[0-9\]+)\[\r\n\](.|\n)*\n$tag" {
-            return [list $expect_out(1,string) [clock milliseconds]]
+        -re {idle-throttle 60 -> [0-9]+ Hz[^\r\n]*[\r\n]} {
+            lc_fail "throttle: the clock left 60 inside the rate window ($tag): [string trim $expect_out(0,string)]"
         }
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction (clock rate, $tag)" }
-        timeout { lc_fail "throttle: /dev/tapestry/ctl gave no 'clock-rate 60' + tick line ($tag)" }
+        -re "\n$tag\[\r\n\]" { set dump $expect_out(buffer) }
+        eof { lc_fail "throttle: unexpected EOF reading /dev/tapestry/ctl ($tag)" }
+        timeout { lc_fail "throttle: /dev/tapestry/ctl never answered ($tag, ${timeout}s)" }
     }
+    set host [clock milliseconds]
+    set v {}
+    foreach key {clock-rate tick clock-ns coalesced} {
+        set all [regexp -all -inline -- "\n$key (\[0-9\]+)\[\r\n\]" $dump]
+        if {[llength $all] == 0} {
+            lc_fail "throttle: the ctl dump has no '$key' line ($tag; a test build renders clock-ns and coalesced)"
+        }
+        lappend v [lindex $all end]
+    }
+    if {[lindex $v 0] != 60} { lc_fail "throttle: clock-rate [lindex $v 0], not 60 ($tag)" }
+    return [concat [lrange $v 1 end] $host]
 }
-set ta [read_tick THR_TICK_A]
+lassign [read_tick THR_TICK_A] tick_a ns_a coal_a host_a
 after 10000
-set tb [read_tick THR_TICK_B]
-set ticks [expr {[lindex $tb 0] - [lindex $ta 0]}]
-set ms [expr {[lindex $tb 1] - [lindex $ta 1]}]
-set rate [expr {$ticks * 1000.0 / $ms}]
-lc_step [format "throttle: the clock ran %d ticks in %d ms = %.2f Hz, pinned at 60" $ticks $ms $rate]
-if {$rate < 59.0 || $rate > 61.0} {
-    lc_fail [format "throttle: the FRAME clock ran %.2f Hz pinned at 60 (%d ticks in %d ms; 59..61 passes)" $rate $ticks $ms]
+lassign [read_tick THR_TICK_B] tick_b ns_b coal_b host_b
+set due [expr {($tick_b + $coal_b) - ($tick_a + $coal_a)}]
+set coal [expr {$coal_b - $coal_a}]
+set dns [expr {$ns_b - $ns_a}]
+set dms [expr {$host_b - $host_a}]
+if {$dns <= 0 || $dms <= 0} { lc_fail "throttle: a non-advancing clock across the rate window (ns $dns, host ms $dms)" }
+set rate [expr {$due * 1e9 / $dns}]
+set host_rate [expr {$due * 1000.0 / $dms}]
+set rec [format "CLOCK throttle: due=%d coalesced=%d guest_ns=%d host_ms=%d rate=%.3f Hz host_rate=%.2f Hz" \
+    $due $coal $dns $dms $rate $host_rate]
+send_user "\nLS-CI RECORD: $rec\n"
+lc_step $rec
+# Every tick that fell due, per guest second: the clock itself (+-0.1 Hz is one
+# tick of render phase over 10 s). The host-timed figure only cross-checks the
+# guest's clock against the host's (+-5% absorbs the serial path's latency).
+if {$rate < 59.7 || $rate > 60.3} {
+    lc_fail [format "throttle: the FRAME clock ran %.3f Hz pinned at 60 (%d ticks due in %d guest ns; 59.7..60.3 passes)" $rate $due $dns]
+}
+if {$host_rate < 57.0 || $host_rate > 63.0} {
+    lc_fail [format "throttle: the guest clock disagrees with the host: %.2f Hz by the host (%d ms) against %.3f Hz in the guest" $host_rate $dms $rate]
 }
 lc_quit
 

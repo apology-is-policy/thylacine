@@ -755,6 +755,7 @@ impl Driver for Tapestryd {
             if !frozen {
                 let due = frame_clock::ticks_due(elapsed_ns, cur_hz);
                 if due > ticks_done {
+                    self.comp.ticks_coalesced += due - ticks_done - 1;
                     ticks_done = due;
                     self.comp.frame_tick();
                 }

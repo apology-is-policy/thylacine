@@ -27,8 +27,8 @@ still fires at most one `frame_tick` per pass (a stall coalesces its backlog)
 and re-anchors on a rate change (the ctl or the idle throttle) or an unfreeze;
 the frozen test-mode clock and the fence-pending 1 ms clamp are unchanged.
 Before, the period was `1000 / hz` in integer milliseconds: 16 ms at 60 Hz ran
-62.5 Hz, 66 ms at the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- every
-mac quake timedemo read 62.5 fps -- and the timeout came from the step (2)
+62.5 Hz, 66 ms at the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- the
+mac quake timedemos read 60.8-62.5 fps -- and the timeout came from the step (2)
 sample, so every tick was delivered late by the pass's work. TAPESTRY 18.4
 says 60 Hz, now true. Witnesses: four host tests (the count over 10 s at 1, 7,
 15, 60, 144 and 240 Hz with pass work of 0, 137 us and half a period, every tick
@@ -37,13 +37,21 @@ of whole milliseconds before each fractional boundary, a nanosecond either
 side -- a wake has exactly one more tick due and none a millisecond earlier; a
 tick already due polls at once; the old period's rates), ten mutants killed;
 and ls-gfx-throttle's rate leg: while Leg B's DYNAMIC pin holds the clock at
-60, the ctl's `tick` counter (one per delivered tick) is read twice ten
-seconds apart, timed on the host, and 59..61 Hz passes. A client cannot be the
+60, a test build's root ctl is read twice ten seconds apart; each render
+carries `tick` (delivered), `coalesced` (`Comp::ticks_coalesced`, ticks that
+fell due inside a pass that had already ticked -- the serve loop adds
+`due - ticks_done - 1`) and `clock-ns` (the render's monotonic time), so the
+rate `tick + coalesced` over `clock-ns` is timed in the guest and no serial
+latency enters it: 59.7..60.3 Hz passes, the host-timed figure must agree
+within 5%, leaving 60 inside the window fails outright, and the figures go out
+as an `LS-CI RECORD: CLOCK` line. (Round 50 showed the first, host-timed
+version could read a correct clock above 61 or the 62.5 Hz one inside its band
+on ~0.2 s of serial-latency asymmetry between its two reads.) A client cannot be the
 witness: the first try, a 61 fps ceiling on ls-gfx-quake's timedemo, passed the
 restored 62.5 Hz tick at 60.9 fps (q-fc1 MQ) -- a timedemo reads under the
 clock whenever a frame misses a tick -- so it was removed. Round 49 (Opus 5.5,
 same-family): 0 P0, 0 P1, 1 P2 (a "never late" assertion that let a skipped
-tick through), 3 P3; round 50 audits the rate leg.
+tick through), 3 P3. Round 50 (the rate leg): 0 P0, 0 P1, 2 P2, 6 P3.
 
 ## FRAME is opt-in per surface (November 18, vote 144)
 
