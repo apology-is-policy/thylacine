@@ -962,7 +962,7 @@ holder leaves once that job's flush has ended with nothing held. A leg's flush
 still in the air at that moment keeps it registered until its last reference,
 which costs another open its staging, never a byte.
 
-**A file's name (vote M31, 2026-11-18).** Stratum's qid.path is the inode
+**A file's name (votes M31 and M33, 2026-11-18).** Stratum's qid.path is the inode
 number alone. It frees the number at the last unlink, while opens of the file
 stand (their fids then answer `ESTALE`), and gives it to the next file created.
 Audit round 7 of vote M15 found what that did to state keyed by the number: a
@@ -970,17 +970,29 @@ new file on a dead file's number could not stage, every leg of it flushed the
 dead holder's run into an `ESTALE` that was recorded as the new file's loss, and
 a loss the dead file left unheard was told to the new file's opens. So every
 entry, pin and lost-run record names its file by number and generation, as
-Linux's NFS client names a file by a handle that carries the generation. An open
-learns the generation from its walk's Twalkgetattr, which asks for it (the file
-locks and a cached open already compare number and generation); a stat by name
-from the Larder's entry for the leaf, which keeps it; a create asks for it once,
-with a Tgetattr on the new fid, and a create that cannot learn it writes through.
+Linux's NFS client names a file by a handle that carries the generation. On a
+session that stages (loose and cacheable) every open of a plain file is named
+where its fid is made (vote M33, 2026-11-18): the walk that asks attributes
+learns the generation from its Twalkgetattr; a plain walk that lands on a plain
+file asks it with one Tgetattr on the new fid, as Linux's 9P client asks it
+whenever it makes an inode from a fid (the resolver walks one name at a time on
+any path that holds `..`, at a union member, and on a server without the fused
+walk); a clone that walks no name names its source's file; a create asks once,
+with a Tgetattr on the new fid; a cached open takes it from the Larder's entry
+for the leaf, as a stat by name does. Every open, navigation handle and Loom
+registration of the file is so named before its leg, its registration and its
+sample, and the file locks then ask nothing more. An open's name is fixed when
+it is made: a generation the file locks learn later does not change it, so its
+sample and its report read the same records (round 8 F2).
 State of another generation is a deleted file's: a leg skips it, it refuses no
 registration, and no open of the new file samples or is told its record. A dead
 holder's refusal is recorded under its own generation, so only its own file's
 opens are told of it. A server that reports no generation keeps number-only
-names, and so does a name whose generation is unknown: it matches every
-generation of its number, which only ever flushes sooner or tells more.
+names. An open whose Tgetattr failed (a plain walk's or a create's: a caught
+note, no memory, the file gone) has no name: it registers nothing and writes
+through, it is told only losses recorded after it was made, and its legs and its
+report go by number. A strict session never stages, so it keeps no holder, pin
+or record for an open to be named against, and asks nothing.
 
 **The pin (votes M24 and M24a, 2026-11-16).** A leg that runs before the
 holder registers is ordered with nothing. Audit round 5 of vote M15 found a
