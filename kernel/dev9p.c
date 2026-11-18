@@ -97,6 +97,13 @@ static struct dev9p_priv *priv_alloc(struct p9_client *client, u32 fid,
     return p;
 }
 
+// A priv never published: its session reference goes, then the priv.
+static void priv_discard(struct dev9p_priv *p) {
+    if (p->attached_owner) p9_attached_unref(p->attached_owner);
+    p->magic = 0;
+    kfree(p);
+}
+
 static struct dev9p_priv *priv_of(struct Spoor *c) {
     if (!c) return NULL;
     if (c->dc != DEV9P_DC) return NULL;
@@ -515,7 +522,21 @@ static bool wb_same(struct dev9p_fkey k, u64 path, bool has_gen, u64 gen) {
 // An open's name for its file: the one fixed where its fid was made.
 static struct dev9p_fkey wb_key_of(const struct dev9p_priv *p, u64 path) {
     bool g = p->wb_name == DEV9P_WB_GEN;
-    return (struct dev9p_fkey){ .path = path, .has_gen = g, .gen = g ? p->wb_gen : 0 };
+    return (struct dev9p_fkey){ .path = path, .has_gen = g, .gen = g ? p->wb_gen : 0,
+                                .unnamed = p->wb_name == DEV9P_WB_FAILED ||
+                                           p->wb_name == DEV9P_WB_UNASKED };
+}
+
+// Whose serve a read, a fill or an fstat through a handle is (LARDER-DESIGN 13,
+// votes M34 and M34a): its file's generation; by number on a server that reports
+// none, and for a directory with no name; else a plain file with no name, which
+// no own page or attribute answers.
+static struct larder_who wb_who_of(const struct dev9p_priv *p, const struct Spoor *c) {
+    if (p->wb_name == DEV9P_WB_GEN)
+        return (struct larder_who){ .kind = LARDER_WHO_GEN, .gen = p->wb_gen };
+    if (p->wb_name == DEV9P_WB_NONE || (c->qid.type & QTDIR))
+        return (struct larder_who){ .kind = LARDER_WHO_NUMBER };
+    return (struct larder_who){ .kind = LARDER_WHO_UNNAMED };
 }
 
 // A name a holder can register under: a generation, or a server that has none.
@@ -543,14 +564,34 @@ static void wb_name_from_attr(struct dev9p_priv *p, const struct p9_attr *a) {
     }
 }
 
+static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr,
+                                const struct p9_client *client);
+
 // Ask the generation of the file p's new fid names, once (votes M31, M33). A fid
-// that cannot learn it has no name; the file locks may still ask later.
-static void wb_name_learn(struct dev9p_priv *p) {
+// that cannot learn it has no name; the file locks may still ask later. With
+// `fill` (a plain walk's, vote M36) the same request asks the basic attributes,
+// and the reply fills the Larder under the guard the attribute-returning walk
+// uses. The Tgetattr's answer goes back to the caller.
+static int wb_name_learn(struct dev9p_priv *p, u64 path, bool fill) {
+    struct larder *l = &p->client->larder;
+    u64 seq0 = larder_gen_snapshot(l);
     struct p9_attr a;
-    if (p9_client_getattr(p->client, p->fid, P9_GETATTR_GEN, &a) == 0)
-        wb_name_from_attr(p, &a);
-    else
+    int rc = p9_client_getattr(p->client, p->fid,
+                               fill ? (P9_GETATTR_BASIC | P9_GETATTR_GEN) : P9_GETATTR_GEN,
+                               &a);
+    if (rc != 0) {
         p->wb_name = DEV9P_WB_FAILED;
+        return rc;
+    }
+    wb_name_from_attr(p, &a);
+    if (fill && (a.valid & P9_GETATTR_BASIC) == P9_GETATTR_BASIC && a.qid.path == path &&
+        __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED)) {
+        struct t_stat st;
+        t_stat_from_p9_attr(&st, &a, p->client);
+        larder_attr_install(l, seq0, path, a.qid.version, &st,
+                            (a.valid & P9_GETATTR_GEN) ? &a.gen : NULL);
+    }
+    return 0;
 }
 
 // The name a holder registered under, fixed before its entry was linked.
@@ -900,6 +941,7 @@ struct wb_reg_bucket {
     spin_lock_t          lock;
     struct dev9p_wb_reg *head;
     struct wb_pin       *pins;
+    u64                  seq;     // the last registration's order
 };
 static struct wb_reg_bucket g_wb_reg[WB_REG_BUCKETS];
 static u32 g_wb_reg_count;          // linked entries: the legs' fast path
@@ -1007,6 +1049,7 @@ static bool wb_register(struct dev9p_priv *p, struct Spoor *c, struct wb_pin *pi
     p->wb_reg.path   = path;
     p->wb_reg.gen    = k.gen;
     p->wb_reg.has_gen = k.has_gen;
+    p->wb_reg.seq    = ++b->seq;
     p->wb_spoor      = c;
     p->wb_reg.next   = b->head;
     b->head          = &p->wb_reg;
@@ -1075,6 +1118,7 @@ void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
     g_wb_test_job.path   = path;
     g_wb_test_job.gen    = 0;
     g_wb_test_job.has_gen = false;
+    g_wb_test_job.seq    = ++b->seq;
     g_wb_test_job.next   = b->head;
     b->head              = &g_wb_test_job;
     __atomic_store_n(&g_wb_test_job.linked, true, __ATOMIC_RELEASE);
@@ -1181,6 +1225,18 @@ static int wb_leg_wait(u64 *backoff) {
 // released, and a run this leg flushed stays held for the next flusher --
 // -T_E_INTR when this thread's caught note cancelled the flush (flush(5): never
 // applied) or ended a wait, -T_E_IO when a death reached this thread.
+//
+// A key with a generation matches one entry at most (wb_register refuses a
+// second name the first could be). A key without one (an open with no name, a
+// server that reports none, a stat by name the Larder cannot name) matches
+// every holder at the number, any of which may hold its file's bytes, so the
+// leg visits each in turn, newest first; a changing one stops each staging
+// (vote M35a). An open with no name takes a refusal only from a holder with no
+// generation either (vote M35): one named by a generation is a file it cannot
+// know is its own. A wait, or a look that found more holders than it can carry,
+// looks again from the first holder it has not passed (registration order), so
+// the leg passes each holder once and ends.
+#define WB_LEG_VISIT_MAX 8u
 static int wb_holder_flush(struct p9_client *cl, struct dev9p_fkey k,
                            const struct dev9p_priv *self, struct wb_pin *pin,
                            int *refused) {
@@ -1191,69 +1247,92 @@ static int wb_holder_flush(struct p9_client *cl, struct dev9p_fkey k,
         return 0;
     struct wb_reg_bucket *b = wb_reg_bucket_of(cl, path);
     u64 backoff = WB_FLUSH_WAIT_NS_MIN;
-    int waited  = 0;
-    int err0    = 0;
-    struct dev9p_priv *h;
-    struct Spoor *s;
+    u64 lim     = ~0ull;    // the entries not yet passed registered before this
+    int out     = 0;
     for (;;) {
+        struct dev9p_priv *hs[WB_LEG_VISIT_MAX];
+        struct Spoor      *ss[WB_LEG_VISIT_MAX];
+        int                e0[WB_LEG_VISIT_MAX];
+        bool               hg[WB_LEG_VISIT_MAX];
+        u32  n    = 0;
+        bool wait = false;
+        bool more = false;
         spin_lock(&b->lock);
-        struct dev9p_wb_reg *e = wb_reg_find_locked(b, cl, k);
-        h = e ? e->holder : NULL;
         if (pin && !pin->linked) wb_pin_link_locked(b, pin, cl, k);
-        if (!e || (h && h == self)) {
-            spin_unlock(&b->lock);
-            return waited;
-        }
-        s = NULL;
-        if (h) {
+        for (struct dev9p_wb_reg *e = b->head; e; e = e->next) {
+            if (e->seq >= lim || e->cl != cl || !wb_same(k, e->path, e->has_gen, e->gen))
+                continue;
+            struct dev9p_priv *h = e->holder;
+            if (h && h == self) continue;
+            if (n == WB_LEG_VISIT_MAX) { more = true; lim = e->seq + 1u; break; }
+            if (!h) { wait = true; lim = e->seq + 1u; break; }  // a closer carries the run
             spin_lock(&h->wb_lock);
             bool held = h->wb_len || h->wb_flushers;
-            err0 = h->wb_err;
+            int  err0 = h->wb_err;
             if (!held && changing && h->wb_known) {
                 h->wb_known = false;
                 wb_release_dead_locked(h);
             }
             spin_unlock(&h->wb_lock);
-            if (!held) {
-                spin_unlock(&b->lock);
-                return waited;
-            }
+            if (!held) continue;
             // A Spoor whose last reference has gone is closing (spoor_tryref
             // refuses it), and its dev9p_close hands the run to a job that
             // takes this entry, under this lock.
-            if (spoor_tryref(h->wb_spoor)) s = h->wb_spoor;
+            if (!spoor_tryref(h->wb_spoor)) { wait = true; lim = e->seq + 1u; break; }
+            hs[n] = h;
+            ss[n] = h->wb_spoor;
+            e0[n] = err0;
+            hg[n] = e->has_gen;
+            n++;
         }
         spin_unlock(&b->lock);
-        if (s) break;
-        int wr = wb_leg_wait(&backoff);
-        if (wr < 0) {
-            wb_unpin(pin);
-            return wr;
-        }
-        waited = 1;
-    }
 
 #ifdef KERNEL_TESTS
-    void (*window)(void *) = __atomic_exchange_n(&g_wb_leg_window, NULL, __ATOMIC_ACQ_REL);
-    if (window) window(g_wb_leg_window_arg);
+        if (n > 0) {
+            void (*window)(void *) = __atomic_exchange_n(&g_wb_leg_window, NULL,
+                                                         __ATOMIC_ACQ_REL);
+            if (window) window(g_wb_leg_window_arg);
+        }
 #endif
-    spin_lock(&h->wb_lock);
-    int rc = 0;
-    if (h->wb_len || h->wb_flushers) rc = wb_flush_locked(h, path);
-    else if (h->wb_err && !err0)     rc = -(h->wb_err);   // refused since the look
-    int out = 1;
-    if (rc != 0 && wb_note_cancelled(rc))                  out = -T_E_INTR;
-    else if (rc != 0 && thread_die_pending(current_thread())) out = -T_E_IO;
-    if (changing && out > 0) {
-        h->wb_known = false;
-        wb_release_dead_locked(h);
+        int stop = 0;
+        for (u32 i = 0; i < n; i++) {
+            struct dev9p_priv *h = hs[i];
+            if (stop == 0) {
+                spin_lock(&h->wb_lock);
+                int rc = 0;
+                if (h->wb_len || h->wb_flushers) rc = wb_flush_locked(h, path);
+                else if (h->wb_err && !e0[i])    rc = -(h->wb_err);   // refused since the look
+                if (rc != 0 && wb_note_cancelled(rc))                  stop = -T_E_INTR;
+                else if (rc != 0 && thread_die_pending(current_thread())) stop = -T_E_IO;
+                if (changing && stop == 0) {
+                    h->wb_known = false;
+                    wb_release_dead_locked(h);
+                }
+                spin_unlock(&h->wb_lock);
+                __atomic_fetch_add(&g_wb_holder_flushes, 1u, __ATOMIC_RELAXED);
+                if (stop == 0) {
+                    out = 1;
+                    // The server refused the run.
+                    if (rc != 0 && refused && *refused == 0 && !(k.unnamed && hg[i]))
+                        *refused = rc;
+                }
+            }
+            spoor_clunk(ss[i]);  // may be the last reference: dev9p_close, which never waits
+        }
+        if (stop < 0) {
+            wb_unpin(pin);
+            return stop;
+        }
+        if (!wait && !more) return out;
+        if (wait) {
+            int wr = wb_leg_wait(&backoff);
+            if (wr < 0) {
+                wb_unpin(pin);
+                return wr;
+            }
+            out = 1;
+        }
     }
-    spin_unlock(&h->wb_lock);
-    __atomic_fetch_add(&g_wb_holder_flushes, 1u, __ATOMIC_RELAXED);
-    spoor_clunk(s);      // may be the last reference: dev9p_close, which never waits
-    if (out < 0) wb_unpin(pin);
-    else if (rc != 0 && refused) *refused = rc;   // the server refused the run
-    return out;
 }
 
 // Map a 9P qid type to a Plan 9 QT* bit. The wire constants
@@ -1530,13 +1609,27 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
         walkqid_free(w);
         return NULL;
     }
+    // A plain file the walk landed on, on a session that stages, is named before
+    // it is published (votes M31, M33, M36). A caught note or a death during the
+    // ask ends the walk, as every wait in a call does (ARCH 8.8.3); any other
+    // failure leaves the open unnamed.
+    if (nname > 0 && w->qid[w->nqid - 1].type == 0 &&
+        wb_session_names(new_priv->client)) {
+        int lr = wb_name_learn(new_priv, w->qid[w->nqid - 1].path, /*fill=*/true);
+        bool cancelled = lr != 0 && wb_note_cancelled(lr);
+        if (cancelled || (lr != 0 && thread_die_pending(current_thread()))) {
+            dev_walk_failed(cancelled ? -T_E_INTR : dev9p_walk_reason(lr));
+            dev9p_clunk_fid(src_priv->client, src_priv->attached_owner, new_fid);
+            priv_discard(new_priv);
+            walkqid_free(w);
+            return NULL;
+        }
+    }
     nc->aux = new_priv;
     nc->qid.path = (w->nqid > 0) ? w->qid[w->nqid - 1].path : c->qid.path;
     nc->qid.vers = (w->nqid > 0) ? w->qid[w->nqid - 1].vers : c->qid.vers;
     nc->qid.type = (w->nqid > 0) ? w->qid[w->nqid - 1].type : c->qid.type;
-    // The fid's file, named before it is published (votes M31, M33): a clone
-    // names its source's; a plain file the walk landed on, on a session that
-    // stages, asks its generation.
+    // A clone names its source's file, before it is published (votes M31, M33).
     if (nname == 0) {
         // The identity before its generation: the acquire orders the gen load after
         // it, so a GEN seen here carries the generation published with it.
@@ -1546,8 +1639,6 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
         __atomic_store_n(&new_priv->lock_ident, ident, __ATOMIC_RELEASE);
         new_priv->wb_gen  = src_priv->wb_gen;
         new_priv->wb_name = src_priv->wb_name;
-    } else if (nc->qid.type == 0 && wb_session_names(new_priv->client)) {
-        wb_name_learn(new_priv);
     }
     // A navigation handle's sample (votes M22a, M27); an open takes its own.
     if (nc->qid.type == 0)
@@ -1678,7 +1769,8 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // + fstat redundancy, the Larder's biggest cheap win. Close-to-open coherent
     // via the own-write invalidation on the mutation paths below.
     u64 seq0 = 0;
-    if (cacheable && larder_attr_serve(l, key, out, &seq0)) {
+    struct larder_who who = wb_who_of(p, c);
+    if (cacheable && larder_attr_serve_who(l, key, &who, out, &seq0)) {
         wb_patch_stat_size(p, out);
         co_patch_stat(p, out);
         return 0;
@@ -2149,8 +2241,14 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
             { return NULL; }
         if (hleaf->size > (u64)DEV9P_CO_MAX_SIZE)
             { return NULL; }
-        if (!larder_pages_cover(l, hleaf->qid_path, hleaf->qid_vers,
-                                hleaf->size))
+        // Own pages count for the file the name reaches now: its generation,
+        // or by number where its attributes carry none (votes M34, M34a).
+        u64 hgen = 0;
+        struct larder_who hwho = larder_attr_gen(l, hleaf->qid_path, &hgen)
+            ? (struct larder_who){ .kind = LARDER_WHO_GEN, .gen = hgen }
+            : (struct larder_who){ .kind = LARDER_WHO_NUMBER };
+        if (!larder_pages_cover_who(l, hleaf->qid_path, hleaf->qid_vers,
+                                    hleaf->size, &hwho))
             { return NULL; }
     }
     // LARDER-DESIGN 12.6: a file another open holds bytes of takes the normal
@@ -2295,8 +2393,13 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
             for (size_t b = 0; b < n; b++) *w++ = (u8)names[i][b];
         }
     }
-    if (!larder_pages_snapshot(l, leaf->qid_path, leaf->qid_vers, size, buf,
-                               seq0)) {
+    // The snapshot is the would-be open's: its name decides the own pages.
+    struct larder_who cowho = coident == DEV9P_IDENT_GEN
+        ? (struct larder_who){ .kind = LARDER_WHO_GEN, .gen = cogen }
+        : coident == DEV9P_IDENT_NONE ? (struct larder_who){ .kind = LARDER_WHO_NUMBER }
+        : (struct larder_who){ .kind = LARDER_WHO_UNNAMED };
+    if (!larder_pages_snapshot_who(l, leaf->qid_path, leaf->qid_vers, size, buf,
+                                   seq0, &cowho)) {
         return co_mint_fail(src_priv, cofid, buf, conames, charge);
     }
 
@@ -2612,7 +2715,7 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     bool named = false;
     if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && wb_session_names(p->client) &&
         c->qid.type == 0) {
-        wb_name_learn(p);
+        (void)wb_name_learn(p, c->qid.path, /*fill=*/false);
         named = wb_named(p);
     }
     // One holder per client and file (LARDER-DESIGN 12.6): a new file has none,
@@ -2683,7 +2786,7 @@ static void wb_close_swap(struct dev9p_priv *p, struct dev9p_close_job *j,
                           u64 qid_path) {
     j->reg = (struct dev9p_wb_reg){ .cl = p->client, .holder = NULL,
                                     .path = qid_path, .gen = p->wb_reg.gen,
-                                    .has_gen = p->wb_reg.has_gen };
+                                    .seq = p->wb_reg.seq, .has_gen = p->wb_reg.has_gen };
     bool linked = __atomic_load_n(&p->wb_reg.linked, __ATOMIC_ACQUIRE);
     struct wb_reg_bucket *b = linked ? wb_reg_bucket_of(p->client, p->wb_reg.path)
                                      : NULL;
@@ -3039,14 +3142,15 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         // only (qid.type 0): a dir's cached size must not convert the server's
         // read-on-directory ERROR into a silent 0.
         u64 fsz;
+        struct larder_who who = wb_who_of(p, c);
         if (c->qid.type == 0 &&
-            larder_attr_fresh_size(l, c->qid.path, c->qid.vers, &fsz) &&
+            larder_attr_fresh_size_who(l, c->qid.path, c->qid.vers, &who, &fsz) &&
             offset >= fsz)
             return 0;
         u64 page_index = offset / LARDER_PAGE_SIZE;
         u32 page_off   = (u32)(offset % LARDER_PAGE_SIZE);
-        u32 served = larder_page_serve(l, c->qid.path, page_index, page_off,
-                                       count, c->qid.vers, (u8 *)buf, &seq0);
+        u32 served = larder_page_serve_who(l, c->qid.path, page_index, page_off,
+                                           count, c->qid.vers, &who, (u8 *)buf, &seq0);
         if (served > 0)
             return (long)served;
     }

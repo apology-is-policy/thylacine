@@ -126,6 +126,10 @@ static u32  g_ga_fail_ecode;         // != 0: every Tgetattr answers Rlerror(eco
 static u64  g_ga_gen;                // B-3h: the generation every Rgetattr reports
 static u32  g_tgetattr_seen;         // B-3h: Tgetattrs since the last lock_wire_reset
 static u64  g_tgetattr_mask;         // B-3h: the last Tgetattr's request mask
+static u32  g_tgetattr_fid;          // the last Tgetattr's fid
+static u64  g_ga_path = 0x33u;       // the qid.path every Rgetattr reports
+static u32  g_twalk_newfid;          // the last named Twalk's newfid
+static u8   g_twalk_type_ov;         // 0: every walked component is P9_QTFILE
 static u32  g_create_ga_fail;        // F-5: m8_wire_mode's create alone runs under it
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
@@ -242,6 +246,10 @@ static void lock_wire_reset(void) {
     g_wga_no_gen = false;
     g_tgetattr_seen = 0;
     g_tgetattr_mask = 0;
+    g_tgetattr_fid  = 0;
+    g_ga_path       = 0x33u;
+    g_twalk_newfid  = 0;
+    g_twalk_type_ov = 0;
 }
 
 static int lock_rlerror(u8 *resp, size_t resp_cap, u16 tag, u32 ec) {
@@ -318,6 +326,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // fid(4) + newfid(4) = 15; nwname at 15..17.
         if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
         u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
+        if (nwname > 0) g_twalk_newfid = le32_at(req + 11);
         if (nwname == 0) {
             g_twalk_clone_seen++;
             g_twalk_clone_fid    = le32_at(req + 7);
@@ -348,7 +357,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[7] = (u8)(nwname & 0xff); resp[8] = (u8)((nwname >> 8) & 0xff);
         for (u16 i = 0; i < nwname; i++) {
             size_t off = P9_HDR_LEN + 2 + (size_t)i * P9_QID_LEN;
-            resp[off] = P9_QTFILE;
+            resp[off] = g_twalk_type_ov ? g_twalk_type_ov : P9_QTFILE;
             for (int j = 0; j < 4; j++) resp[off + 1 + j] = 0;
             u64 qp = g_twalk_path_ov ? g_twalk_path_ov : (u64)(0x10 + i);  // distinguishable
             for (int j = 0; j < 8; j++) resp[off + 5 + j] = (u8)(qp >> (8 * j));
@@ -633,6 +642,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TGETATTR) {
         g_tgetattr_seen++;
+        if (req_len >= P9_HDR_LEN + 4) g_tgetattr_fid = le32_at(req + 7);
         if (req_len >= P9_HDR_LEN + 4 + 8) g_tgetattr_mask = le64_at(req + 11);
         if (g_ga_fail_ecode) {
             u32 ec = g_ga_fail_ecode;
@@ -657,9 +667,11 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         size_t o = P9_HDR_LEN;
         for (int b = 0; b < 8; b++) resp[o + b] = (u8)(g_ga_valid >> (8 * b));
         o += 8;                                              // valid (BASIC unless a test narrows it)
-        resp[o] = P9_QTFILE;                                 // qid (path 0x33)
+        resp[o] = P9_QTFILE;                                 // qid (path 0x33 unless a test sets it)
         for (int b = 0; b < 4; b++) resp[o + 1 + b] = (u8)(g_ga_vers >> (8 * b));
-        o += 1 + 4; resp[o] = 0x33; o += 8;
+        o += 1 + 4;
+        for (int b = 0; b < 8; b++) resp[o + b] = (u8)(g_ga_path >> (8 * b));
+        o += 8;
         { u32 m = g_ga_mode;                                 // mode (S_IFREG|0644 unless a test sets it)
           resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
           resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
@@ -3743,47 +3755,71 @@ void test_dev9p_open_trunc_invalidates(void) {
 // qid.vers -- the page-serve freshness rule) answers the sequential reader's
 // final read-returns-0 probe RPC-free; absent/stale attrs stay conservative
 // (the probe wires). Own-write invalidation restores the wire probe.
+//
+// The handle must be its file's (vote M34): one named by number (a session that
+// stages names the file its plain walk reaches; this server reports no
+// generation) is served. The second pass, one variable away, is a strict
+// session's plain walk, which names nothing: an unnamed plain file is served no
+// attribute, and the probe wires even with the fresh attr in place.
 void test_dev9p_read_eof_attr_served(void) {
-    struct Spoor *root = make_open_client_and_root();
-    struct Spoor *nc = spoor_clone(root);
-    const char *name = "file";
-    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
-    walkqid_free(w);
-    dev9p.open(nc, 0);
-    g_tread_file_size = 20000;
-    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
-    struct larder *l = &g_client.larder;
-    u8 buf[64];
+    for (u32 i = 0; i < 2; i++) {
+        bool unnamed = i == 1;
+        struct Spoor *root = make_open_client_and_root();
+        if (!unnamed) {
+            g_client.loose = true;
+            __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+        }
+        struct Spoor *nc = spoor_clone(root);
+        const char *name = "file";
+        struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+        walkqid_free(w);
+        dev9p.open(nc, 0);
+        g_tread_file_size = 20000;
+        __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+        struct larder *l = &g_client.larder;
+        struct dev9p_priv *np = dev9p_priv_of(nc);
+        u8 wb = np ? np->wb_name : 0xff;
+        u8 buf[64];
 
-    // No attr cached: the EOF probe pays a wire RPC (conservative).
-    u64 w0 = g_tread_seen;
-    long r = dev9p.read(nc, buf, 64, 20000);
-    TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0");
-    TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "no fresh attr -> the probe wires");
+        TEST_EXPECT_EQ((u64)wb, unnamed ? (u64)DEV9P_WB_UNASKED : (u64)DEV9P_WB_NONE,
+                       "premise: the handle is named by number, or (the second pass) unnamed");
 
-    // FRESH attr: EOF serves RPC-free; in-range reads still return bytes.
-    struct t_stat st = {0};
-    st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
-    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st, NULL);
-    w0 = g_tread_seen;
-    r = dev9p.read(nc, buf, 64, 20000);
-    TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0 (attr-served)");
-    TEST_EXPECT_EQ(g_tread_seen - w0, 0ull, "fresh attr -> ZERO wire ops");
-    r = dev9p.read(nc, buf, 64, 19990);
-    TEST_EXPECT_EQ((u64)r, 10ull, "in-range read still returns bytes");
+        // No attr cached: the EOF probe pays a wire RPC (conservative).
+        u64 w0 = g_tread_seen;
+        long r = dev9p.read(nc, buf, 64, 20000);
+        TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0");
+        TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "no fresh attr -> the probe wires");
 
-    // An own-write invalidates the attr: the next EOF probe wires again.
-    dev9p.write(nc, (const u8 *)"x", 1, 0);
-    w0 = g_tread_seen;
-    r = dev9p.read(nc, buf, 64, 20000);
-    TEST_EXPECT_EQ((u64)r, 0ull, "post-write EOF read returns 0");
-    TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "post-write EOF probe wires");
+        // FRESH attr: EOF serves RPC-free; in-range reads still return bytes.
+        struct t_stat st = {0};
+        st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
+        larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st, NULL);
+        w0 = g_tread_seen;
+        r = dev9p.read(nc, buf, 64, 20000);
+        TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0 (attr-served)");
+        if (unnamed) {
+            TEST_EXPECT_EQ(g_tread_seen - w0, 1ull,
+                           "SECOND PASS: an unnamed plain file is served no attribute: the probe wires");
+        } else {
+            TEST_EXPECT_EQ(g_tread_seen - w0, 0ull, "fresh attr -> ZERO wire ops");
+            r = dev9p.read(nc, buf, 64, 19990);
+            TEST_EXPECT_EQ((u64)r, 10ull, "in-range read still returns bytes");
 
-    larder_destroy(&g_client.larder);
-    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
-    g_tread_file_size = 0;
-    spoor_clunk(nc);
-    teardown(root);
+            // An own-write invalidates the attr: the next EOF probe wires again.
+            dev9p.write(nc, (const u8 *)"x", 1, 0);
+            w0 = g_tread_seen;
+            r = dev9p.read(nc, buf, 64, 20000);
+            TEST_EXPECT_EQ((u64)r, 0ull, "post-write EOF read returns 0");
+            TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "post-write EOF probe wires");
+        }
+
+        larder_destroy(&g_client.larder);
+        g_client.loose = false;
+        __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+        g_tread_file_size = 0;
+        spoor_clunk(nc);
+        teardown(root);
+    }
 }
 
 // =============================================================================
@@ -6118,12 +6154,18 @@ void test_dev9p_m31_legs_skip_a_dead_holder(void) {
         long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
         struct Spoor *n = f1 ? m31_peer(root, reborn ? 0x52u : 0x51u) : NULL;
         u32 seen_n = g_twrite_seen;
+        // The control's holder stages again, for the stat by name to land.
+        long w1 = (!reborn && n) ? dev9p.write(f1, chunk + 256, 256, 256) : 0;
+        u32 seen_w1 = g_twrite_seen;
         u32 wga0 = g_wga_seen;
         struct Walkqid *q = n ? dev9p.walk_attrs(root, NULL, names, lens, 1, sts) : NULL;
         if (q == DEV_WALK_ATTRS_UNSUPPORTED) q = NULL;
         bool served = q && q->nqid == 1 && q->spoor == NULL && g_wga_seen == wga0;
         if (q) walkqid_free(q);
         u32 seen_q = g_twrite_seen;
+        // And again, for the cached open's leg.
+        long w2 = (!reborn && n) ? dev9p.write(f1, chunk + 512, 256, 512) : 0;
+        u32 seen_w2 = g_twrite_seen;
         struct Spoor *co = NULL;
         if (n) {
             struct larder *l = &g_client.larder;
@@ -6151,7 +6193,16 @@ void test_dev9p_m31_legs_skip_a_dead_holder(void) {
             TEST_EXPECT_EQ((u64)seen_end, 1ull, "the dead holder's run goes at its own last close");
         } else {
             TEST_EXPECT_EQ((u64)seen_n, 1ull, "CONTROL: the holder's generation: the walk's leg lands its run");
-            TEST_EXPECT_EQ((u64)seen_end, 1ull, "CONTROL: and nothing is left for its close");
+            TEST_EXPECT_EQ((u64)w1, 256ull, "CONTROL: the holder stages a second run");
+            TEST_EXPECT_EQ((u64)seen_w1, 1ull, "CONTROL: held");
+            TEST_EXPECT_EQ((u64)seen_q, 2ull,
+                           "CONTROL: a stat by name, its leg named by the Larder's generation, the holder's, lands the run");
+            TEST_ASSERT(!served, "CONTROL: and then asks the server, the attr the flush dropped (12.6)");
+            TEST_EXPECT_EQ((u64)w2, 256ull, "CONTROL: the holder stages a third run");
+            TEST_EXPECT_EQ((u64)seen_w2, 2ull, "CONTROL: held");
+            TEST_ASSERT(!cached, "CONTROL: a cached open of the held file falls back");
+            TEST_EXPECT_EQ((u64)seen_co, 3ull, "CONTROL: after its leg lands the run");
+            TEST_EXPECT_EQ((u64)seen_end, 3ull, "CONTROL: and nothing is left for the close");
         }
         TEST_ASSERT(ncl == 0 && c1 == 0, "both close");
     }
@@ -6425,11 +6476,15 @@ void test_dev9p_m33_plain_walk_names_the_file(void) {
         g_ga_valid = none ? P9_GETATTR_BASIC : (P9_GETATTR_BASIC | P9_GETATTR_GEN);
         g_ga_gen   = 0x5au;
         g_tgetattr_mask = 0;
+        g_tgetattr_fid  = 0;
         u32 ga0 = g_tgetattr_seen;
         struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
         u32 asked = g_tgetattr_seen - ga0;
         u64 mask  = g_tgetattr_mask;
+        u32 gfid  = g_tgetattr_fid;
+        u32 wfid  = g_twalk_newfid;
         struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        u32 ofid  = op ? op->fid : 0;
         u8  wb    = op ? op->wb_name : 0xff;
         u64 wgen  = op ? op->wb_gen : 0;
         u8  ident = op ? __atomic_load_n(&op->lock_ident, __ATOMIC_ACQUIRE) : 0xff;
@@ -6450,6 +6505,8 @@ void test_dev9p_m33_plain_walk_names_the_file(void) {
         } else {
             TEST_EXPECT_EQ((u64)asked, 1ull, "a walk on a session that stages asks once");
             TEST_ASSERT((mask & P9_GETATTR_GEN) != 0, "for the generation");
+            TEST_ASSERT(wfid != 0 && ofid == wfid, "premise: the open keeps the fid its walk bound");
+            TEST_EXPECT_EQ((u64)gfid, (u64)wfid, "the Tgetattr asks of that fid, the walk's new one");
             if (none) {
                 TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_NONE,
                                "a server that reports none: the number names the file");
@@ -6548,6 +6605,452 @@ void test_dev9p_m33_plain_walked_open_skips_a_dead_holder(void) {
             TEST_EXPECT_EQ((u64)seen_end, 1ull, "CONTROL: and nothing is left for the close");
         }
         TEST_ASSERT(oc == 0 && c1 == 0, "both close");
+    }
+}
+
+// =============================================================================
+// M15 audit round 9: votes M34, M34a, M35, M35a, M36 and findings F3, F5, S-15.
+// =============================================================================
+
+// Vote M34 (round 9 F1): an open of a deleted file, named by its generation, is
+// not served the own pages of the next file at its number: a create there, named
+// by another generation, lands its write as an own page, and the first open's
+// read goes to the server. The control, one variable away (the first open named
+// by the create's generation): it is served the own page, with no Tread.
+void test_dev9p_m34_dead_open_no_other_files_own_page(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool dead = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        g_ga_gen   = dead ? 0x51u : 0x52u;
+        struct Spoor *a = m23_peer(root, 0 /*OREAD*/);
+        g_ga_valid = 0x7ffu;
+        struct dev9p_priv *ap = a ? dev9p_priv_of(a) : NULL;
+        u8  awb  = ap ? ap->wb_name : 0xff;
+        u64 agen = ap ? ap->wb_gen : 0;
+        struct Spoor *f2 = a ? m31_create(root, true, 0x52u) : NULL;
+        struct larder *l = &g_client.larder;
+        wb_wire_reset();
+        long w0  = f2 ? dev9p.write(f2, chunk, 256, 0) : -1;
+        u64 own0 = l->page_own_installs;
+        int fe   = f2 ? dev9p.fsync(f2, 0) : 1;
+        u64 own1 = l->page_own_installs;
+        u8 rb[64];
+        for (u32 k = 0; k < sizeof(rb); k++) rb[k] = 0;
+        u64 tr0 = g_tread_seen;
+        long r  = a ? dev9p.read(a, rb, sizeof(rb), 0) : -1;
+        u64 tr  = g_tread_seen - tr0;
+        bool same = r == (long)sizeof(rb);
+        for (u32 k = 0; same && k < sizeof(rb); k++)
+            if (rb[k] != chunk[k]) same = false;
+        int c2 = f2 ? d9_close(f2) : -1;
+        int ca = a ? d9_close(a) : -1;
+        larder_destroy(l);
+        m23_end(root);
+
+        TEST_ASSERT(a != NULL && f2 != NULL, "an open through the plain walk, and a create at its number");
+        TEST_EXPECT_EQ((u64)awb, (u64)DEV9P_WB_GEN, "premise: the first open is named by a generation");
+        TEST_EXPECT_EQ(agen, dead ? 0x51ull : 0x52ull, "premise: its file's");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the create's write is held");
+        TEST_EXPECT_EQ((u64)(s64)fe, 0ull, "its fsync lands it");
+        TEST_EXPECT_EQ(own1 - own0, 1ull, "as an own page");
+        if (dead) {
+            TEST_EXPECT_EQ((u64)tr, 1ull, "the deleted file's open reads from the server");
+            TEST_ASSERT(!same, "and never gets the new file's bytes");
+        } else {
+            TEST_EXPECT_EQ((u64)tr, 0ull, "CONTROL: the new file's open is served the own page");
+            TEST_ASSERT(same, "CONTROL: its bytes");
+        }
+        TEST_ASSERT(c2 == 0 && ca == 0, "both close");
+    }
+}
+
+// Vote M34 (round 9 F1, the attributes): an fstat through an open named by one
+// generation is not served the Larder's attributes of another at its number: it
+// asks the server (which answers a deleted file's fid ESTALE). The control, one
+// variable away (the attributes carry the open's generation): it is served.
+void test_dev9p_m34_dead_open_no_other_files_attr(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool dead = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        g_ga_gen   = 0x51u;
+        struct Spoor *a = m23_peer(root, 0 /*OREAD*/);
+        g_ga_valid = 0x7ffu;
+        struct larder *l = &g_client.larder;
+        struct t_stat st = {0};
+        st.size     = 0x4242u;
+        st.qid_path = M23_PATH;
+        u64 gen = dead ? 0x52u : 0x51u;
+        larder_attr_install(l, larder_gen_snapshot(l), M23_PATH, 0, &st, &gen);
+        u32 ga0 = g_tgetattr_seen;
+        struct t_stat out = {0};
+        int sr = a ? dev9p.stat_native(a, &out) : -1;
+        u32 asked = g_tgetattr_seen - ga0;
+        int ca = a ? d9_close(a) : -1;
+        larder_destroy(l);
+        m23_end(root);
+
+        TEST_ASSERT(a != NULL, "an open through the plain walk, named 0x51");
+        TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "its fstat answers");
+        if (dead) {
+            TEST_EXPECT_EQ((u64)asked, 1ull, "attributes of another generation: it asks the server");
+            TEST_ASSERT(out.size != 0x4242u, "and reports the server's answer, not the other file's");
+        } else {
+            TEST_EXPECT_EQ((u64)asked, 0ull, "CONTROL: its own generation's attributes are served");
+            TEST_EXPECT_EQ(out.size, 0x4242ull, "CONTROL: those");
+        }
+        TEST_EXPECT_EQ((u64)(s64)ca, 0ull, "it closes");
+    }
+}
+
+// Votes M34 and M34a: a handle with no name (a strict session's plain walk names
+// nothing) is served the Larder's attributes by number only when it is a
+// directory, so the resolver's per-directory search check stays a cache hit; a
+// plain file's asks the server. One variable: the type the walk reports.
+void test_dev9p_m34_unnamed_file_misses_m34a_unnamed_dir_by_number(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool dir = i == 1;
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "root");
+        __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+        struct Spoor *nc = spoor_clone(root);
+        const char *names[1] = { "x" };
+        g_twalk_path_ov = M23_PATH;
+        g_twalk_type_ov = dir ? P9_QTDIR : 0;
+        struct Walkqid *w = nc ? dev9p.walk(root, nc, names, 1) : NULL;
+        g_twalk_type_ov = 0;
+        bool bound = w && w->nqid == 1;
+        if (w) walkqid_free(w);
+        if (!bound && nc) { nc->aux = NULL; spoor_unref(nc); nc = NULL; }
+        struct dev9p_priv *np = nc ? dev9p_priv_of(nc) : NULL;
+        u8 wb = np ? np->wb_name : 0xff;
+        u8 qt = nc ? nc->qid.type : 0xff;
+        struct larder *l = &g_client.larder;
+        struct t_stat st = {0};
+        st.size     = 0x4242u;
+        st.qid_path = M23_PATH;
+        u64 gen = 0x52u;
+        larder_attr_install(l, larder_gen_snapshot(l), M23_PATH, 0, &st, &gen);
+        u32 ga0 = g_tgetattr_seen;
+        struct t_stat out = {0};
+        int sr = nc ? dev9p.stat_native(nc, &out) : -1;
+        u32 asked = g_tgetattr_seen - ga0;
+        u32 cl0 = g_clunk_seen;
+        if (nc) spoor_clunk(nc);
+        if (g_clunk_seen != cl0) (void)p9_client_reader_pump_ready(&g_client);
+        larder_destroy(l);
+        m23_end(root);
+
+        TEST_ASSERT(nc != NULL, "a plain walk");
+        TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_UNASKED, "premise: a strict session names nothing");
+        TEST_EXPECT_EQ((u64)qt, dir ? (u64)QTDIR : 0ull, "premise: the type the walk reported");
+        TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "the fstat answers");
+        if (dir) {
+            TEST_EXPECT_EQ((u64)asked, 0ull, "M34a: an unnamed directory is served by number");
+            TEST_EXPECT_EQ(out.size, 0x4242ull, "M34a: the Larder's attributes");
+        } else {
+            TEST_EXPECT_EQ((u64)asked, 1ull, "M34: an unnamed plain file asks the server");
+        }
+    }
+}
+
+// Vote M35 (round 9 F2): an open with no name lands a holder's run through its
+// fsync's leg, but takes no refusal from a holder named by a generation, which
+// may be a deleted file's: with the file's record evicted between the leg and the
+// report, its fsync returns 0. The control, one variable away (the holder named
+// by number, its server reporting no generation): the leg's refusal is the
+// fsync's answer.
+static void wb_evict_the_file(void);
+
+static void m35_evict(void *arg) {
+    (void)arg;
+    wb_evict_the_file();
+}
+
+void test_dev9p_m35_unnamed_leg_takes_no_named_refusal(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool named = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, named, 0x51u);
+        struct dev9p_priv *fp = f1 ? dev9p_priv_of(f1) : NULL;
+        bool held = fp && fp->wb_eligible;
+        bool hgen = fp && fp->wb_reg.has_gen;
+        g_ga_fail_ecode = T_E_IO;
+        struct Spoor *o = f1 ? m23_peer(root, 0 /*OREAD*/) : NULL;
+        g_ga_fail_ecode = 0;
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        u8 wb = op ? op->wb_name : 0xff;
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        g_twrite_fail_ecode = T_E_IO;
+        dev9p_wb_test_report_window(m35_evict, NULL);
+        int fo = o ? dev9p.fsync(o, 0) : 1;
+        dev9p_wb_test_report_window(NULL, NULL);
+        g_twrite_fail_ecode = 0;
+        u32 seen = g_twrite_seen;
+        int oc = o ? d9_close(o) : -1;
+        int c1 = f1 ? d9_close(f1) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(f1 != NULL && o != NULL, "a holder and an open through the plain walk");
+        TEST_ASSERT(held, "premise: the create holds");
+        TEST_ASSERT(hgen == named, "premise: named by a generation, or (control) by number");
+        TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_FAILED, "premise: the open's Tgetattr failed: it has no name");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        TEST_EXPECT_EQ((u64)seen, 1ull, "the unnamed open's fsync's leg flushed the holder's run");
+        if (named)
+            TEST_EXPECT_EQ((u64)(s64)fo, 0ull,
+                           "it takes no refusal from a holder named by a generation");
+        else
+            TEST_EXPECT_EQ((u64)(s64)fo, (u64)(s64)-T_E_IO,
+                           "CONTROL: a holder named by number: the leg's refusal is the fsync's answer");
+        TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "the open closes");
+        TEST_EXPECT_EQ((u64)(s64)c1, (u64)(s64)-T_E_IO, "the holder keeps its latch for its own close");
+    }
+}
+
+// Vote M35a: a change through an open with no name stops every holder at its
+// number staging, since any may be its own file's: a FAILED open's wstat lands a
+// holder's run, named by a generation, and drops its anchor. The control, one
+// variable away (the changing open named by another generation): the holder is
+// another file's, and nothing lands or stops.
+void test_dev9p_m35a_unnamed_change_stops_the_holder(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool unnamed = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, true, 0x51u);
+        struct Spoor *o = NULL;
+        if (f1 && unnamed) {
+            g_ga_fail_ecode = T_E_IO;
+            o = m23_peer(root, 1 /*OWRITE*/);
+            g_ga_fail_ecode = 0;
+        } else if (f1) {
+            g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+            g_ga_gen   = 0x52u;
+            o = m23_peer(root, 1 /*OWRITE*/);
+            g_ga_valid = 0x7ffu;
+        }
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        u8 wb = op ? op->wb_name : 0xff;
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        int  sr = o ? dev9p.wstat_native(o, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL) : -1;
+        u32 seen = g_twrite_seen;
+        bool known = m23_known(f1);
+        int oc = o ? d9_close(o) : -1;
+        int c1 = f1 ? d9_close(f1) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(f1 != NULL && o != NULL, "a holder and a second open");
+        TEST_EXPECT_EQ((u64)wb, unnamed ? (u64)DEV9P_WB_FAILED : (u64)DEV9P_WB_GEN,
+                       "premise: the second open is unnamed, or (control) named 0x52");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "the wstat answers");
+        if (unnamed) {
+            TEST_EXPECT_EQ((u64)seen, 1ull, "the unnamed open's change lands the holder's run");
+            TEST_ASSERT(!known, "and stops the holder staging, though a generation names it");
+        } else {
+            TEST_EXPECT_EQ((u64)seen, 0ull, "CONTROL: another generation's change lands nothing");
+            TEST_ASSERT(known, "CONTROL: and the holder goes on staging");
+        }
+        TEST_ASSERT(oc == 0 && c1 == 0, "both close");
+    }
+}
+
+// Round 9 S-15: a leg by number visits every holder at the number, not only the
+// first it finds: a dead file's holder registered after the live one's stands
+// ahead of it, and an open with no name lands both runs before its read. The
+// control, one variable away (the reading open named by the live file's
+// generation): its leg reaches the live holder alone.
+void test_dev9p_s15_unnamed_leg_visits_every_holder(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool unnamed = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *live = m31_create(root, true, 0x52u);
+        struct Spoor *dead = live ? m31_create(root, true, 0x51u) : NULL;
+        struct dev9p_priv *lp = live ? dev9p_priv_of(live) : NULL;
+        struct dev9p_priv *dp = dead ? dev9p_priv_of(dead) : NULL;
+        bool both = lp && dp && lp->wb_eligible && dp->wb_eligible;
+        struct Spoor *o = NULL;
+        if (both && unnamed) {
+            g_ga_fail_ecode = T_E_IO;
+            o = m23_peer(root, 0 /*OREAD*/);
+            g_ga_fail_ecode = 0;
+        } else if (both) {
+            g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+            g_ga_gen   = 0x52u;
+            o = m23_peer(root, 0 /*OREAD*/);
+            g_ga_valid = 0x7ffu;
+        }
+        wb_wire_reset();
+        long wl = live ? dev9p.write(live, chunk, 256, 0) : -1;
+        long wd = dead ? dev9p.write(dead, chunk + 256, 256, 0) : -1;
+        u8 rb[16];
+        long r = o ? dev9p.read(o, rb, sizeof(rb), 0) : -1;
+        u32 seen = g_twrite_seen;
+        u32 lleft = lp ? lp->wb_len : 0xffffffffu;
+        int oc = o ? d9_close(o) : -1;
+        int cd = dead ? d9_close(dead) : -1;
+        int cl = live ? d9_close(live) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(both, "premise: two holders at one number, of two generations");
+        TEST_ASSERT(o != NULL, "a reading open");
+        TEST_ASSERT(wl == 256 && wd == 256, "both writes are held");
+        TEST_ASSERT(r >= 0, "the read answers");
+        TEST_EXPECT_EQ((u64)lleft, 0ull, "the live holder's run landed before the read");
+        if (unnamed)
+            TEST_EXPECT_EQ((u64)seen, 2ull, "an unnamed open's leg lands both holders' runs");
+        else
+            TEST_EXPECT_EQ((u64)seen, 1ull, "CONTROL: an open named by the live file's generation lands its run alone");
+        TEST_ASSERT(oc == 0 && cd == 0 && cl == 0, "all close");
+    }
+}
+
+// Round 9 F3 (ARCH 8.8.3): a caught note during the plain walk's Tgetattr fails
+// the walk with EINTR and clunks the fid it bound, as every wait in a call ends
+// on a note. The control, one variable away (no mark: the server's own EINTR is a
+// refusal): the walk succeeds, and the open has no name.
+void test_dev9p_f3_plain_walk_note_fails_the_walk(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    for (u32 i = 0; i < 2; i++) {
+        bool noted = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "a clone to walk into");
+        const char *names[1] = { "wbfile" };
+        g_twalk_path_ov = M23_PATH;
+        g_ga_fail_ecode = P9_E_INTR;
+        u32 cl0 = g_clunk_seen;
+        u32 ga0 = g_tgetattr_seen;
+        t->walk_errno = 0;
+        if (noted) t->note_call_unwound = true;        // what an unwind leaves
+        struct Walkqid *w = dev9p.walk(root, nc, names, 1);
+        t->note_call_unwound = false;                  // what the EL0-return tail clears
+        g_ga_fail_ecode = 0;
+        u16 werr = t->walk_errno;
+        t->walk_errno = 0;
+        u32 asked   = g_tgetattr_seen - ga0;
+        u32 clunked = g_clunk_seen - cl0;
+        bool bound = w && w->nqid == 1;
+        if (w) walkqid_free(w);
+        struct dev9p_priv *np = bound ? dev9p_priv_of(nc) : NULL;
+        u8 wb = np ? np->wb_name : 0xff;
+        if (clunked) (void)p9_client_reader_pump_ready(&g_client);
+        u32 cl1 = g_clunk_seen;
+        if (bound) spoor_clunk(nc);
+        else { nc->aux = NULL; spoor_unref(nc); }
+        if (g_clunk_seen != cl1) (void)p9_client_reader_pump_ready(&g_client);
+        m23_end(root);
+
+        TEST_EXPECT_EQ((u64)asked, 1ull, "the plain walk asked its Tgetattr");
+        if (noted) {
+            TEST_ASSERT(!bound, "a caught note during it fails the walk");
+            TEST_EXPECT_EQ((u64)werr, (u64)T_E_INTR, "with EINTR");
+            TEST_EXPECT_EQ((u64)clunked, 1ull, "and the fid it bound is clunked");
+        } else {
+            TEST_ASSERT(bound, "CONTROL: the server's EINTR is a refusal: the walk succeeds");
+            TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_FAILED, "CONTROL: and the open has no name");
+            TEST_EXPECT_EQ((u64)werr, 0ull, "CONTROL: no reason recorded");
+        }
+    }
+}
+
+// Vote M36: the plain walk's one Tgetattr asks the basic attributes with the
+// generation, and its reply fills the Larder, so an fstat through the walked open
+// is served with no second Tgetattr. The control, one variable away (the reply
+// leaves the basic attributes out of `valid`): nothing fills, and the fstat asks.
+void test_dev9p_m36_plain_walk_fills_the_larder(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool filled = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        g_ga_valid = filled ? (P9_GETATTR_BASIC | P9_GETATTR_GEN) : P9_GETATTR_GEN;
+        g_ga_gen   = 0x5au;
+        g_ga_path  = M23_PATH;
+        g_tgetattr_mask = 0;
+        u32 ga0 = g_tgetattr_seen;
+        struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+        u64 mask   = g_tgetattr_mask;
+        u32 walked = g_tgetattr_seen - ga0;
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        u8 wb = op ? op->wb_name : 0xff;
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;   // the fstat's own ask, if any, in full
+        struct t_stat st = {0};
+        int sr = o ? dev9p.stat_native(o, &st) : -1;
+        u32 all = g_tgetattr_seen - ga0;
+        g_ga_valid = 0x7ffu;
+        g_ga_path  = 0x33u;
+        int oc = o ? d9_close(o) : -1;
+        larder_destroy(&g_client.larder);
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "an open through the plain walk");
+        TEST_EXPECT_EQ((u64)walked, 1ull, "the walk asks once");
+        TEST_EXPECT_EQ(mask, (u64)(P9_GETATTR_BASIC | P9_GETATTR_GEN),
+                       "for the basic attributes and the generation together");
+        TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_GEN, "the answer names the open");
+        TEST_EXPECT_EQ((u64)(s64)sr, 0ull, "its fstat answers");
+        TEST_EXPECT_EQ(st.size, 0x100ull, "the server's size");
+        if (filled)
+            TEST_EXPECT_EQ((u64)all, 1ull, "and is served: one Tgetattr in all");
+        else
+            TEST_EXPECT_EQ((u64)all, 2ull, "CONTROL: a reply without the basic attributes fills nothing: the fstat asks");
+        TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "it closes");
+    }
+}
+
+// Vote M33 (round 9 F5): a plain walk names plain files only; one that lands on a
+// directory asks nothing. The control, one variable away (the walk reports a
+// plain file): it asks once.
+void test_dev9p_m33_plain_walk_to_a_dir_asks_nothing(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool dir = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "a clone to walk into");
+        const char *names[1] = { "wbfile" };
+        g_twalk_path_ov = M23_PATH;
+        g_twalk_type_ov = dir ? P9_QTDIR : 0;
+        u32 ga0 = g_tgetattr_seen;
+        struct Walkqid *w = dev9p.walk(root, nc, names, 1);
+        u32 asked = g_tgetattr_seen - ga0;
+        g_twalk_type_ov = 0;
+        bool bound = w && w->nqid == 1;
+        if (w) walkqid_free(w);
+        struct dev9p_priv *np = bound ? dev9p_priv_of(nc) : NULL;
+        u8 wb = np ? np->wb_name : 0xff;
+        u32 cl0 = g_clunk_seen;
+        if (bound) spoor_clunk(nc);
+        else { nc->aux = NULL; spoor_unref(nc); }
+        if (g_clunk_seen != cl0) (void)p9_client_reader_pump_ready(&g_client);
+        m23_end(root);
+
+        TEST_ASSERT(bound, "the walk binds");
+        if (dir) {
+            TEST_EXPECT_EQ((u64)asked, 0ull, "a walk that lands on a directory asks nothing");
+            TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_UNASKED, "and names nothing");
+        } else {
+            TEST_EXPECT_EQ((u64)asked, 1ull, "CONTROL: a plain file's walk asks once");
+            TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_NONE, "CONTROL: and names it (by number, this server)");
+        }
     }
 }
 

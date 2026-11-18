@@ -107,11 +107,13 @@ enum dev9p_wb_name {
 
 // LARDER-DESIGN 12.6 (vote M31): a file by its number and, where the server
 // reports one, its generation. A name with no generation matches every
-// generation of its number.
+// generation of its number. `unnamed`: the open has no name at all (vote M35),
+// as against one whose server reports no generation.
 struct dev9p_fkey {
     u64  path;
     u64  gen;
     bool has_gen;
+    bool unnamed;
 };
 
 // LARDER-DESIGN 12.6 (vote M23): an entry in the holder registry -- the file's
@@ -125,6 +127,7 @@ struct dev9p_wb_reg {
     struct dev9p_priv   *holder;
     u64                  path;
     u64                  gen;
+    u64                  seq;      // registration order in its bucket, newest at the head
     bool                 has_gen;
     bool                 linked;
 };
