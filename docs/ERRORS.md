@@ -515,7 +515,7 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WSTAT` | the Dev has no metadata slot | `-T_E_OPNOTSUPP` (95) |
 | `SYS_WSTAT` | the fd is dev9p's loose cached open of a file renamed, unlinked or replaced since its open | `-T_E_STALE` (116) |
 | `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), or `-T_E_NOSPC` (28) / `-T_E_DQUOT` (122) when the server refused for space (vote M28), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
-| `SYS_WRITE` / `SYS_FSYNC` | a write-behind run of the file was refused by the server: the open's own latch; for fsync also a run its leg flushed (vote M25), or a run of the file refused, or given up by a closer, since the open was last told, once per open (votes M27, M30a) | `-T_E_IO` (5), or `-T_E_NOSPC` (28) / `-T_E_DQUOT` (122) when the server refused for space (vote M28: Linux's `mapping_set_error` rule; a server's `EINTR` or `EAGAIN` would invite a retry that returns 0) |
+| `SYS_WRITE` / `SYS_FSYNC` | a write-behind run of the file was refused by the server: the open's own latch; for fsync also a run its leg flushed (vote M25), or a run of the file refused, or given up by a closer, since the open was last told, once per open (votes M27, M30a), and so is a Loom FSYNC whose Tfsync succeeded (vote M32) | `-T_E_IO` (5), or `-T_E_NOSPC` (28) / `-T_E_DQUOT` (122) when the server refused for space (vote M28: Linux's `mapping_set_error` rule; a server's `EINTR` or `EAGAIN` would invite a retry that returns 0) |
 | any handler | structurally bad argument | `-T_E_INVAL` (22) |
 | any handler | uaccess fault on a user VA | `-T_E_FAULT` (14) |
 

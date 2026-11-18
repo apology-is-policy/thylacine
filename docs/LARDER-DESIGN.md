@@ -737,7 +737,8 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
      WRITE, a READ, an FSYNC, a SETATTR -- meets a priv with nothing staged.
      A latched flush error fails the registration, as it fails fsync: no Loom
      op consults the latch, and a registered priv can latch nothing new, since
-     it never stages. The registration also drops the file's Larder pages:
+     it never stages. A lost run of the file is told all the same: a ring
+     FSYNC whose Tfsync succeeds is told it, as fsync is (12.6, vote M32). The registration also drops the file's Larder pages:
      a flush installs them as own-write pages, which skip the version check,
      and the ring's writes bypass the Larder. Every registration of a plain
      file drops them, the holder's or another open's: another open's
@@ -943,7 +944,8 @@ finds the anchor. If another open already holds the file, or a pin stands on
 it, the new one is not eligible and writes through for its life; its OTRUNC
 open is a changing leg, so the old holder stops staging too, and neither
 stages until the holder's last close. The registry is a fixed
-hash keyed by client and qid.path, each bucket under its own spinlock, and the
+hash of client and qid.path whose entries name the file by number and
+generation (below), each bucket under its own spinlock, and the
 entry is the priv's own, or, past its last reference, its closer job's (below). Lock order: a bucket lock, then the holder's
 `wb_lock`. Nothing takes a bucket lock under `wb_lock`, and no wire I/O happens
 under either. A leg looks the holder up. When the holder holds bytes or has a
@@ -959,6 +961,26 @@ stands (a map, a Loom op, a leg) hands the run to a lock-flush job, and the
 holder leaves once that job's flush has ended with nothing held. A leg's flush
 still in the air at that moment keeps it registered until its last reference,
 which costs another open its staging, never a byte.
+
+**A file's name (vote M31, 2026-11-18).** Stratum's qid.path is the inode
+number alone. It frees the number at the last unlink, while opens of the file
+stand (their fids then answer `ESTALE`), and gives it to the next file created.
+Audit round 7 of vote M15 found what that did to state keyed by the number: a
+new file on a dead file's number could not stage, every leg of it flushed the
+dead holder's run into an `ESTALE` that was recorded as the new file's loss, and
+a loss the dead file left unheard was told to the new file's opens. So every
+entry, pin and lost-run record names its file by number and generation, as
+Linux's NFS client names a file by a handle that carries the generation. An open
+learns the generation from its walk's Twalkgetattr, which asks for it (the file
+locks and a cached open already compare number and generation); a stat by name
+from the Larder's entry for the leaf, which keeps it; a create asks for it once,
+with a Tgetattr on the new fid, and a create that cannot learn it writes through.
+State of another generation is a deleted file's: a leg skips it, it refuses no
+registration, and no open of the new file samples or is told its record. A dead
+holder's refusal is recorded under its own generation, so only its own file's
+opens are told of it. A server that reports no generation keeps number-only
+names, and so does a name whose generation is unknown: it matches every
+generation of its number, which only ever flushes sooner or tells more.
 
 **The pin (votes M24 and M24a, 2026-11-16).** A leg that runs before the
 holder registers is ordered with nothing. Audit round 5 of vote M15 found a
@@ -1069,10 +1091,14 @@ leaves the registry, so a leg waiting on the job finds the record when it stops
 waiting. The record holds a sequence and whether any open has been told. An
 open samples the file's record at its open: the current sequence once some open
 has been told, the one before it while none has, so an open made after a loss
-nobody heard is told too. An fsync is told every loss since its open was last
+nobody heard is told too. A navigation handle, which fsync accepts (vote
+M22a), samples at its walk. An fsync is told every loss since its open was last
 told, once: it returns the refusal its leg met (vote M25), else a record past
 its sample, as `EIO` (or the space errno, as above), and either way it catches
-its open up to the record and marks the record told. So a peer is told of a
+its open up to the record and marks the record told; the holder's own fsync,
+which answers with its latch, does the same. An fsync told of a loss still
+writes back its own open's run first, as Linux's writes back before it reports,
+and skips only the Tfsync. So a peer is told of a
 holder's refusal even when the holder heard it from a write or an fsync, as
 Linux tells every descriptor's next fsync, and no open is told of one loss
 twice. The table is per client and bounded, and its lock is a leaf, taken under
@@ -1085,7 +1111,9 @@ FID-LIFECYCLE 3.3). Its open flushed every held byte before the snapshot was
 taken, and its reads and fstat see no later write of any kind. Loom: a
 registration is a changing leg, but a ring's later operations pass no leg, so
 a file that another open starts to stage after the registration is the open
-Loom seam (`seam-larder-loom-bypass`, section 9). Another client of the same
+Loom seam (`seam-larder-loom-bypass`, section 9). A ring's FSYNC whose
+Tfsync succeeds is told the file's lost runs as an fsync is, once, and lands
+nothing first (vote M32, 2026-11-18). Another client of the same
 server (a second session) sees a file as of its last flush: close-to-open
 between clients, as between two NFS clients. Strict mounts stage nothing
 (12.3).
