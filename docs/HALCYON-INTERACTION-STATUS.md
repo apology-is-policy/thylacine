@@ -1049,15 +1049,15 @@ retires first: both queues share the device loop. This prevents a false timeout;
 input latency under load is recorded by `ls-halcyon-paste-latency` (e6e723cf9,
 work/nov03-mm1/pl4: typing first output p50 2.4-3.5 ms; under the 24,399-byte Nora
 paste p50 3.2 ms; under the 4,000-byte ut paste p50 10.2 ms, settle 84.5 ms, frames
-up to 37.0 ms; numbers in ASYNC-SERVICE-STATUS AS-4). Coordinates follow current display
+up to 37.0 ms; numbers in ASYNC-SERVICE-STATUS AS-4). An idle halcyond dispatches about 20 times a second
+(the caret blink, its presents and the seat): the service worker woken on every UI pass was fixed by
+76bd5710b, tapestryd's frame ticks by vote 144's opt-in (d3e786300; q-fo1 +195..+202 per 10 s, was
++638..+780; OPEN-BUGS 2026-11-17T11:10Z). Coordinates follow current display
 geometry rather than stale boot EDID. App preferences die with surface ownership.
 
 Still open: explicit application relative-pointer capture and its client
 migration (relative motion is not capture); direct-scanout qualification;
-additional scales/modes and failure-injection matrix; the idle wakeups the
-latency record found (an idle halcyond 107-141 dispatches a second in both images:
-tapestryd's frame ticks (vote 144, answered 2026-11-17: FRAME becomes opt-in per surface, not yet built), and the service worker woken on every UI pass,
-fixed by 76bd5710b -- 60-75 a second after it; OPEN-BUGS 2026-11-17T11:10Z); production-feature and full sanitizer qualification; Pi bare-metal backends.
+additional scales/modes and failure-injection matrix; production-feature and full sanitizer qualification; Pi bare-metal backends.
 The existing `ls-gfx-panes` direct-scanout harness assumes the legacy console
 image and hard-codes HVF, so the Halcyon image cannot honestly substitute for
 that row. `docs/manual-drafts/19-pointer.md` remains a draft, not installed help.

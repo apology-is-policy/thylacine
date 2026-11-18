@@ -451,4 +451,5 @@ The client's rules, each from a rule above it:
   84.5 ms, frames up to 37.0 ms; idle halcyond 107-141 dispatches a second, the same in both
   images (ASYNC-SERVICE-STATUS AS-4 has every number). The service worker's half is fixed
   (76bd5710b: the owner is woken only when a completion slot was freed): idle halcyond 60-75
-  dispatches a second after it (q-ow1), the rest the frame ticks (vote 144: opt-in per surface, not yet built) and the seat.
+  dispatches a second after it (q-ow1), the rest the frame ticks and the seat. Vote 144 made FRAME opt-in per surface (d3e786300): idle
+  halcyond about 20 dispatches a second (q-fo1: +195..+202 per 10 s), the caret blink, its presents and the seat.
