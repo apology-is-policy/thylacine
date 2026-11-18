@@ -2662,6 +2662,76 @@ Opens={o1}); all fifteen cfgs as wanted (aux-gate resid/m15-tlc-fscache.sh):
   flush's land and install as two steps, and `FlushClose` is one, so the
   install's guard is pinned by `dev9p.m24_guard_skips_the_own_install`.
 
+### A file's name and the reuse of a number (votes M31 and M33, LARDER-DESIGN 12.6)
+
+Audit round 8 of M15 (F3) found the model silent on what a file is: its Files
+were single incarnations, while Stratum's qid.path is the inode number alone,
+freed at the last unlink while opens of the file stand and given to the next
+file created. A model file is now `(qid.path, generation)`: `Files` are
+numbers, `gen[f]` the incarnation the number names now, and `Reuse(f)` gives a
+deleted file's number to the next file created. Every open is bound to the
+incarnation its fid was made on (`inc`) and named where its fid is made
+(`name`, fixed for its life: round 8 F2); every holder, pin and lost-run record
+is compared by `Same`. State of another generation is a deleted file's.
+
+| Spec action / operator | Impl site |
+|---|---|
+| `Same(a, b)` | `kernel/dev9p.c::wb_same`, at the registry's find (`wb_reg_find_locked`), the pin's (`wb_pin_find_locked`) and the record's (`wb_loss_find_locked`). |
+| `Mint(f, o)` (the name and the sample, where the fid is made) | `dev9p_walk` (a plain walk to a plain file: `wb_name_learn`, one Tgetattr asking GEN; a clone that walks no name copies its source's), `walk_attrs_pass` (the Twalkgetattr's generation), `dev9p_create` (`wb_name_learn`), `dev9p_open_cached` (the Larder's identity for the leaf); each then `wb_open_sample`, and `dev9p_open` samples again under the same name. |
+| `Reuse(f)` | not an impl site: Stratum's inode reuse (`si_gen` bumps; the old file's fids answer `ESTALE`). The guest's own create drops the child's Larder entry (`dev9p_create`). |
+| `FlushDead(f, o)` | `wb_flush_locked`'s refused arm: `wb_loss_record` under `wb_holder_key`, as the closer's job records a run it gives up. |
+| `OwnWriteDead(f, o)` | `dev9p_write`: the wire op's error goes back to the writer, then `wb_unpin`. |
+| `Fsync(f, o)` | `wb_loss_report` at `dev9p_fsync` and at `dev9p_fsync_report` (the ring's FSYNC, vote M32). |
+| `StageWrite`, `OwnWriteBegin`, `Read` (their peers under `Same`) | `wb_register` refuses only under a Same name; `wb_holder_flush`'s leg skips a holder or pin of another generation. |
+
+| Spec name | Obligation |
+|---|---|
+| `NoMisdirectedLoss` | a record names its file by number and generation, and so does the open that samples and reports it: no fsync is told another file's loss. |
+| `DeadStateSkipped` | a dead file's stage or pin never stands under a name Same as a live open's: a leg skips it, it refuses no registration. |
+| `NamesTrue`, `RecordsTrue` | a name is its own file's generation or none; a record under a generation is that incarnation's. |
+| `OneHolder` (per incarnation) | one holder per client and file; a dead holder may stand beside the new file's. |
+
+Outside the model (its server always reports the generation, and every
+Tgetattr is answered), pinned by runtime tests instead: an open whose Tgetattr
+failed has no name -- it registers nothing and writes through, is told only
+losses recorded after it was made, and its legs, pin and report go by number
+(`dev9p.m33_unnamed_open_writes_through`, `dev9p.m33_the_name_does_not_move`);
+a server that reports no generation keeps number-only names, vote M31's
+allowance (`dev9p.m33_plain_walk_names_the_file`); the record table's capacity
+(an evicted record tells less, never another file's loss); and a loss racing an
+open's sample, told to it as if the open came first. The name at each mint is
+pinned by `dev9p.m33_plain_walk_names_the_file`,
+`dev9p.m33_plain_walked_holder_is_named`,
+`dev9p.m33_plain_walked_open_skips_a_dead_holder`,
+`dev9p.m33_clone_keeps_the_name` and the `dev9p.m31_*` tests.
+
+TLC 2026-11-18 (Files={f1,f2}, Capacity=1, MaxCvers=3, Opens={o1,o2},
+MaxGen=2); all twenty-two fs_cache cfgs as wanted (aux-gate
+resid/m15-tlc-fscache.sh):
+- `fs_cache_reuse.cfg` (EnableReuse; one variable from `fs_cache_wb.cfg`):
+  every invariant of `InvariantsReuse`. GREEN -- 2494548 distinct states.
+- `fs_cache_reuse_told.cfg`: `NeverTold` VIOLATED by design, the witness that
+  the report fires: a dead holder's run is refused and recorded, and an open of
+  the same dead file is told of it (5-state trace, `InvariantsReuse`
+  holding throughout).
+- `fs_cache_reuse_coexist.cfg`: `NeverBothHold` VIOLATED by design, the
+  witness that the new file's open holds beside the dead holder
+  (5-state trace, `InvariantsReuse` holding throughout).
+- `fs_cache_buggy_number_key.cfg` (BUGGY_NUMBER_KEY, the key before M31):
+  `DeadStateSkipped` VIOLATED (4-state trace).
+- `fs_cache_buggy_number_key_told.cfg` (the same, `DeadStateSkipped` left
+  out): `NoMisdirectedLoss` VIOLATED -- the new file's fsync is told the dead
+  holder's loss (6-state trace).
+- `fs_cache_buggy_unnamed_walk.cfg` (BUGGY_UNNAMED_WALK, before M33):
+  `DeadStateSkipped` VIOLATED (4-state trace).
+- `fs_cache_buggy_unnamed_walk_told.cfg` (the same, `DeadStateSkipped` left
+  out): `NoMisdirectedLoss` VIOLATED (6-state trace).
+
+The fifteen earlier cfgs run with `EnableReuse = FALSE`, where every open is
+live and every name the same, and keep their figures: `fs_cache.cfg`
+288, `fs_cache_external.cfg` 852, `fs_cache_wb.cfg` and
+`fs_cache_wb_nopop.cfg` 6960 distinct states, each buggy cfg its counterexample.
+
 ---
 
 ## debug_stop.tla — Go IDE Stage 8a (the debugger stop/continue/step SM; spec-first re-enabled, model-first)
