@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**738 owned · 36 unowned · 774 files (95% owned) · ~12012 unswept lines.**
+**740 owned · 36 unowned · 776 files (95% owned) · ~12012 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **99 files, ~51314 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -97,7 +97,7 @@ Excluded as harness and counted here rather than dropped: **99 files, ~51314 lin
 | usr/joey | 1 | 0 | 0 |
 | usr/kaua-term | 4 | 0 | 0 |
 | usr/lantern | 4 | 0 | 0 |
-| usr/lictor | 33 | 0 | 0 |
+| usr/lictor | 35 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-fixture | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |

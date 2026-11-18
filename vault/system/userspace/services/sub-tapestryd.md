@@ -14,6 +14,32 @@ design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
 updated: 2026-11-18
 ---
+## The serve loop asks Lictor only on news (November 18, operator vote 147)
+
+Lictor tells the compositor when one of its answers changed (`/srv/lictor/news`,
+sub-lictor "News"), and the serve loop asks only then. A `lictor::proxy::news::Watch`
+for SEAT, INPUT and GPU is one more descriptor in the poll, after the
+interaction watches (`interaction_ready` finds its own by descriptor; the static
+bound counts it). Each pass ORs `take()` into `pending`: SeatState only on SEAT;
+the three input drains only on INPUT (an empty drain did nothing anyway); on GPU,
+`warp_service_fences(true)` takes the completions, then after posting them the
+vindications -- Lictor pumps the ring every pass before it tells, so no poll call
+-- and adopts the engine's state from those replies, while the pumps it feeds
+(`warp_destroy_owed`, `warp_pump_retires`, `comp_rb_pump`, the test stall watch)
+run every pass on state of their own. A seat not normal waits on the watch, where
+it slept 10 ms a turn; the classes that arrive meanwhile stay pending, and a
+generation change re-pends INPUT and GPU. A failed watch ends the loop like a
+failed broker call. The 1 ms poll clamp while fences were pending is gone, with
+`warp_fences_pending`: a retired chain arrives as GPU news, and Lictor's loop keeps
+the 1 ms pace while chains are out. The seat coordinator has its own Watch for
+SEAT, asks for the seat only on news, and blocks without a timeout while it has
+no lanes in a normal seat; with a lane, or in an episode (the serve thread writes
+the table `aggregate` reads), it keeps its 10 ms pace. Before, every pass made
+eight synchronous broker calls and the coordinator one every 10 ms: ~372 a second
+at idle, three 9P round trips each, the ci image's 15-36% idle floor (OPEN-BUGS
+2026-11-18T13:47Z). q-eb1: ~3 calls/s at idle, strict idle 8.4% and 9.5%.
+
+---
 ## The FRAME clock ticks at its rate (November 18)
 
 The serve loop's FRAME tick is counted from an anchor, rate-exact
@@ -25,7 +51,8 @@ the fence pump) never pushes a tick back -- rounded UP to whole milliseconds,
 and 0 if that tick fell due during the pass (the next pass fires it). The loop
 still fires at most one `frame_tick` per pass (a stall coalesces its backlog)
 and re-anchors on a rate change (the ctl or the idle throttle) or an unfreeze;
-the frozen test-mode clock and the fence-pending 1 ms clamp are unchanged.
+the frozen test-mode clock is unchanged (the fence-pending 1 ms clamp went with
+the broker's news, below).
 Before, the period was `1000 / hz` in integer milliseconds: 16 ms at 60 Hz ran
 62.5 Hz, 66 ms at the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- the
 mac quake timedemos read 60.8-62.5 fps -- and the timeout came from the step (2)
@@ -409,8 +436,8 @@ every vCPU that touched emulated hardware. Lictor now holds a readback, the
 client's or the compositor's, until its context's earlier chains retire, and
 holds that context's later chains behind it. The seam sees no change in its
 counts: a parked chain has its fence id and its slot, and it counts in
-`fences_in_flight`, `ctx_fences_in_flight` and the outstanding count that
-`warp_fences_pending` reads. Each tag carries how long the chain was parked and
+`fences_in_flight`, `ctx_fences_in_flight` and the outstanding count
+(`fenced_outstanding`) that keeps Lictor's serve loop at its 1 ms pace. Each tag carries how long the chain was parked and
 how long it took from publication to retirement. The ctx ctl reports both for
 the context's last readback (`readback-parked-ms`, `readback-exec-ms`), and the
 warp ctl reports both for the last landed compositor readback

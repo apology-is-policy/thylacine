@@ -1328,8 +1328,8 @@ impl Controlq {
             // readback's tag carries the CLIENT's ctx (AS-BUILT 1) -- so a
             // client holding its OWN ctx used to pin `COMP_FSLOT` too, which
             // freezes readback composition for EVERY client, stalls every
-            // synchronous command behind that readback and pins
-            // `warp_fences_pending()` (a ~1 kHz spin in the console). #178's bound -- "the worst a client can do is wedge
+            // synchronous command behind that readback and pins the fenced
+            // pace (Lictor's serve loop at 1 ms). #178's bound -- "the worst a client can do is wedge
             // its own ctx" -- was written when "your ctx's fences" meant only
             // your own; C-6b made that false one resource over.
             #[cfg(feature = "test-mode")]
@@ -5082,6 +5082,11 @@ impl Gpu {
     /// Take the contexts a late retire vindicated (round-3 F2).
     pub fn take_vindications(&mut self) -> alloc::vec::Vec<FenceVindication> {
         core::mem::take(&mut self.ctrl.vindicated)
+    }
+
+    /// Whether each take above would return something now (the broker's news).
+    pub fn fence_news(&self) -> (bool, bool) {
+        (!self.ctrl.completed.is_empty(), !self.ctrl.vindicated.is_empty())
     }
 
     /// #175, the harness levers -- both scoped to ONE ctx (#178), because

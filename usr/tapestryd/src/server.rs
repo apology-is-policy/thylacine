@@ -15739,9 +15739,13 @@ impl Comp {
     /// only the wedge-leak path can orphan one. A compositor-owned tag
     /// (C-6) is ALSO routed to `comp_readback_retired`, before the retire
     /// pump below can free the backing it read into.
-    pub fn warp_service_fences(&mut self) {
-        self.gpu.poll_completions();
-        for tag in self.gpu.take_completions() {
+    /// `news`: Lictor said a fence list or the engine's state changed. Only
+    /// then are the lists asked for (and the engine's state adopted from the
+    /// replies); the pumps below run every pass, on state of their own.
+    pub fn warp_service_fences(&mut self, news: bool) {
+        // Lictor pumps the ring every pass before it tells, so a take is enough.
+        let completions = if news { self.gpu.take_completions() } else { Vec::new() };
+        for tag in completions {
             for c in self.warp_ctxs.iter_mut().flatten() {
                 if c.pub_id != tag.ctx_pub {
                     continue;
@@ -15821,7 +15825,8 @@ impl Comp {
         // its ctx (and the slot it may have condemned) recover -- without
         // this, one client could burn all 8 ctx slots in ~62 s and kill
         // the seam for the whole box permanently (round-3 F2).
-        for v in self.gpu.take_vindications() {
+        let vindications = if news { self.gpu.take_vindications() } else { Vec::new() };
+        for v in vindications {
             // #210 audit F1: a vindication IS a completion -- the device
             // provably finished one abandoned chain -- so the dense fence
             // count must take it, or the ctx is left one short of the
@@ -16048,13 +16053,6 @@ impl Comp {
                 c.fence_poisoned as u32
             );
         }
-    }
-
-    /// Does the serve loop need its 1 ms fence pace? A DEAD engine never
-    /// retires anything, so counting its stuck slots would pin the clamp
-    /// forever (self-found SF-1, same family as audit F6).
-    pub fn warp_fences_pending(&self) -> bool {
-        !self.gpu.engine_dead() && self.gpu.fenced_in_flight() > 0
     }
 
     /// SUBMIT_3D from the ctx submit file: one Twrite = one atomic opaque

@@ -2580,8 +2580,9 @@ slow to answer.
 - **Abandoned prefix.** A readback must not run while a chain abandoned ahead of
   it may still be running. That chain may never retire, though, and a parked
   chain has no abandonment clock of its own. Left parked, it would count in the
-  lane until its context died: tapestryd's poll stays at 1 ms while any fenced
-  chain is outstanding (the bound audit F6 put on it), and slots held by parked
+  lane until its context died: Lictor's serve loop polls at 1 ms while any fenced
+  chain is outstanding in a normal seat (tapestryd kept that pace until operator
+  vote 147 moved it into Lictor; audit F6 bounded it), and slots held by parked
   chains hide the lane's exhaustion from its clients. So when a context has an
   abandoned chain not yet retired, the completion pump releases every parked
   chain of that context as refused (`ok = false`, not abandoned). The device

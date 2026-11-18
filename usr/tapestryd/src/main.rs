@@ -71,7 +71,9 @@ use crate::input::{
     REL_X, REL_Y,
 };
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
-const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES <= 64);
+// The listeners, the conns, one watch per pane, and the broker's news.
+const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES + 1 <= 64);
+use lictor::proxy::news::{self, Watch};
 use tapestryd::frame_clock;
 use tapestryd::keymap::{self, Mods};
 
@@ -529,22 +531,41 @@ impl Driver for Tapestryd {
         // Residual-2 idle throttle: the last time real INPUT arrived. Init to
         // now so bring-up runs at the ctl rate until the console settles.
         let mut last_input = Instant::now();
-        // I-6: the pass clock. The input devices are poll-mode and are NOT in
-        // the pollfd set, so nothing about an arriving event wakes this loop
-        // -- the drain interval IS the pass period, and a held pass is the
-        // only way the eventq can fill. This names such a pass.
+        // I-6: a slow pass. Input reaches this loop as news, so a held pass
+        // delays it and loses nothing (Lictor's input thread keeps the rings
+        // drained). This names such a pass.
         #[cfg(feature = "test-mode")]
         let mut pass_mark = Instant::now();
 
+        // Vote 147: Lictor says when one of its answers changed -- the seat,
+        // an input queue, a fence list -- and this loop asks only then. The
+        // watch is one more descriptor in the poll below.
+        let watch = match Watch::start(news::ALL) {
+            Ok(w) => w,
+            Err(error) => { say!("tapestryd: lictor news failed {:?}", error); return Err(error); }
+        };
+        let mut pending = 0u32;
+        let mut seat = (0u64, 0u32);
         let mut seat_generation = 0;
         loop {
-            let (generation, phase) = match self.comp.gpu.seat_state() {
-                Ok(state) => state,
-                Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
-            };
+            pending |= watch.take();
+            if watch.failed() {
+                say!("tapestryd: lictor news failed");
+                return Err(Error::Hardware);
+            }
+            if pending & news::SEAT != 0 {
+                pending &= !news::SEAT;
+                seat = match self.comp.gpu.seat_state() {
+                    Ok(state) => state,
+                    Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
+                };
+            }
+            let (generation, phase) = seat;
             if phase != 0 {
                 self.comp.interaction_suspend();
-                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                // Nothing below runs until the seat returns, and its return is
+                // news; whatever else arrives meanwhile stays pending.
+                watch.wait();
                 continue;
             }
             if generation != seat_generation {
@@ -552,7 +573,10 @@ impl Driver for Tapestryd {
                 self.comp.interaction_suspend();
                 self.mods = Mods::default();
                 self.comp.seat_resumed();
+                pending |= news::INPUT | news::GPU;
             }
+            let drain_input = pending & news::INPUT != 0;
+            pending &= !news::INPUT;
 
             #[cfg(feature = "test-mode")]
             {
@@ -572,7 +596,7 @@ impl Driver for Tapestryd {
             // (clients see mods; Mods::update identifies them).
             if let Some(kbd) = self.kbd.as_mut() {
                 raw_events.clear();
-                kbd.drain(|ev| raw_events.push(ev));
+                if drain_input { kbd.drain(|ev| raw_events.push(ev)); }
                 input_seen |= !raw_events.is_empty();
                 for ev in &raw_events {
                     if ev.etype == EV_SYN && ev.code == 3 {
@@ -606,7 +630,7 @@ impl Driver for Tapestryd {
             // events flow regardless of held modifiers (clients see mods).
             if let Some(tab) = self.tablet.as_mut() {
                 raw_events.clear();
-                tab.drain(|ev| raw_events.push(ev));
+                if drain_input { tab.drain(|ev| raw_events.push(ev)); }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
@@ -662,7 +686,7 @@ impl Driver for Tapestryd {
             // on the wire (i32 as u32).
             if let Some(m) = self.mouse.as_mut() {
                 raw_events.clear();
-                m.drain(|ev| raw_events.push(ev));
+                if drain_input { m.drain(|ev| raw_events.push(ev)); }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (mut dx, mut dy) = (0i32, 0i32);
@@ -761,10 +785,13 @@ impl Driver for Tapestryd {
                 }
             }
 
-            // (3) The fence pump (W2d): drain retired fenced chains off the
-            // device and post each on its owning ctx -- then the deferred
-            // event-read + fence-read deliveries (backward, remove-safe).
-            self.comp.warp_service_fences();
+            // (3) The fence pump (W2d): on GPU news, drain retired fenced
+            // chains off the device and post each on its owning ctx; every
+            // pass, the pumps they feed, then the deferred event-read +
+            // fence-read deliveries (backward, remove-safe).
+            let gpu_news = pending & news::GPU != 0;
+            pending &= !news::GPU;
+            self.comp.warp_service_fences(gpu_news);
             let mut i = conns.len();
             while i > 0 {
                 i -= 1;
@@ -874,6 +901,12 @@ impl Driver for Tapestryd {
             }
             let interaction_base = pollfds.len();
             self.comp.interaction_poll(&mut pollfds);
+            // Last: interaction_ready finds its own by descriptor.
+            pollfds.push(TPollFd {
+                fd: watch.fd(),
+                events: T_POLLIN,
+                revents: 0,
+            });
             let timeout = if frozen {
                 30 // no tick scheduled; a short pace keeps input drained
             } else {
@@ -881,15 +914,8 @@ impl Driver for Tapestryd {
                 // pump) must not push the next tick back.
                 frame_clock::ms_until_tick(anchor.elapsed().as_nanos() as u64, cur_hz, ticks_done)
             };
-            // W2d: the GPU IRQ is not pollable (the G-5 engine owns it;
-            // irq.wait only inside a sync submit), so while fenced chains
-            // are in flight the pass pace IS the fence-completion latency
-            // -- clamp to 1 ms (the input-drain precedent).
-            let timeout = if self.comp.warp_fences_pending() {
-                timeout.min(1)
-            } else {
-                timeout
-            };
+            // A retired fenced chain arrives as GPU news: the GPU interrupt is
+            // not pollable, so Lictor's loop keeps a 1 ms pace while chains are out.
             let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
             if rc >= 0 { self.comp.interaction_ready(&pollfds[interaction_base..]); }
             if rc < 0 {

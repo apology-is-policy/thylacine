@@ -3,13 +3,17 @@
 use alloc::{vec, vec::Vec};
 use libthyla_rs::{ninep as p9, t_close, t_read, t_write, t_weft_share, t_weft_unshare, T_POLLIN, T_POLLOUT, T_POLLHUP};
 use libthyla_rs::time::Instant;
-use crate::{framing::{self, Transaction}, gpu_api::{Request, Stats}, wire::{Reader, Wire}};
+use crate::{framing::{self, Transaction}, gpu_api::{Request, Stats}, news, wire::{Reader, Wire}};
 use super::device::Device;
 const MSIZE: usize = 8192;
 const MAX_FIDS: usize = 16;
 const RING_BASE: u64 = 1 << 32;
+/// `news`: a read parks until the broker has news for its interest (news.rs).
+const NEWS: u64 = 3;
 #[derive(Clone, Copy)]
 struct Fid { id: u32, path: u64, open: bool, share: u64 }
+#[derive(Clone, Copy)]
+struct NewsRead { tag: u16, fid: u32, interest: u32 }
 fn qid(path: u64) -> p9::Qid {
     p9::Qid { kind: if path == 0 || path == 2 { p9::P9_QTDIR } else { p9::P9_QTFILE }, version: 0, path }
 }
@@ -25,6 +29,8 @@ pub struct Conn {
     reply: Vec<u8>,
     read_at: usize,
     parked: Option<(u16, u32)>,
+    news: Option<NewsRead>,
+    heard: news::Heard,
     alive: bool,
     msize: usize,
 }
@@ -32,7 +38,7 @@ impl Conn {
     pub fn new(fd: i64) -> Self {
         Self { fd, incoming: Vec::new(), outgoing: Vec::new(), sent: 0, fids: Vec::new(),
             transaction: Transaction::default(), pending: None, pending_at: None, reply: Vec::new(), read_at: 0,
-            parked: None, alive: true, msize: MSIZE }
+            parked: None, news: None, heard: news::Heard::default(), alive: true, msize: MSIZE }
     }
     pub fn events(&self) -> i16 { if self.outgoing.is_empty() { T_POLLIN } else { T_POLLOUT } }
     pub fn alive(&self) -> bool { self.alive }
@@ -85,6 +91,23 @@ impl Conn {
             self.transaction.replied().map_err(|_| ())?;
         }
         Ok(result)
+    }
+    /// Answer a parked news read once its interest has news. Runs every pass
+    /// for every connection after the requests, so an idle reader costs one test.
+    pub fn notify(&mut self, facts: &news::Facts) {
+        let Some(read) = self.news else { return };
+        if !self.alive || !self.outgoing.is_empty() { return; }
+        let bits = self.heard.pending(facts, read.interest);
+        if bits == 0 { return; }
+        let mut out = vec![0u8; 64];
+        match p9::build_rread(&mut out, read.tag, &bits.to_le_bytes()) {
+            Ok(n) => {
+                out.truncate(n); self.outgoing = out;
+                self.heard.told(facts, bits);
+                self.news = None;
+            }
+            Err(_) => self.alive = false,
+        }
     }
     /// Complete at most one 9P request per pass, so the hardware input pump
     /// continues even when a normal client continuously sends work.
@@ -142,7 +165,7 @@ impl Conn {
                 let mut missed = false;
                 for name in &a.names[..a.nwname as usize] {
                     let next = match (path, *name) {
-                        (0, b"ctl") => Some(1), (0, b"rings") => Some(2),
+                        (0, b"ctl") => Some(1), (0, b"rings") => Some(2), (0, b"news") => Some(NEWS),
                         (_, b".") => Some(path), (0, b"..") | (2, b"..") => Some(0),
                         (2, name) => core::str::from_utf8(name).ok().and_then(|s| s.parse::<u32>().ok())
                             .filter(|id| device.ring(*id).is_some())
@@ -189,6 +212,13 @@ impl Conn {
             p9::P9_TREAD => {
                 let a = p9::parse_tread(msg)?;
                 let f = self.fid(a.fid)?;
+                if f.path == NEWS {
+                    // Answered by `notify` at the end of this pass or a later one.
+                    let interest = news::interest(a.offset).ok_or(())?;
+                    if !f.open || a.count < 4 || self.news.is_some() { return Err(()); }
+                    self.news = Some(NewsRead { tag, fid: f.id, interest });
+                    return Ok(None);
+                }
                 if f.path != 1 || !f.open || self.parked.is_some() { return Err(()); }
                 if !self.reply.is_empty() { self.read_reply(tag, a.count, out)? }
                 else if self.pending.is_some() { self.parked = Some((tag, a.count)); return Ok(None); }
@@ -197,6 +227,7 @@ impl Conn {
             p9::P9_TFLUSH => {
                 let a = p9::parse_tflush(msg)?;
                 if self.parked.is_some_and(|(tag, _)| tag == a.oldtag) { self.parked = None; }
+                if self.news.is_some_and(|r| r.tag == a.oldtag) { self.news = None; }
                 p9::build_rflush(out, tag)?
             }
             p9::P9_TCLUNK => {
@@ -204,6 +235,7 @@ impl Conn {
                 let i = self.fids.iter().position(|f| f.id == a.fid).ok_or(())?;
                 let fid = self.fids.swap_remove(i);
                 if fid.share != 0 { unsafe { t_weft_unshare(fid.share); } }
+                if self.news.is_some_and(|r| r.fid == fid.id) { self.news = None; }
                 p9::build_rclunk(out, tag)?
             }
             p9::P9_TGETATTR => {

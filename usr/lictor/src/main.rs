@@ -7,7 +7,7 @@ use alloc::{vec::Vec, vec};
 use libdriver::{driver::{run, Driver}, resource::BoundResources, Error};
 use libthyla_rs::{io::Write, *};
 use lictor::{backend::{gpu::Gpu, input::InputDev, intake, screen::Screen, device::Device,
-    server::Conn, seat::{Seat, Input}}, endpoint as ep, gpu_api::{admit, Request, Stats}, wire::Wire};
+    server::Conn, seat::{Seat, Input}}, endpoint as ep, gpu_api::{admit, Request, Stats}, news, wire::Wire};
 #[global_allocator]
 static ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 const MAX_CONNS: usize = 16;
@@ -17,6 +17,8 @@ struct Lictor {
     screen: Screen,
     inputs: Vec<Input>,
     seat: Seat,
+    /// Readable once the input thread has queued something since the last drain.
+    wake: i64,
 }
 impl Driver for Lictor {
     fn probe(resources: &BoundResources) -> Result<Self, Error> {
@@ -48,8 +50,8 @@ impl Driver for Lictor {
         }
         // The input devices go to their own thread, so a GPU wait here never leaves a
         // ring undrained. Last: nothing after it can fail the probe.
-        intake::start(devices)?;
-        Ok(Self { device, screen, inputs, seat: Seat::default() })
+        let wake = intake::start(devices)?;
+        Ok(Self { device, screen, inputs, seat: Seat::default(), wake })
     }
     fn serve(mut self, _resources: &BoundResources) -> Result<(), Error> {
         let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
@@ -68,6 +70,8 @@ impl Driver for Lictor {
         let mut conns: Vec<Conn> = Vec::new();
         #[cfg(feature = "test-mode")]
         let mut witnessed_park = 0;
+        // Takes served per news queue (news.rs): counted only when one ran.
+        let mut takes = [0u64; news::QUEUES];
         loop {
             self.seat.input(&mut self.inputs);
             #[cfg(feature = "test-mode")]
@@ -115,6 +119,7 @@ impl Driver for Lictor {
                         let mut bytes = Vec::new();
                         if let Some(input) = self.inputs.get_mut(index as usize) {
                             let events = core::mem::take(&mut input.events);
+                            if let Some(t) = takes.get_mut(index as usize) { *t += 1; }
                             events.put(&mut bytes); Ok(bytes)
                         } else { Err(Error::BadField) }
                     }
@@ -134,7 +139,16 @@ impl Driver for Lictor {
                             let mut bytes = Vec::new(); accepted.put(&mut bytes); Ok(bytes)
                         }
                     }
-                    request if self.seat.phase == 0 => self.device.execute(conn.fd, request),
+                    request if self.seat.phase == 0 => {
+                        let taken = match request {
+                            Request::TakeCompletions => Some(news::COMPLETIONS),
+                            Request::TakeVindications => Some(news::VINDICATIONS),
+                            _ => None,
+                        };
+                        let result = self.device.execute(conn.fd, request);
+                        if let (Some(q), true) = (taken, result.is_ok()) { takes[q] += 1; }
+                        result
+                    }
                     _ => Err(Error::Hardware),
                 };
                 #[cfg(feature = "test-mode")]
@@ -144,11 +158,27 @@ impl Driver for Lictor {
             #[cfg(feature = "test-mode")]
             for conn in conns.iter().filter(|c| !c.alive()) { self.device.test_stall_forget(conn.fd); }
             conns.retain(Conn::alive);
+            // After every request of the pass, so news reads the state those
+            // requests were answered from.
+            let stats = Stats::from(&self.device.gpu);
+            let mut facts = news::Facts { seat: (self.seat.generation, self.seat.phase),
+                engine: (stats.engine, stats.stalls), takes, ..news::Facts::default() };
+            for (ready, input) in facts.ready.iter_mut().zip(self.inputs.iter()) { *ready = !input.events.is_empty(); }
+            (facts.ready[news::COMPLETIONS], facts.ready[news::VINDICATIONS]) = self.device.gpu.fence_news();
+            for conn in &mut conns { conn.notify(&facts); }
             let mut poll = vec![TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 }];
             let base = poll.len();
             for conn in &conns { poll.push(TPollFd { fd: conn.fd as i32, events: conn.events(), revents: 0 }); }
-            let result = unsafe { t_poll(poll.as_mut_ptr(), poll.len(), 10) };
+            let wake_at = poll.len();
+            poll.push(TPollFd { fd: self.wake as i32, events: T_POLLIN, revents: 0 });
+            // The GPU interrupt is not pollable, so while fenced chains are out
+            // this loop is what finds them retired: their news waits on its pace.
+            // Not in an episode: parked chains stay held, and no take is admitted.
+            let fencing = self.seat.phase == 0 && !self.device.gpu.engine_dead()
+                && self.device.gpu.fenced_outstanding() > 0;
+            let result = unsafe { t_poll(poll.as_mut_ptr(), poll.len(), if fencing { 1 } else { 10 }) };
             if result < 0 { lictor::backend::diagnostic(&alloc::format!("lictor: poll failed {}\n", result)); return Err(Error::Hardware); }
+            if poll[wake_at].revents & T_POLLIN != 0 { intake::drain_wake(self.wake); }
             for (i, conn) in conns.iter_mut().enumerate() { conn.io(poll[base + i].revents); }
             if poll[0].revents & T_POLLIN != 0 {
                 let fd = unsafe { t_srv_accept(listener) };

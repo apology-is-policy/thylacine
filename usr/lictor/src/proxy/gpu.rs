@@ -265,9 +265,6 @@ impl Gpu {
     pub fn transfer_from_3d_box_sync(&mut self, ctx_id: u32, res_id: u32, x: u32, y: u32, w: u32, h: u32, offset: u64, stride: u32) -> Result<(), Error> {
         self.invoke(Request::TransferFrom3dBoxSync { ctx_id, res_id, x, y, w, h, offset, stride }).unwrap_or(Err(Error::Hardware))
     }
-    pub fn poll_completions(&mut self) -> () {
-        self.invoke(Request::PollCompletions).unwrap_or(())
-    }
     pub fn take_completions(&mut self) -> Vec<FenceTag> {
         self.invoke(Request::TakeCompletions).unwrap_or(Vec::new())
     }
@@ -345,13 +342,6 @@ impl Gpu {
     }
     pub fn ctx_has_poisoned_slot(&self, ctx_pub: u32) -> bool {
         self.query(Request::CtxHasPoisonedSlot { ctx_pub }).unwrap_or(true)
-    }
-    /// Fenced chains whose completion is still owed, parked ones included.
-    pub fn fenced_in_flight(&self) -> u32 {
-        self.query(Request::FencedInFlight).unwrap_or(u32::MAX)
-    }
-    pub fn engine_dead(&self) -> bool {
-        self.query(Request::EngineDead).unwrap_or(true)
     }
     /// The broker's owed frees; an unanswered query reads `owed` u32::MAX.
     pub fn frees_owed(&self) -> Frees {

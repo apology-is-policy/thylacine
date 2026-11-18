@@ -29,10 +29,12 @@ code:
   - usr/lictor/src/limits.rs
   - usr/lictor/src/main.rs
   - usr/lictor/src/model.rs
+  - usr/lictor/src/news.rs
   - usr/lictor/src/objects.rs
   - usr/lictor/src/proxy/gpu.rs
   - usr/lictor/src/proxy/input.rs
   - usr/lictor/src/proxy/mod.rs
+  - usr/lictor/src/proxy/news.rs
   - usr/lictor/src/render.rs
   - usr/lictor/src/typography.rs
   - usr/lictor/src/type_metrics.rs
@@ -125,7 +127,7 @@ The normal designation itself confers no trusted endpoint operations.
 
 ### Normal broker
 
-The bounded 9P tree contains `ctl` and `rings/<resource>`. Control messages carry
+The bounded 9P tree contains `ctl`, `news` and `rings/<resource>`. Control messages carry
 strictly increasing connection sequences and bounded, completely decoded typed
 requests. Unsupported 9P extensions return ENOSYS so the kernel can negotiate its
 normal fallback. Filesystem mode bits permit operations inside an already
@@ -332,6 +334,43 @@ Only the designated compositor reaches the broker, and only the booting
 operator sets the token. `tools/interactive/ls-gpu-dead.exp` is the gate for
 the retirement shots, and `tools/warp-host.sh composed-stall` (the GL host) for
 the stall shots.
+
+### News (operator vote 147, 2026-11-18)
+
+The compositor asks the broker only when an answer has changed. `news` (path 3,
+read-only) answers a Tread whose offset is an interest mask -- SEAT 1, INPUT 2,
+GPU 4; zero or any other bit is refused, as is a count under 4 -- once a class in
+it has news, with a u32 LE of the classes; until then the read parks. One read
+parks per connection; Tflush of its tag and Tclunk of its fid drop it.
+`Conn::notify` answers at the end of every serve pass, after that pass's requests,
+from `news::Facts`: the seat pair, the engine's state and stall count, and per
+queue (input devices 0..2, fence completions, fence vindications) whether a take
+would return something and how many takes it has served. The rule
+(`src/news.rs`, host-tested, seven mutants killed) keeps per reader what it was
+told: the seat and the engine are news when they differ from it; a queue is news
+when it is ready and a take has run since the reader was told while it was
+ready, so the take, not the reply, rearms it -- an undrained device is told once
+and never spins a reader -- and only a reported queue is marked. Takes are counted
+where they execute: InputDrain in its arm, TakeCompletions and TakeVindications
+when `Device::execute` returns Ok. No queue is news while the seat is not normal
+(none of its takes is admitted then, and a fence retired mid-episode would say
+when); it is news after. Every bit is a function of state an admitted request
+already answers at the same point, so news tells the compositor nothing a
+request could not, and nothing about input pressed at a trusted screen, which the
+seat removes from the queue within the pass (I-27). Counting arrivals instead
+would have leaked that timing.
+
+The client half is `proxy::news::Watch`: a connection of its own, a raw thread
+parked in `t_pread(news, interest)` that ORs the classes into an atomic and writes
+one byte to a nonblocking pipe; the consumer polls the pipe and `take()` empties
+it before swapping the bits, so a byte left always stands for bits a later take
+finds. Every class is pending at start, so the first take reads every answer
+once. EINTR makes every class pending again (the answer may be lost with the
+read); any other failure sets `failed()` with every class, and the thread ends.
+A pollable (QTPOLL) file was not used: the poll core samples a remote file with
+a synchronous round trip on every pass of every poll, which would cost the
+compositor one per serve pass. `rpc_client` reads a reply that fits one read in
+one (two round trips per call, not three).
 
 ### Episode
 
@@ -625,6 +664,13 @@ released before then. Under the armed test latch, F8 stops the input thread at t
 that read it, before that batch is queued, and the serve loop resumes it after its own
 five-second stop, so `ls-graphical-keys-overrun` still overruns the ring.
 
+The input thread writes one byte to a nonblocking pipe the serve loop polls each
+time it queues a batch, after the push, and the loop empties the pipe before its
+next take, so input news waits on the thread's 4 ms pace and not on the loop's.
+While a fenced chain is outstanding on a live engine in a normal seat the loop
+polls at 1 ms (the GPU interrupt is not pollable, so this pace is what finds a
+chain retired and makes it news); otherwise at 10 ms.
+
 The event loop polls physical input independently of broker reply progress.
 Accepted endpoints are nonblocking, so a stalled normal reader cannot park the
 trusted pump. Kernel transitions serialize under the process-table lock;
@@ -665,7 +711,11 @@ and withholds input for the rest of the boot (see the recovery above).
 
 ## Performance
 
-Normal rendering adds a bounded broker round trip. Trusted scenes use CPU
+Normal rendering adds a bounded broker round trip. At idle the compositor makes
+none per pass: q-eb1 (2026-11-18, the ci image, HVF) counted ~3 calls/s after
+boot OK, all present traffic, against ~372/s before `news` (30 serve passes/s x 8
+calls + a seat query every 10 ms, three 9P round trips each), and the strict idle
+gate read 8.4% and 9.5% against 15-36% before. Trusted scenes use CPU
 rasterization into private DMA; the backend uploads complete frames on semantic
 or mask changes. The neutral background avoids unqualified capture operations.
 
@@ -977,8 +1027,10 @@ Open after that review:
   command be skipped or act on another object.
 - A display smaller than 800x720 refuses the whole seat at startup. There is no
   reduced layout.
-- The main loop polls at 100 Hz whether or not anything is happening, and the
-  compositor asks for the seat state every pass. The idle cost is unmeasured.
+- The main loop still wakes at 100 Hz when nothing happens (the seat endpoint
+  is not pollable, so the loop samples it), and the input thread polls the
+  eventqs every 4 ms (vote 72). With the compositor quiet (see News) the ci image
+  idles at 8-10% CPU under HVF.
 - Warden starts the compositor after the service signals READY and never reaps
   it.
 

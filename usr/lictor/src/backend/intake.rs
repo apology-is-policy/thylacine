@@ -10,14 +10,15 @@
 use super::input::{InputDev, Report};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicI64, AtomicU64, Ordering},
     time::Duration,
 };
-use libthyla_rs::{sync::Mutex, t_burrow_attach, thread};
+use libthyla_rs::{sync::Mutex, t_burrow_attach, t_pipe, t_read, t_set_nonblock, t_write, thread};
 
 pub const CAPACITY: usize = 4096;
 /// As many as the backend has input windows for (main.rs).
 pub const MAX_DEVICES: usize = 3;
+const _: () = assert!(MAX_DEVICES == crate::news::INPUTS, "each device has a news queue");
 /// An eventq of 64 overruns only past 16,000 reports a second at this cadence.
 const POLL_MS: u64 = 4;
 const STACK: u64 = 64 * 1024;
@@ -44,18 +45,30 @@ static QUEUE: Mutex<Queue> = Mutex::new(Queue {
 /// moves everything the devices had placed before it.
 static PASSES: AtomicU64 = AtomicU64::new(0);
 
+/// The write end of the serve loop's wake pipe. A batch queued writes one byte, so the
+/// compositor's input news waits on this thread's pace, not on the serve loop's poll.
+static WAKE: AtomicI64 = AtomicI64::new(-1);
+
 struct Reader {
     devices: Vec<InputDev>,
     batch: Vec<(u8, Entry)>,
 }
 
-/// Hand the devices to a new thread that drains them for the life of the process. Nothing
-/// joins it: `t_exit_group` ends it with the process, and no device memory is released
+/// Hand the devices to a new thread that drains them for the life of the process, and
+/// return the read end of its wake pipe for the serve loop to poll. Nothing joins the
+/// thread: `t_exit_group` ends it with the process, and no device memory is released
 /// before then.
-pub fn start(devices: Vec<InputDev>) -> Result<(), libdriver::Error> {
+pub fn start(devices: Vec<InputDev>) -> Result<i64, libdriver::Error> {
     if devices.is_empty() || devices.len() > MAX_DEVICES {
         return Err(libdriver::Error::Hardware);
     }
+    // SAFETY: plain descriptor calls on a pair this function owns. Both ends are
+    // nonblocking: a full pipe already wakes the loop, and its drain must not park.
+    let (wake_r, wake_w) = unsafe { t_pipe() };
+    if wake_r < 0 || unsafe { t_set_nonblock(wake_r, true) } != 0 || unsafe { t_set_nonblock(wake_w, true) } != 0 {
+        return Err(libdriver::Error::Hardware);
+    }
+    WAKE.store(wake_w, Ordering::Release);
     QUEUE.lock().entries.reserve_exact(CAPACITY);
     // SAFETY: a fresh anonymous region of STACK bytes, owned by the thread for its life.
     let stack = unsafe { t_burrow_attach(STACK) };
@@ -73,7 +86,7 @@ pub fn start(devices: Vec<InputDev>) -> Result<(), libdriver::Error> {
     // SAFETY: `read` is a C-ABI function of one u64 that never returns; `arg` is the
     // leaked Box, which only that thread reads from here on.
     match unsafe { thread::spawn_raw(read as *const () as u64, sp, arg, 0) } {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(wake_r),
         Err(_) => {
             // The thread never ran, so nothing else reaches the Box.
             drop(unsafe { Box::from_raw(arg as *mut Reader) });
@@ -102,6 +115,14 @@ pub fn passes() -> u64 {
     PASSES.load(Ordering::Acquire)
 }
 
+/// Empty the wake pipe. Read before the next `take`, which then holds every batch whose
+/// byte this drained.
+pub fn drain_wake(fd: i64) {
+    let mut bytes = [0u8; 64];
+    // SAFETY: a nonblocking read into a local buffer; it stops at EAGAIN or EOF.
+    while unsafe { t_read(fd, bytes.as_mut_ptr(), bytes.len()) } > 0 {}
+}
+
 extern "C" fn read(arg: u64) {
     // SAFETY: `arg` is the Box leaked by `start` for this thread alone.
     let reader = unsafe { &mut *(arg as *mut Reader) };
@@ -124,6 +145,10 @@ extern "C" fn read(arg: u64) {
             let key_at = test::stop_at_key(batch);
             if !batch.is_empty() {
                 let accepted = push(batch);
+                // After the push, so the woken loop's take finds it. Refused when the
+                // pipe is full, which only happens while a byte already waits.
+                // SAFETY: one byte from a static to the nonblocking write end.
+                unsafe { t_write(WAKE.load(Ordering::Acquire), [1u8].as_ptr(), 1); }
                 #[cfg(feature = "test-mode")]
                 test::dropped_key(key_at, accepted);
                 #[cfg(not(feature = "test-mode"))]
