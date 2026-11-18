@@ -2075,6 +2075,14 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         return loom_count_result(got);
     }
     default:
+        // A ring FSYNC is told the file's lost runs once its Tfsync has
+        // succeeded, as fsync is (LARDER-DESIGN 12.6, vote M32). Under the
+        // client's lock: the Dev's report takes only a leaf lock.
+        if (op->opcode == LOOM_OP_FSYNC && status == 0 && op->pinned &&
+            op->pinned->dev && op->pinned->dev->fsync_report) {
+            int lost = op->pinned->dev->fsync_report(op->pinned);
+            if (lost < 0) return (s32)lost;
+        }
         return loom_scalar_result(status);            // NOP / FSYNC
     }
 }

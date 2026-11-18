@@ -213,6 +213,8 @@ struct p9_client_progress {
 #define P9_WB_LOSS_MAX 16u
 struct p9_wb_loss {
     u64  path;
+    u64  gen;      // the file's generation, when has_gen (vote M31)
+    bool has_gen;
     u64  seq;      // 0: a free slot
     int  err;      // positive errno
     bool seen;     // some open has been told

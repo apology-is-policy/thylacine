@@ -501,18 +501,43 @@ static int wb_refusal_errno(int err) {
     return (err == -T_E_NOSPC || err == -T_E_DQUOT) ? err : -T_E_IO;
 }
 
+// One file (vote M31): the same number, and the same generation where both names
+// carry one.
+static bool wb_same(struct dev9p_fkey k, u64 path, bool has_gen, u64 gen) {
+    return k.path == path && (!k.has_gen || !has_gen || k.gen == gen);
+}
+
+// An open's name for its file: the generation its walk, create or mint learned.
+static struct dev9p_fkey wb_key_of(const struct dev9p_priv *p, u64 path) {
+    bool g = __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE) == DEV9P_IDENT_GEN;
+    return (struct dev9p_fkey){
+        .path = path, .has_gen = g,
+        .gen = g ? __atomic_load_n(&p->lock_gen, __ATOMIC_RELAXED) : 0,
+    };
+}
+
+// The name a holder registered under, fixed before its entry was linked.
+static struct dev9p_fkey wb_holder_key(const struct dev9p_priv *p, u64 path) {
+    return (struct dev9p_fkey){ .path = path, .gen = p->wb_reg.gen,
+                                .has_gen = p->wb_reg.has_gen };
+}
+
 // A lost run (LARDER-DESIGN 12.6, votes M27, M30a) is recorded against the file
 // on its client, as Linux's errseq records a writeback error against the inode:
 // a refused run at its refusal, under the holder's wb_lock, and a closer's run
 // where its job gives it up. An open samples the file's record at its open, and
 // an fsync whose sample is behind the record reports it once. The table's lock
 // is a leaf: nothing is taken under it.
-static void wb_loss_record(struct p9_client *cl, u64 path, int err) {
+static void wb_loss_record(struct p9_client *cl, struct dev9p_fkey k, int err) {
     struct p9_wb_losses *t = &cl->wb_loss;
     spin_lock(&t->lock);
     struct p9_wb_loss *r = NULL;
-    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
-        if (t->rec[i].seq && t->rec[i].path == path) r = &t->rec[i];
+    for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++) {
+        const struct p9_wb_loss *q = &t->rec[i];
+        if (q->seq && q->path == k.path && q->has_gen == k.has_gen &&
+            (!k.has_gen || q->gen == k.gen))
+            r = &t->rec[i];
+    }
     // Else a free slot, else the oldest record, whose loss keeps only its
     // console line.
     for (u32 i = 0; i < P9_WB_LOSS_MAX && !r; i++)
@@ -522,8 +547,10 @@ static void wb_loss_record(struct p9_client *cl, u64 path, int err) {
         for (u32 i = 1; i < P9_WB_LOSS_MAX; i++)
             if (t->rec[i].seq < r->seq) r = &t->rec[i];
     }
-    r->path = path;
-    r->err  = -wb_refusal_errno(err);
+    r->path    = k.path;
+    r->gen     = k.gen;
+    r->has_gen = k.has_gen;
+    r->err     = -wb_refusal_errno(err);
     r->seen = false;
     __atomic_store_n(&t->seq, t->seq + 1u, __ATOMIC_RELEASE);
     r->seq  = t->seq;
@@ -590,7 +617,7 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
         if (p->wb_err == 0) p->wb_err = -rep;   // positive errno
         // Recorded for the file's other opens before the latch can be seen: a
         // leg reads it under this lock (vote M30a).
-        wb_loss_record(p->client, qid_path, rep);
+        wb_loss_record(p->client, wb_holder_key(p, qid_path), rep);
         p->wb_len   = 0;
         p->wb_known = false;
         return rep;
@@ -616,41 +643,46 @@ static void wb_release_dead_locked(struct dev9p_priv *p) {
     p->wb_cap = 0;
 }
 
+// Under t's lock: the file's newest record, or NULL. Only a name with no
+// generation can match two (vote M31).
+static struct p9_wb_loss *wb_loss_find_locked(struct p9_wb_losses *t,
+                                              struct dev9p_fkey k) {
+    struct p9_wb_loss *best = NULL;
+    for (u32 i = 0; i < P9_WB_LOSS_MAX; i++) {
+        struct p9_wb_loss *r = &t->rec[i];
+        if (r->seq && wb_same(k, r->path, r->has_gen, r->gen) &&
+            (!best || r->seq > best->seq))
+            best = r;
+    }
+    return best;
+}
+
 // An open's sample: the record's sequence once some open has been told of it,
 // the one before while none has, so an open made after a loss nobody heard is
 // told too; 0 for a file with no record. A loss racing the open may be told to
 // it, as if the open came first.
-static u64 wb_loss_sample(struct p9_client *cl, u64 path) {
+static u64 wb_loss_sample(struct p9_client *cl, struct dev9p_fkey k) {
     struct p9_wb_losses *t = &cl->wb_loss;
     if (__atomic_load_n(&t->seq, __ATOMIC_ACQUIRE) == 0) return 0;
     u64 s = 0;
     spin_lock(&t->lock);
-    for (u32 i = 0; i < P9_WB_LOSS_MAX; i++) {
-        const struct p9_wb_loss *r = &t->rec[i];
-        if (r->seq && r->path == path) {
-            s = r->seen ? r->seq : r->seq - 1u;
-            break;
-        }
-    }
+    const struct p9_wb_loss *r = wb_loss_find_locked(t, k);
+    if (r) s = r->seen ? r->seq : r->seq - 1u;
     spin_unlock(&t->lock);
     return s;
 }
 
 // fsync's report: the file's record, once, when this open's sample is behind it.
-static int wb_loss_report(struct dev9p_priv *p, u64 path) {
+static int wb_loss_report(struct dev9p_priv *p, struct dev9p_fkey k) {
     struct p9_wb_losses *t = &p->client->wb_loss;
     if (__atomic_load_n(&t->seq, __ATOMIC_ACQUIRE) == 0) return 0;
     int rc = 0;
     spin_lock(&t->lock);
-    for (u32 i = 0; i < P9_WB_LOSS_MAX; i++) {
-        struct p9_wb_loss *r = &t->rec[i];
-        if (!r->seq || r->path != path) continue;
-        if (r->seq > p->wb_errseq) {
-            p->wb_errseq = r->seq;
-            r->seen      = true;
-            rc           = -r->err;
-        }
-        break;
+    struct p9_wb_loss *r = wb_loss_find_locked(t, k);
+    if (r && r->seq > p->wb_errseq) {
+        p->wb_errseq = r->seq;
+        r->seen      = true;
+        rc           = -r->err;
     }
     spin_unlock(&t->lock);
     return rc;
@@ -658,7 +690,12 @@ static int wb_loss_report(struct dev9p_priv *p, u64 path) {
 
 #ifdef KERNEL_TESTS
 void dev9p_wb_test_loss(struct p9_client *cl, u64 path, int err) {
-    wb_loss_record(cl, path, err);
+    wb_loss_record(cl, (struct dev9p_fkey){ .path = path }, err);
+}
+
+void dev9p_wb_test_loss_gen(struct p9_client *cl, u64 path, u64 gen, int err) {
+    wb_loss_record(cl, (struct dev9p_fkey){ .path = path, .gen = gen, .has_gen = true },
+                   err);
 }
 #endif // KERNEL_TESTS
 
@@ -806,6 +843,8 @@ struct wb_pin {
     struct wb_pin           *next;
     const struct p9_client  *cl;
     u64                      path;
+    u64                      gen;      // the file's name (vote M31)
+    bool                     has_gen;
     bool                     linked;
 };
 struct wb_reg_bucket {
@@ -839,9 +878,10 @@ static struct wb_reg_bucket *wb_reg_bucket_of(const struct p9_client *cl, u64 pa
 }
 
 static struct dev9p_wb_reg *wb_reg_find_locked(struct wb_reg_bucket *b,
-                                               const struct p9_client *cl, u64 path) {
+                                               const struct p9_client *cl,
+                                               struct dev9p_fkey k) {
     struct dev9p_wb_reg *e = b->head;
-    while (e && !(e->cl == cl && e->path == path)) e = e->next;
+    while (e && !(e->cl == cl && wb_same(k, e->path, e->has_gen, e->gen))) e = e->next;
     return e;
 }
 
@@ -855,16 +895,18 @@ static struct dev9p_wb_reg **wb_reg_link_locked(struct wb_reg_bucket *b,
 }
 
 static bool wb_pin_find_locked(struct wb_reg_bucket *b, const struct p9_client *cl,
-                               u64 path) {
+                               struct dev9p_fkey k) {
     for (struct wb_pin *q = b->pins; q; q = q->next)
-        if (q->cl == cl && q->path == path) return true;
+        if (q->cl == cl && wb_same(k, q->path, q->has_gen, q->gen)) return true;
     return false;
 }
 
 static void wb_pin_link_locked(struct wb_reg_bucket *b, struct wb_pin *pin,
-                               const struct p9_client *cl, u64 path) {
-    pin->cl     = cl;
-    pin->path   = path;
+                               const struct p9_client *cl, struct dev9p_fkey k) {
+    pin->cl      = cl;
+    pin->path    = k.path;
+    pin->gen     = k.gen;
+    pin->has_gen = k.has_gen;
     pin->next   = b->pins;
     b->pins     = pin;
     pin->linked = true;
@@ -897,13 +939,14 @@ static void wb_unpin(struct wb_pin *pin) {
 // them, before the entry is linked: a leg that finds the entry finds the anchor.
 static bool wb_register(struct dev9p_priv *p, struct Spoor *c, struct wb_pin *pin) {
     u64 path = c->qid.path;
+    struct dev9p_fkey k = wb_key_of(p, path);
     struct wb_reg_bucket *b = wb_reg_bucket_of(p->client, path);
     if (pin && pin->linked && wb_reg_bucket_of(pin->cl, pin->path) != b)
         wb_unpin(pin);
     spin_lock(&b->lock);
     if (pin && pin->linked) wb_pin_unlink_locked(b, pin);
-    if (wb_reg_find_locked(b, p->client, path) ||
-        wb_pin_find_locked(b, p->client, path)) {
+    if (wb_reg_find_locked(b, p->client, k) ||
+        wb_pin_find_locked(b, p->client, k)) {
         spin_unlock(&b->lock);
         return false;
     }
@@ -913,6 +956,8 @@ static bool wb_register(struct dev9p_priv *p, struct Spoor *c, struct wb_pin *pi
     p->wb_reg.cl     = p->client;
     p->wb_reg.holder = p;
     p->wb_reg.path   = path;
+    p->wb_reg.gen    = k.gen;
+    p->wb_reg.has_gen = k.has_gen;
     p->wb_spoor      = c;
     p->wb_reg.next   = b->head;
     b->head          = &p->wb_reg;
@@ -963,7 +1008,7 @@ void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on) {
     struct wb_reg_bucket *b = on ? wb_reg_bucket_of(cl, path)
                                  : wb_reg_bucket_of(g_wb_test_pin.cl, g_wb_test_pin.path);
     spin_lock(&b->lock);
-    if (on) wb_pin_link_locked(b, &g_wb_test_pin, cl, path);
+    if (on) wb_pin_link_locked(b, &g_wb_test_pin, cl, (struct dev9p_fkey){ .path = path });
     else    wb_pin_unlink_locked(b, &g_wb_test_pin);
     spin_unlock(&b->lock);
 }
@@ -979,6 +1024,8 @@ void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
     g_wb_test_job.cl     = cl;
     g_wb_test_job.holder = NULL;
     g_wb_test_job.path   = path;
+    g_wb_test_job.gen    = 0;
+    g_wb_test_job.has_gen = false;
     g_wb_test_job.next   = b->head;
     b->head              = &g_wb_test_job;
     __atomic_store_n(&g_wb_test_job.linked, true, __ATOMIC_RELEASE);
@@ -1084,10 +1131,11 @@ static int wb_leg_wait(u64 *backoff) {
 // released, and a run this leg flushed stays held for the next flusher --
 // -T_E_INTR when this thread's caught note cancelled the flush (flush(5): never
 // applied) or ended a wait, -T_E_IO when a death reached this thread.
-static int wb_holder_flush(struct p9_client *cl, u64 path,
+static int wb_holder_flush(struct p9_client *cl, struct dev9p_fkey k,
                            const struct dev9p_priv *self, struct wb_pin *pin,
                            int *refused) {
     if (!cl->loose) return 0;
+    u64 path = k.path;
     bool changing = pin != NULL;
     if (!changing && __atomic_load_n(&g_wb_reg_count, __ATOMIC_ACQUIRE) == 0)
         return 0;
@@ -1099,9 +1147,9 @@ static int wb_holder_flush(struct p9_client *cl, u64 path,
     struct Spoor *s;
     for (;;) {
         spin_lock(&b->lock);
-        struct dev9p_wb_reg *e = wb_reg_find_locked(b, cl, path);
+        struct dev9p_wb_reg *e = wb_reg_find_locked(b, cl, k);
         h = e ? e->holder : NULL;
-        if (pin && !pin->linked) wb_pin_link_locked(b, pin, cl, path);
+        if (pin && !pin->linked) wb_pin_link_locked(b, pin, cl, k);
         if (!e || (h && h == self)) {
             spin_unlock(&b->lock);
             return waited;
@@ -1285,7 +1333,7 @@ int dev9p_loom_register(struct Spoor *c) {
     // holder's own included (vote M26).
     struct wb_pin pin = { .linked = false };
     if (plain) {
-        int lr = wb_holder_flush(p->client, c->qid.path, p, &pin, NULL);
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, &pin, NULL);
         if (lr < 0) return lr;
     }
     int rc = 0;
@@ -1439,6 +1487,10 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     nc->qid.path = (w->nqid > 0) ? w->qid[w->nqid - 1].path : c->qid.path;
     nc->qid.vers = (w->nqid > 0) ? w->qid[w->nqid - 1].vers : c->qid.vers;
     nc->qid.type = (w->nqid > 0) ? w->qid[w->nqid - 1].type : c->qid.type;
+    // A navigation handle's sample (votes M22a, M27); an open takes its own.
+    if (nc->qid.type == 0)
+        new_priv->wb_errseq = wb_loss_sample(new_priv->client,
+                                             wb_key_of(new_priv, nc->qid.path));
     w->spoor = nc;
     return w;
 }
@@ -1549,7 +1601,7 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // LARDER-DESIGN 12.6: an fstat through an open that is not the file's
     // holder lands what the holder holds first.
     if (c->qid.type == 0) {
-        int lr = wb_holder_flush(p->client, c->qid.path, p, NULL, NULL);
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, NULL, NULL);
         if (lr < 0) return lr;
     }
     struct larder *l = &p->client->larder;
@@ -1664,8 +1716,10 @@ static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
             // attr the flush just dropped, so the walk asks the server.
             if (full && nc == NULL && !leaf_po && !asked &&
                 sts[nname - 1].qid_type == 0) {
-                int lr = wb_holder_flush(src_priv->client, sts[nname - 1].qid_path,
-                                         NULL, NULL, NULL);
+                struct dev9p_fkey lk = { .path = sts[nname - 1].qid_path };
+                lk.has_gen = larder_attr_gen(&src_priv->client->larder, lk.path,
+                                             &lk.gen);
+                int lr = wb_holder_flush(src_priv->client, lk, NULL, NULL, NULL);
                 if (lr < 0) { dev_walk_failed(lr); return NULL; }
                 if (lr > 0) { asked = true; full = false; }
             }
@@ -1882,6 +1936,13 @@ static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
                               /*negative=*/false);
         prev_path = w->qid[i].path;
     }
+    // The leaf's name (vote M31): its generation, which this walk asked for.
+    struct dev9p_fkey leaf = { .path = 0 };
+    if (w->nqid == nname) {
+        leaf.path    = w->qid[nname - 1].path;
+        leaf.has_gen = (attrs[nname - 1].valid & P9_GETATTR_GEN) != 0;
+        leaf.gen     = leaf.has_gen ? attrs[nname - 1].gen : 0;
+    }
     kfree(attrs);
 
     // L1d negative populate: a PARTIAL walk (nwqid < nname, rc == 0) missed at
@@ -1897,8 +1958,7 @@ static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
     // asks once more, so it reports the file after the flush. A bind gives back
     // the fid it bound first. Bytes staged after the flush are concurrent.
     if (!asked && w->nqid == nname && w->qid[nname - 1].type == 0) {
-        int lr = wb_holder_flush(src_priv->client, w->qid[nname - 1].path, NULL, NULL,
-                                 NULL);
+        int lr = wb_holder_flush(src_priv->client, leaf, NULL, NULL, NULL);
         if (lr != 0) {
             if (nc)
                 dev9p_clunk_fid(src_priv->client, src_priv->attached_owner, new_fid);
@@ -1924,8 +1984,18 @@ static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
         // G2: the fid's birth gen is the pre-RPC snapshot -- an invalidation
         // event naming this qid DURING the walk already makes it unparkable.
         new_priv->fid_gen = wga_seq0;
+        // The fid's file is the walk's leaf: its generation names it (vote M31;
+        // the file locks read the same). Unknown stays unknown, asked later.
+        if (leaf.has_gen) {
+            new_priv->lock_gen   = leaf.gen;
+            new_priv->lock_ident = (u8)DEV9P_IDENT_GEN;
+        }
         nc->aux = new_priv;
         nc->qid = w->qid[w->nqid - 1];
+        // An open samples the file's lost runs at its open; a navigation handle,
+        // which fsync accepts (vote M22a), keeps its walk's (votes M27, M31).
+        if (nc->qid.type == 0)
+            new_priv->wb_errseq = wb_loss_sample(new_priv->client, leaf);
         w->spoor = nc;
     } else {
         // Partial walk (bind form: new_fid was never bound; nc still
@@ -2022,7 +2092,9 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     // path once they land -- the hint's attr and pages are older than they. A
     // leg that ends the operation fails the open with its reason, which stalk
     // reads (the walk's channel): the normal path's leg would only wait again.
-    int hl = wb_holder_flush(client, sts[nname - 1].qid_path, NULL, NULL, NULL);
+    struct dev9p_fkey hk = { .path = sts[nname - 1].qid_path };
+    hk.has_gen = larder_attr_gen(&client->larder, hk.path, &hk.gen);
+    int hl = wb_holder_flush(client, hk, NULL, NULL, NULL);
     if (hl < 0) {
         dev_walk_failed(hl);
         return NULL;
@@ -2195,7 +2267,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     }
     np->lock_gen     = cogen;
     np->lock_ident   = coident;
-    np->wb_errseq    = wb_loss_sample(client, leaf->qid_path);   // vote M27
+    np->wb_errseq    = wb_loss_sample(client, wb_key_of(np, leaf->qid_path));   // M27, M31
     co->aux      = np;
     co->qid.path = leaf->qid_path;
     co->qid.vers = leaf->qid_vers;
@@ -2246,7 +2318,7 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     // over).
     struct wb_pin pin = { .linked = false };
     if (c->qid.type == 0) {
-        int lr = wb_holder_flush(p->client, c->qid.path, p,
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p,
                                  (omode & 0x10) ? &pin : NULL, NULL);
         if (lr < 0) { p->open_errno = lr; return NULL; }
     }
@@ -2298,7 +2370,7 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     }
     wb_unpin(&pin);                  // a no-op once the registration took it
     // The lost runs of the file this open has not been told of (votes M27, M30a).
-    p->wb_errseq = wb_loss_sample(p->client, c->qid.path);
+    p->wb_errseq = wb_loss_sample(p->client, wb_key_of(p, c->qid.path));
     c->flag |= COPEN;
     c->mode  = omode;
     c->offset = 0;
@@ -2409,6 +2481,9 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     c->qid.vers = qid.version;
     c->qid.type = qid_type_p9_to_kernel(qid.type);
     c->flag    |= COPEN;
+    // The fid now names the new file, not the directory the walk named: its
+    // generation is learned below or asked later (vote M31, the file locks).
+    __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_UNKNOWN, __ATOMIC_RELEASE);
     c->offset   = 0;
     // L1c invalidate (fs_cache.tla OwnWrite): a create changes TWO qid.paths.
     //  - the PARENT dir (nlink/mtime/cvers) -- G3 DOWNGRADE, not drop: a child
@@ -2460,15 +2535,30 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // write-through is coherent for an append fd. (Single-writer git is correct
     // either way -- cursor==EOF on a fresh file -- but the anchor makes the
     // concurrent case, the canonical O_APPEND workload, unsound.)
-    // One holder per client and file (LARDER-DESIGN 12.6): a new file's qid has
-    // none, unless an open of a file that held the number still does, or a change
-    // through an open that reached the new file by name has pinned it.
+    // A new file may take a deleted file's inode number, and with it that file's
+    // holder, pins and lost runs; its generation names it apart (vote M31), so a
+    // plain file's create on a loose cacheable session asks for it, once. One
+    // that cannot learn it writes through.
+    bool named = false;
     if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && p->client->loose &&
         __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-        c->qid.type == 0 &&
-        !(omode & SYS_WALK_OPEN_OAPPEND))
+        c->qid.type == 0) {
+        struct p9_attr ga;
+        if (p9_client_getattr(p->client, p->fid, P9_GETATTR_GEN, &ga) == 0) {
+            if (ga.valid & P9_GETATTR_GEN) {
+                __atomic_store_n(&p->lock_gen, ga.gen, __ATOMIC_RELAXED);
+                __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_GEN, __ATOMIC_RELEASE);
+            } else {
+                __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_NONE, __ATOMIC_RELEASE);
+            }
+            named = true;
+        }
+    }
+    // One holder per client and file (LARDER-DESIGN 12.6): a new file has none,
+    // unless a change through an open that reached it by name has pinned it.
+    if (named && !(omode & SYS_WALK_OPEN_OAPPEND))
         (void)wb_register(p, c, NULL);
-    p->wb_errseq = wb_loss_sample(p->client, c->qid.path);   // vote M27
+    p->wb_errseq = wb_loss_sample(p->client, wb_key_of(p, c->qid.path));   // M27, M31
     return c;
 }
 
@@ -2505,7 +2595,10 @@ static void dev9p_close_job_release(struct p9_close_job *job) {
     // A run the closer's last try lost reached no program: the file's other
     // opens hear it at their next fsync (vote M27), recorded before they stop
     // waiting for it.
-    if (j->err) wb_loss_record(j->cl, j->qid_path, j->err);
+    if (j->err)
+        wb_loss_record(j->cl, (struct dev9p_fkey){ .path = j->qid_path, .gen = j->reg.gen,
+                                                   .has_gen = j->reg.has_gen },
+                       j->err);
     // The run has landed, or is lost and was reported: the client's other opens
     // stop waiting for it (12.6).
     wb_reg_leave(&j->reg);
@@ -2528,7 +2621,8 @@ static bool close_may_wait(void) {
 static void wb_close_swap(struct dev9p_priv *p, struct dev9p_close_job *j,
                           u64 qid_path) {
     j->reg = (struct dev9p_wb_reg){ .cl = p->client, .holder = NULL,
-                                    .path = qid_path };
+                                    .path = qid_path, .gen = p->wb_reg.gen,
+                                    .has_gen = p->wb_reg.has_gen };
     bool linked = __atomic_load_n(&p->wb_reg.linked, __ATOMIC_ACQUIRE);
     struct wb_reg_bucket *b = linked ? wb_reg_bucket_of(p->client, p->wb_reg.path)
                                      : NULL;
@@ -2559,14 +2653,15 @@ static void wb_close_swap(struct dev9p_priv *p, struct dev9p_close_job *j,
 // holder registry, a run it could not hand on recorded as lost first (vote
 // M27); on success the job stands in its place.
 static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
+    struct dev9p_fkey k = wb_holder_key(p, qid_path);
     if (!p->fid_owned || !p->attached_owner) {
-        wb_loss_record(p->client, qid_path, -T_E_IO);
+        wb_loss_record(p->client, k, -T_E_IO);
         wb_unregister(p);
         return -T_E_IO;
     }
     struct dev9p_close_job *j = kmalloc(sizeof(*j), 0);
     if (!j) {
-        wb_loss_record(p->client, qid_path, -T_E_NOMEM);
+        wb_loss_record(p->client, k, -T_E_NOMEM);
         wb_unregister(p);
         return -T_E_NOMEM;
     }
@@ -2579,7 +2674,7 @@ static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
     if (p9_attached_defer_close(p->attached_owner, p->fid, &j->job) != 0) {
         // Lost, and reported by the caller: the buffer goes back to p, whose
         // close frees it.
-        wb_loss_record(p->client, qid_path, -T_E_NOMEM);
+        wb_loss_record(p->client, k, -T_E_NOMEM);
         wb_reg_leave(&j->reg);
         p->wb_buf = j->buf;
         p->wb_len = j->len;
@@ -2799,7 +2894,7 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
     // LARDER-DESIGN 12.6: a read through an open that is not the file's holder
     // lands what the holder holds first.
     if (c->qid.type == 0) {
-        int lr = wb_holder_flush(p->client, c->qid.path, p, NULL, NULL);
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, NULL, NULL);
         if (lr < 0) return (long)lr;
     }
     // F1 write-behind overlay (LARDER-DESIGN section 12): a read WITHIN the
@@ -2965,7 +3060,7 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // stages.
     struct wb_pin pin = { .linked = false };
     if (c->qid.type == 0) {
-        int lr = wb_holder_flush(p->client, c->qid.path, p, &pin, NULL);
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, &pin, NULL);
         if (lr < 0) return (long)lr;
     }
     long r = dev9p_write_on(p, c, buf, count, offset);
@@ -3095,9 +3190,9 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     // holder holds, as fsync on any descriptor writes the file's dirty pages, and
     // a refusal of that writeback is this fsync's answer too (vote M25); the
     // holder keeps its latch for its own report.
+    int refused = 0;
     if (c->qid.type == 0) {
-        int refused = 0;
-        int lr = wb_holder_flush(p->client, c->qid.path, p, NULL, &refused);
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, NULL, &refused);
         if (lr < 0) return lr;
 #ifdef KERNEL_TESTS
         void (*window)(void *) = g_wb_report_window;
@@ -3106,14 +3201,40 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
             window(g_wb_report_window_arg);
         }
 #endif
+    }
+    // F1 write-behind: flush the staged run FIRST -- fsync is the reliable
+    // error channel (the voted NFS model), so a latched flush error
+    // surfaces here even when the run itself is already gone; a live run
+    // flushes synchronously (a concurrent duplicate flusher is idempotent).
+    // It is written back before any loss is told, as Linux writes back before
+    // it reports (12.6); a told loss skips only the Tfsync.
+    int fe = 0;
+    if (p->wb_eligible) {
+        spin_lock(&p->wb_lock);
+        if (p->wb_err)
+            fe = -(p->wb_err);
+        else if (p->wb_len || p->wb_flushers)
+            // A live run flushes; a run-less in-flight flush (another
+            // party's, not yet retired) is WAITED for inside -- fsync's
+            // contract needs those bytes durable before the Tfsync.
+            fe = wb_flush_locked(p, c->qid.path);
+        spin_unlock(&p->wb_lock);
+        // A flush a caught note cancelled or a death cut short lost nothing:
+        // the run stays held, and nothing is told.
+        if (fe != 0 && (wb_note_cancelled(fe) || thread_die_pending(current_thread())))
+            return fe;
+    }
+    if (c->qid.type == 0) {
         // Every run of the file lost since this open was last told, once (votes
-        // M27, M30a): a refusal the leg met was recorded before the leg saw it,
-        // so the report catches this open up past it too. The leg's refusal is
-        // the answer even when its record has been evicted meanwhile.
-        int lost = wb_loss_report(p, c->qid.path);
+        // M27, M30a): a refusal the leg or this open's own flush met was
+        // recorded before either saw it, so the report catches this open up past
+        // it too, the holder's own included. The leg's refusal is the answer
+        // even when its record has been evicted meanwhile.
+        int lost = wb_loss_report(p, wb_key_of(p, c->qid.path));
         if (refused != 0) return refused;
         if (lost != 0) return lost;
     }
+    if (fe != 0) return fe;
     // FID-LIFECYCLE cached-open: a read-only open reaches here (fsync takes
     // either right, vote M22). Nothing is staged and no fid is opened, but the
     // server may hold the file's content uncommitted, so the Tfsync goes on the
@@ -3131,28 +3252,20 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
         if (br != 0) return br;
         return p9_client_fsync(p->client, lock_fid(p), datasync);
     }
-    // F1 write-behind: flush the staged run FIRST -- fsync is the reliable
-    // error channel (the voted NFS model), so a latched flush error
-    // surfaces here even when the run itself is already gone; a live run
-    // flushes synchronously (a concurrent duplicate flusher is idempotent).
-    if (p->wb_eligible) {
-        int fe = 0;
-        spin_lock(&p->wb_lock);
-        if (p->wb_err)
-            fe = -(p->wb_err);
-        else if (p->wb_len || p->wb_flushers)
-            // A live run flushes; a run-less in-flight flush (another
-            // party's, not yet retired) is WAITED for inside -- fsync's
-            // contract needs those bytes durable before the Tfsync.
-            fe = wb_flush_locked(p, c->qid.path);
-        spin_unlock(&p->wb_lock);
-        if (fe != 0) return fe;
-    }
     // Area-F errno rollout (the slot the #3 pass missed): propagate the real
     // ecode -- p9_client_fsync returns 0 or -(T_E_*)/-P9_E_IO, already a valid
     // -errno in [-4095,-1]. Collapsing to -1 masked the underlying failure
     // (the post-go-build fsync cascade read as a meaningless EPERM).
     return p9_client_fsync(p->client, p->fid, datasync);
+}
+
+// What a Loom FSYNC whose Tfsync succeeded is told (LARDER-DESIGN 12.6, vote
+// M32): the file's lost runs since this open was last told, once. The ring
+// lands nothing first. Under the client's lock: the report's lock is a leaf.
+static int dev9p_fsync_report(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || c->qid.type != 0) return 0;
+    return wb_loss_report(p, wb_key_of(p, c->qid.path));
 }
 
 // Directory enumeration -> Stratum Treaddir. Returns the raw 9P2000.L dirent
@@ -3931,7 +4044,7 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     // has answered and its drops are done, the holder's own included (vote M26).
     struct wb_pin pin = { .linked = false };
     if (c->qid.type == 0) {
-        int lr = wb_holder_flush(p->client, c->qid.path, p, &pin, NULL);
+        int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, &pin, NULL);
         if (lr < 0) return lr;
     }
     int ret = dev9p_wstat_on(p, c, valid, mode, uid, gid, size, times);
@@ -4093,6 +4206,7 @@ VISIBLE_IF_KERNEL_TESTS struct Dev dev9p = {
     .poll_snapshot_release = dev9p_poll_snapshot_release,
     .poll_arm              = dev9p_poll_arm,
     .fsync    = dev9p_fsync,
+    .fsync_report = dev9p_fsync_report,
     .readdir  = dev9p_readdir,
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,

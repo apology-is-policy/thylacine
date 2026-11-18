@@ -97,15 +97,27 @@ enum dev9p_lock_ident_state {
     DEV9P_IDENT_NONE    = 2,   // the server reports none: identity by qid.path
 };
 
+// LARDER-DESIGN 12.6 (vote M31): a file by its number and, where the server
+// reports one, its generation. A name with no generation matches every
+// generation of its number.
+struct dev9p_fkey {
+    u64  path;
+    u64  gen;
+    bool has_gen;
+};
+
 // LARDER-DESIGN 12.6 (vote M23): an entry in the holder registry -- the file's
 // one holder on its client, or the closer job that open's last reference handed
-// its run to (holder NULL). Keyed by client and path, which a job keeps only as
-// a key; next and linked are stored under the bucket lock.
+// its run to (holder NULL). Keyed by client and file (number and generation,
+// vote M31), which a job keeps only as a key; next and linked are stored under
+// the bucket lock.
 struct dev9p_wb_reg {
     struct dev9p_wb_reg *next;
     struct p9_client    *cl;
     struct dev9p_priv   *holder;
     u64                  path;
+    u64                  gen;
+    bool                 has_gen;
     bool                 linked;
 };
 
@@ -311,6 +323,7 @@ u32  dev9p_wb_test_purge(struct p9_client *cl);
 void dev9p_wb_test_leg_window(void (*fn)(void *), void *arg);
 void dev9p_wb_test_report_window(void (*fn)(void *), void *arg);
 void dev9p_wb_test_loss(struct p9_client *cl, u64 path, int err);
+void dev9p_wb_test_loss_gen(struct p9_client *cl, u64 path, u64 gen, int err);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth

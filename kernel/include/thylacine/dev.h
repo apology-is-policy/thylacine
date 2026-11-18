@@ -361,6 +361,11 @@ struct Dev {
     //                        end-of-directory). NULL slot => SYS_READDIR
     //                        returns -1 (not a readdir-able directory).
     int            (*fsync)(struct Spoor *c, u32 datasync);
+    // fsync_report(c) -- what a Loom FSYNC whose Tfsync succeeded is told: 0, or
+    //   the negative errno of a lost run c's open has not been told of, once
+    //   (LARDER-DESIGN 12.6, vote M32). Called under the 9P client's lock: it
+    //   takes only a leaf lock and never blocks. NULL-permitted: told nothing.
+    int            (*fsync_report)(struct Spoor *c);
     long           (*readdir)(struct Spoor *c, void *buf, long n, s64 off);
 
     // Rename + unlink (FS-mutation foundation FS-gamma; IDENTITY-DESIGN.md

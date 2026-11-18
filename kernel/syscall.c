@@ -2110,7 +2110,8 @@ s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
 // =============================================================================
 //
 // SYS_CLOSE(fd) → 0; -T_E_BADF on an invalid fd; -T_E_IO when the last
-//                 close's Dev hook failed (the fd is closed either way).
+//                 close's Dev hook failed, or -T_E_NOSPC / -T_E_DQUOT when
+//                 its server refused for space (the fd is closed either way).
 //                 For KOBJ_SPOOR handles the release routes to
 //                 spoor_clunk_rc.
 //
