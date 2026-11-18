@@ -157,7 +157,8 @@
 (*                                 reads through the Larder.                 *)
 (*                                 InvariantsReuse: InvariantsWb + NamesTrue *)
 (*                                 + RecordsTrue + DeadStateSkipped +        *)
-(*                                 NoMisdirectedLoss + CacheOfLiveFile.      *)
+(*                                 NoMisdirectedLoss + NoMisdirectedSeen +   *)
+(*                                 CacheOfLiveFile.                          *)
 (*   fs_cache_reuse_told.cfg       the same, checking NeverToldReport too:   *)
 (*                                 VIOLATED by design, the witness that an   *)
 (*                                 fsync's report is told its own file's     *)
@@ -213,6 +214,56 @@
 (*                                 (before vote M34): a deleted file's open  *)
 (*                                 is served the next file's (NoWrongRead    *)
 (*                                 counterexample).                          *)
+(*   fs_cache_reuse_unnamed.cfg                                              *)
+(*                                 fs_cache_reuse.cfg on one file with       *)
+(*                                 EnableUnnamed (audit round 10 of M15,     *)
+(*                                 S-17 and F2; votes M33-M35a): an open's   *)
+(*                                 Tgetattr may fail, leaving it with no     *)
+(*                                 name: it is served nothing, registers     *)
+(*                                 nothing, samples the current sequence,    *)
+(*                                 takes no named holder's refusal on its    *)
+(*                                 leg, reports by number and marks no       *)
+(*                                 record told. InvariantsReuse.             *)
+(*   fs_cache_reuse_unnamed_told.cfg                                         *)
+(*                                 the same, checking NeverToldUnnamed too:  *)
+(*                                 VIOLATED by design, the witness that an   *)
+(*                                 open with no name is told its own file's  *)
+(*                                 refused run through the record.           *)
+(*   fs_cache_reuse_unnamed_residue.cfg                                      *)
+(*                                 the same with NeverMisToldUnnamed:        *)
+(*                                 VIOLATED by design, the cost vote M35     *)
+(*                                 accepted: an open of the new file with no *)
+(*                                 name is told the deleted file's later     *)
+(*                                 loss by number.                           *)
+(*   fs_cache_buggy_unnamed_serve.cfg                                        *)
+(*                                 BUGGY_UNNAMED_SERVE -- an open with no    *)
+(*                                 name is served by number (M34's unnamed   *)
+(*                                 clause gone): NoWrongRead counterexample. *)
+(*   fs_cache_buggy_unnamed_leg_told.cfg                                     *)
+(*                                 BUGGY_UNNAMED_LEG_TOLD -- an open with no *)
+(*                                 name answers with a named holder's        *)
+(*                                 refusal from its leg (before vote M35):   *)
+(*                                 NoMisdirectedLoss counterexample.         *)
+(*   fs_cache_buggy_unnamed_marks_seen.cfg                                   *)
+(*                                 BUGGY_UNNAMED_MARKS_SEEN -- an open with  *)
+(*                                 no name marks the record its fsync        *)
+(*                                 reports as told (before round 10 F2):     *)
+(*                                 NoMisdirectedSeen counterexample.         *)
+(*   fs_cache_reuse_external.cfg                                             *)
+(*                                 fs_cache_reuse.cfg on one file with       *)
+(*                                 EnableExternalReuse (round 10 F5):        *)
+(*                                 another client's or session's create      *)
+(*                                 reuses the number and the Larder keeps    *)
+(*                                 the deleted file's entry. InvariantsReuse *)
+(*                                 but CacheOfLiveFile, which the external   *)
+(*                                 reuse breaks by design.                   *)
+(*   fs_cache_buggy_serve_older.cfg                                          *)
+(*                                 BUGGY_SERVE_OLDER -- the serve admits an  *)
+(*                                 older generation's entry: the new file's  *)
+(*                                 open is served the deleted file's         *)
+(*                                 (NoWrongRead counterexample). Without an  *)
+(*                                 external reuse no such entry stands, and  *)
+(*                                 the flag passes.                          *)
 (*                                                                         *)
 (*   The staging cfgs run two opens (Opens = {o1, o2}), the rest one. Vote  *)
 (*   M23 (LARDER-DESIGN 12.6): a file's held bytes are the CLIENT's, so a    *)
@@ -228,7 +279,7 @@
 (*   impl the holder's own disjoint append lands during its flush (12.2),    *)
 (*   and the guard, pinned by a runtime test, covers what lands there.       *)
 (*                                                                         *)
-(*   REUSE (votes M31, M33 and M34; audit rounds 8 and 9 of M15). Stratum's  *)
+(*   REUSE (votes M31 and M33-M35; audit rounds 8 to 10 of M15). Stratum's   *)
 (*   qid.path is the inode number alone: it frees the number at the last     *)
 (*   unlink, while opens of the file stand, and gives it to the next file    *)
 (*   created (Reuse). A model file is a NUMBER (Files) with its INCARNATIONS *)
@@ -257,19 +308,34 @@
 (*   whose number was reused with ESTALE rather than the new file's          *)
 (*   generation (h_getattr). A dead open's writes, but for its run's flush   *)
 (*   and a write of it in flight at the reuse, act on a file the number no   *)
-(*   longer names and are beneath the model. Outside it, pinned by runtime   *)
-(*   tests instead: an open with no name (its Tgetattr failed, or a strict   *)
-(*   session asked none) is served no own page or attribute, registers       *)
-(*   nothing, is told only losses recorded after it was made, and its legs   *)
-(*   and pin go by number, visiting every holder there and taking no refusal *)
-(*   from a named one (dev9p.m33_unnamed_open_writes_through,                *)
+(*   longer names and are beneath the model. An open with no name (its       *)
+(*   Tgetattr failed: EnableUnnamed, audit round 10 of M15, S-17) is served  *)
+(*   nothing (Serves), registers and stages nothing, samples the current     *)
+(*   sequence, takes no refusal from a holder named by a generation on its   *)
+(*   leg (FsyncLeg, vote M35), reports by number (the "unnamed" arm, the     *)
+(*   cost M35 accepted: NoMisdirectedLoss admits it and NeverMisToldUnnamed  *)
+(*   shows it reachable), marks no record told (NoMisdirectedSeen, round 10  *)
+(*   F2), and its pin goes by number (Unpinned under Same, vote M35a). Its   *)
+(*   cfgs run one file: every rule for it is within one number, and two      *)
+(*   files multiply the state space past a practical run. The same rules are *)
+(*   pinned at runtime (dev9p.m33_unnamed_open_writes_through,               *)
 (*   m33_the_name_does_not_move,                                             *)
 (*   m34_unnamed_file_misses_m34a_unnamed_dir_by_number,                     *)
 (*   m35_unnamed_leg_takes_no_named_refusal,                                 *)
 (*   m35a_unnamed_change_stops_the_holder,                                   *)
-(*   s15_unnamed_leg_visits_every_holder); an unnamed directory handle is    *)
-(*   served by number (vote M34a); a server that reports no generation keeps *)
-(*   number-only names (vote M31's allowance --                              *)
+(*   m35_unnamed_report_marks_no_record_told). An external reuse             *)
+(*   (ExternalReuse, round 10 F5) leaves the deleted file's entry in the     *)
+(*   Larder, where the guest's own reuse drops it: CacheOfLiveFile is        *)
+(*   definitional for the latter, and fs_cache_reuse_external.cfg checks     *)
+(*   NoWrongRead without it. Outside the model, pinned by runtime tests      *)
+(*   instead: a strict session's open, which asks no Tgetattr, is unnamed    *)
+(*   too but samples by number (wb_open_sample); an unnamed leg visits every *)
+(*   holder at its number (registration is not modelled apart from staging,  *)
+(*   and PeersClear already asks every Same holder clear:                    *)
+(*   dev9p.s15_unnamed_leg_visits_every_holder,                              *)
+(*   s15_leg_visits_past_its_batch, s15_leg_resumes_after_a_closer); an      *)
+(*   unnamed directory handle is served by number (vote M34a); a server that *)
+(*   reports no generation keeps number-only names (vote M31's allowance --  *)
 (*   m33_plain_walk_names_the_file); the record table's capacity (an evicted *)
 (*   record tells less, never another file's loss); and a loss racing an     *)
 (*   open's sample (told to it, as if the open came first).                  *)
@@ -438,9 +504,27 @@ CONSTANTS
     BUGGY_UNNAMED_WALK,     \* BOOLEAN -- TRUE: a plain walk may name its open
                             \*   by number alone, a name that matches every
                             \*   generation (before vote M33).
-    BUGGY_NUMBER_SERVE      \* BOOLEAN -- TRUE: the Larder serves an entry to
+    BUGGY_NUMBER_SERVE,     \* BOOLEAN -- TRUE: the Larder serves an entry to
                             \*   any open of its number, whatever the open's
                             \*   name (before vote M34).
+    EnableUnnamed,          \* BOOLEAN -- TRUE: an open's Tgetattr may fail, so
+                            \*   the open has no name (DEV9P_WB_FAILED): it
+                            \*   registers nothing, is served nothing, and its
+                            \*   legs, pin and report go by number (votes M33,
+                            \*   M34, M35, M35a).
+    BUGGY_UNNAMED_SERVE,    \* BOOLEAN -- TRUE: the Larder serves an open with
+                            \*   no name by number (M34's unnamed clause gone).
+    BUGGY_UNNAMED_LEG_TOLD, \* BOOLEAN -- TRUE: an open with no name takes the
+                            \*   refusal of a holder named by a generation on
+                            \*   its fsync's leg (before vote M35).
+    BUGGY_UNNAMED_MARKS_SEEN, \* BOOLEAN -- TRUE: an open with no name marks the
+                            \*   record its fsync reports as told (before audit
+                            \*   round 10 of M15, F2).
+    EnableExternalReuse,    \* BOOLEAN -- TRUE: another client or session reuses
+                            \*   a number, and this guest's Larder keeps its
+                            \*   entry (audit round 10 of M15, F5).
+    BUGGY_SERVE_OLDER       \* BOOLEAN -- TRUE: the Larder serves an open named
+                            \*   by a generation an older one's entry too.
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
@@ -470,9 +554,19 @@ ASSUME /\ Capacity \in Nat
        /\ BUGGY_NUMBER_KEY   \in BOOLEAN
        /\ BUGGY_UNNAMED_WALK \in BOOLEAN
        /\ BUGGY_NUMBER_SERVE \in BOOLEAN
+       /\ EnableUnnamed          \in BOOLEAN
+       /\ BUGGY_UNNAMED_SERVE    \in BOOLEAN
+       /\ BUGGY_UNNAMED_LEG_TOLD \in BOOLEAN
+       /\ BUGGY_UNNAMED_MARKS_SEEN \in BOOLEAN
+       /\ EnableExternalReuse    \in BOOLEAN
+       /\ BUGGY_SERVE_OLDER      \in BOOLEAN
        \* Holders, pins and records are kept only where something stages.
        /\ (EnableReuse => EnableStaging)
        /\ ((BUGGY_NUMBER_KEY \/ BUGGY_UNNAMED_WALK \/ BUGGY_NUMBER_SERVE) => EnableReuse)
+       /\ (EnableUnnamed => EnableReuse)
+       /\ ((BUGGY_UNNAMED_SERVE \/ BUGGY_UNNAMED_LEG_TOLD \/ BUGGY_UNNAMED_MARKS_SEEN)
+           => EnableUnnamed)
+       /\ ((EnableExternalReuse \/ BUGGY_SERVE_OLDER) => EnableReuse)
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
@@ -507,9 +601,9 @@ VARIABLES
                  \*   names now (Stratum's si_gen); Reuse bumps it.
     inc,         \* [Files -> [Opens -> 0..MaxGen]] -- the incarnation the open's
                  \*   fid was made on: the truth its name is judged against.
-    name,        \* [Files -> [Opens -> Names]] -- the name the open was given
+    name,        \* [Files -> [Opens -> OpenNames]] -- the name the open was given
                  \*   where its fid was made (dev9p_priv.wb_name, wb_gen), fixed for
-                 \*   its life (round 8 F2): a generation, or NoGen.
+                 \*   its life (round 8 F2): a generation, NoGen, or Unnamed.
     errseq,      \* [Files -> [Opens -> Nat]] -- the open's sample (wb_errseq).
     rec,         \* [Files -> [Names -> record]] -- the client's lost-run record per
                  \*   name (p9_wb_losses): its sequence (0: none), whether an fsync
@@ -517,25 +611,34 @@ VARIABLES
     lseq,        \* Nat -- the client's record sequence (wb_loss.seq).
     bad_tell,    \* SUBSET Arms -- history: the arms through which an fsync was
                  \*   told a loss of a file other than its own (its report, its
-                 \*   leg). NoMisdirectedLoss == bad_tell = {}.
-    tells        \* SUBSET Arms -- history: the arms through which an fsync was
+                 \*   leg, the report of an open with no name).
+                 \*   NoMisdirectedLoss admits only the last (vote M35).
+    tells,       \* SUBSET Arms -- history: the arms through which an fsync was
                  \*   told any loss (the witnesses' non-vacuity).
+    bad_seen     \* BOOLEAN -- history: an fsync marked a record of another
+                 \*   incarnation told (NoMisdirectedSeen == ~bad_seen).
 
-rvars == <<gen, inc, name, errseq, rec, lseq, bad_tell, tells>>
+rvars == <<gen, inc, name, errseq, rec, lseq, bad_tell, tells, bad_seen>>
 vars  == <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend,
-           gen, inc, name, errseq, rec, lseq, bad_tell, tells>>
+           gen, inc, name, errseq, rec, lseq, bad_tell, tells, bad_seen>>
 
-\* How an fsync is told a loss: its report of the record, or its own leg's refusal.
-Arms == {"report", "leg"}
+\* How an fsync is told a loss: its report of the record, its own leg's refusal,
+\* or the report of an open with no name, which goes by number (vote M35).
+Arms == {"report", "leg", "unnamed"}
 
 \* A name with no generation: the number alone (wb_same's !has_gen).
 NoGen == MaxGen + 1
 Names == 0..NoGen
+\* An open with no name (DEV9P_WB_FAILED: its Tgetattr failed). Never a record's
+\* or an entry's name: it registers nothing, so it holds and installs nothing.
+Unnamed   == MaxGen + 2
+OpenNames == Names \cup {Unnamed}
 
 \* One file (wb_same, vote M31): the same number -- names are compared only
 \* within one number here -- and the same generation where both names carry
-\* one. BUGGY_NUMBER_KEY compares the number alone.
-Same(a, b) == BUGGY_NUMBER_KEY \/ a = NoGen \/ b = NoGen \/ a = b
+\* one; an open with no name carries none (wb_key_of). BUGGY_NUMBER_KEY compares
+\* the number alone.
+Same(a, b) == BUGGY_NUMBER_KEY \/ a \in {NoGen, Unnamed} \/ b \in {NoGen, Unnamed} \/ a = b
 
 \* The open is of the file its number names now. Without Reuse every open is.
 Live(f, o) == inc[f][o] = gen[f]
@@ -544,17 +647,26 @@ Live(f, o) == inc[f][o] = gen[f]
 \* attr_serves): one named by the number alone takes any entry, one named by a
 \* generation only an entry under that generation. A page read from the server is
 \* checked by version instead, and Stratum starts a reused number's version past
-\* the old file's, so its test is this one. BUGGY_NUMBER_SERVE serves by number.
-Serves(n, e) == BUGGY_NUMBER_SERVE \/ n = NoGen \/ n = e
+\* the old file's, so its test is this one. An open with no name is served
+\* nothing (wb_who_of's UNNAMED): it asks the server, which answers a deleted
+\* file ESTALE. BUGGY_NUMBER_SERVE serves by number; BUGGY_UNNAMED_SERVE serves an
+\* open with no name by number. BUGGY_SERVE_OLDER serves an open named by a
+\* generation an older generation's entry too, which only an external reuse
+\* leaves in place (audit round 10 of M15, F5).
+Serves(n, e) == \/ BUGGY_NUMBER_SERVE
+                \/ n = Unnamed /\ BUGGY_UNNAMED_SERVE
+                \/ n # Unnamed /\ (n = NoGen \/ n = e \/ (BUGGY_SERVE_OLDER /\ n > e))
 
 \* The records Same as name n, the newest of them, and an open's sample under n
 \* (wb_loss_find_locked, wb_loss_sample): the newest's sequence once some open
 \* was told of it, the one before while none was, so an open made after a loss
-\* nobody heard is told too; 0 with no record.
+\* nobody heard is told too; 0 with no record. An open with no name samples the
+\* current sequence (wb_open_sample's FAILED arm): it is told only later losses.
 Matching(f, n) == {k \in Names : rec[f][k].seq # 0 /\ Same(n, k)}
 Newest(f, n)   == CHOOSE k \in Matching(f, n) :
                       \A j \in Matching(f, n) : rec[f][j].seq <= rec[f][k].seq
-Sample(f, n)   == IF Matching(f, n) = {} THEN 0
+Sample(f, n)   == IF n = Unnamed THEN lseq
+                  ELSE IF Matching(f, n) = {} THEN 0
                   ELSE IF rec[f][Newest(f, n)].seen THEN rec[f][Newest(f, n)].seq
                        ELSE rec[f][Newest(f, n)].seq - 1
 
@@ -585,12 +697,13 @@ TypeOk ==
     /\ wpend \in [Files -> [Opens -> BOOLEAN]]
     /\ gen \in [Files -> 0..MaxGen]
     /\ inc \in [Files -> [Opens -> 0..MaxGen]]
-    /\ name \in [Files -> [Opens -> Names]]
+    /\ name \in [Files -> [Opens -> OpenNames]]
     /\ errseq \in [Files -> [Opens -> Nat]]
     /\ rec \in [Files -> [Names -> [seq : Nat, seen : BOOLEAN, inc : 0..MaxGen]]]
     /\ lseq \in Nat
     /\ bad_tell \in SUBSET Arms
     /\ tells \in SUBSET Arms
+    /\ bad_seen \in BOOLEAN
 
 (***************************************************************************)
 (* Cold start: the server holds every file at content-version 0, the       *)
@@ -612,6 +725,7 @@ Init ==
     /\ lseq      = 0
     /\ bad_tell  = {}
     /\ tells     = {}
+    /\ bad_seen  = FALSE
 
 (***************************************************************************)
 (* Open(f) -- the close-to-open REVALIDATION + populate point. The guest    *)
@@ -812,6 +926,7 @@ StageWrite(f, o) ==
     /\ guest_cvers[f] < MaxCvers
     /\ ~wpend[f][o]
     /\ Live(f, o)
+    /\ name[f][o] # Unnamed  \* an open with no name registers nothing (wb_named)
     /\ PeersClear(f, o)
     /\ Unpinned(f, o)
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
@@ -874,7 +989,29 @@ Reuse(f) ==
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ cache'       = [cache EXCEPT ![f].valid = FALSE]
     /\ validated'   = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<stage, bad_read, wpend, inc, name, errseq, rec, lseq, bad_tell, tells>>
+    /\ UNCHANGED <<stage, bad_read, wpend, inc, name, errseq, rec, lseq, bad_tell, tells,
+                   bad_seen>>
+
+(***************************************************************************)
+(* ExternalReuse(f) -- another client, or another session of this guest    *)
+(* (each session has its own Larder), deletes the file and creates the     *)
+(* next: the number names a new incarnation, as in Reuse, but no create of *)
+(* this session's drops the entry (a 9P server pushes no invalidations),   *)
+(* so the Larder keeps the deleted file's. `validated` clears, as for      *)
+(* ExternalWrite. A new open of the number is then judged against an older *)
+(* incarnation's entry: the serve's other direction (audit round 10 of     *)
+(* M15, F5). The other client's create is modelled; its writes are not.    *)
+(***************************************************************************)
+ExternalReuse(f) ==
+    /\ EnableExternalReuse
+    /\ gen[f] < MaxGen
+    /\ guest_cvers[f] < MaxCvers
+    /\ gen'         = [gen EXCEPT ![f] = gen[f] + 1]
+    /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
+    /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
+    /\ validated'   = [validated EXCEPT ![f] = FALSE]
+    /\ UNCHANGED <<stage, cache, bad_read, wpend, inc, name, errseq, rec, lseq,
+                   bad_tell, tells, bad_seen>>
 
 (***************************************************************************)
 (* Mint(f, o) -- an open of the file number f names now is made in slot o,   *)
@@ -885,9 +1022,11 @@ Reuse(f) ==
 (* walks no name copies its source's, a create asks it, a cached open        *)
 (* takes the Larder's. It samples the records under that name                *)
 (* (wb_open_sample). BUGGY_UNNAMED_WALK lets a plain walk name it by number  *)
-(* alone (before vote M33).                                                  *)
+(* alone (before vote M33). EnableUnnamed lets the Tgetattr fail: the open   *)
+(* then has no name (FAILED) and samples the current sequence.               *)
 (***************************************************************************)
-MintNames(f) == IF BUGGY_UNNAMED_WALK THEN {gen[f], NoGen} ELSE {gen[f]}
+MintNames(f) == (IF BUGGY_UNNAMED_WALK THEN {gen[f], NoGen} ELSE {gen[f]})
+                \cup (IF EnableUnnamed THEN {Unnamed} ELSE {})
 
 Mint(f, o) ==
     /\ EnableReuse
@@ -898,7 +1037,7 @@ Mint(f, o) ==
           /\ name'   = [name EXCEPT ![f][o] = n]
           /\ errseq' = [errseq EXCEPT ![f][o] = Sample(f, n)]
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend,
-                   gen, rec, lseq, bad_tell, tells>>
+                   gen, rec, lseq, bad_tell, tells, bad_seen>>
 
 (***************************************************************************)
 (* FlushRefused(f, o) -- a holder's run is flushed (its close, its fsync,    *)
@@ -931,27 +1070,30 @@ Refuse(f, p, told) ==
 
 FlushRefused(f, o) ==
     /\ Refuse(f, o, FALSE)
-    /\ UNCHANGED <<bad_read, wpend, gen, inc, name, errseq, bad_tell, tells>>
+    /\ UNCHANGED <<bad_read, wpend, gen, inc, name, errseq, bad_tell, tells, bad_seen>>
 
 (***************************************************************************)
 (* FsyncLeg(f, o, p) -- an fsync through open o, whose leg lands the run of  *)
 (* holder p first (wb_holder_flush at dev9p_fsync), meets p's refusal: it is *)
 (* recorded under p's name, and the report that follows tells o of it, so o  *)
 (* answers with it (vote M25) and its sample moves past it. A named open's   *)
-(* leg reaches only holders under a Same name; an unnamed open's takes no    *)
-(* refusal from a named holder (vote M35), which is beneath the model and    *)
-(* pinned by dev9p.m35_unnamed_leg_takes_no_named_refusal. bad_tell records  *)
-(* an answer that was another file's loss. A leg that lands p's run is p's   *)
+(* leg reaches only holders under a Same name. An open with no name takes    *)
+(* no refusal from a holder named by a generation (vote M35): that leg is    *)
+(* p's FlushRefused, and the open hears of it only through the record        *)
+(* (Fsync); BUGGY_UNNAMED_LEG_TOLD answers with it. bad_tell records an      *)
+(* answer that was another file's loss. A leg that lands p's run is p's      *)
 (* FlushClose.                                                               *)
 (***************************************************************************)
 FsyncLeg(f, o, p) ==
     /\ EnableReuse
     /\ p # o
     /\ Same(name[f][o], name[f][p])
+    /\ (name[f][o] # Unnamed \/ name[f][p] = NoGen \/ BUGGY_UNNAMED_LEG_TOLD)
     /\ Refuse(f, p, TRUE)
     /\ errseq'   = [errseq EXCEPT ![f][o] = lseq + 1]
     /\ tells'    = tells \cup {"leg"}
     /\ bad_tell' = IF inc[f][p] # inc[f][o] THEN bad_tell \cup {"leg"} ELSE bad_tell
+    /\ bad_seen' = (bad_seen \/ inc[f][p] # inc[f][o])
     /\ UNCHANGED <<bad_read, wpend, gen, inc, name>>
 
 (***************************************************************************)
@@ -964,7 +1106,7 @@ OwnWriteDead(f, o) ==
     /\ ~Live(f, o)
     /\ wpend' = [wpend EXCEPT ![f][o] = FALSE]
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read,
-                   gen, inc, name, errseq, rec, lseq, bad_tell, tells>>
+                   gen, inc, name, errseq, rec, lseq, bad_tell, tells, bad_seen>>
 
 (***************************************************************************)
 (* Fsync(f, o) -- an fsync through open o reports the newest record Same as  *)
@@ -972,17 +1114,28 @@ OwnWriteDead(f, o) ==
 (* dev9p_fsync and the ring's Dev.fsync_report). Its write-back first is     *)
 (* the holder's FlushClose or FlushRefused, or its own leg's (FsyncLeg).     *)
 (* bad_tell records a report of a loss that was not the open's own file's.   *)
+(* An open with no name reports by number, the "unnamed" arm: a deleted      *)
+(* file's later loss may reach it, the cost vote M35 accepted. It marks no *)
+(* record told (audit round 10 of M15, F2): the record may be another      *)
+(* incarnation's, and a record marked told is sampled past by its own      *)
+(* file's later opens (Sample), which would never hear it.                 *)
+(* BUGGY_UNNAMED_MARKS_SEEN marks it; bad_seen records a record marked     *)
+(* told by an fsync of another incarnation.                                *)
 (***************************************************************************)
+ReportArm(f, o) == IF name[f][o] = Unnamed THEN "unnamed" ELSE "report"
+
 Fsync(f, o) ==
     /\ EnableReuse
     /\ Matching(f, name[f][o]) # {}
-    /\ LET k == Newest(f, name[f][o])
+    /\ LET k     == Newest(f, name[f][o])
+           marks == name[f][o] # Unnamed \/ BUGGY_UNNAMED_MARKS_SEEN
        IN /\ rec[f][k].seq > errseq[f][o]
           /\ errseq'   = [errseq EXCEPT ![f][o] = rec[f][k].seq]
-          /\ rec'      = [rec EXCEPT ![f][k].seen = TRUE]
-          /\ tells'    = tells \cup {"report"}
-          /\ bad_tell' = IF rec[f][k].inc # inc[f][o] THEN bad_tell \cup {"report"}
+          /\ rec'      = IF marks THEN [rec EXCEPT ![f][k].seen = TRUE] ELSE rec
+          /\ tells'    = tells \cup {ReportArm(f, o)}
+          /\ bad_tell' = IF rec[f][k].inc # inc[f][o] THEN bad_tell \cup {ReportArm(f, o)}
                                                     ELSE bad_tell
+          /\ bad_seen' = (bad_seen \/ (marks /\ rec[f][k].inc # inc[f][o]))
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend,
                    gen, inc, name, lseq>>
 
@@ -993,6 +1146,7 @@ Next ==
         \/ ExternalWrite(f)
         \/ Evict(f)
         \/ Reuse(f)
+        \/ ExternalReuse(f)
         \/ \E o \in Opens :
               \/ Read(f, o)
               \/ OwnWriteBegin(f, o)
@@ -1081,31 +1235,51 @@ InvariantsWb ==
 \* for is pinned by dev9p.m33_plain_walk_names_the_file (the Tgetattr goes on the
 \* walk's own new fid) and by Stratum's h_getattr (a fid whose number was reused
 \* answers ESTALE, never the new file's generation).
-NamesTrue == \A f \in Files, o \in Opens : name[f][o] \in {inc[f][o], NoGen}
+NamesTrue == \A f \in Files, o \in Opens : name[f][o] \in {inc[f][o], NoGen, Unnamed}
 RecordsTrue == \A f \in Files, k \in 0..MaxGen : rec[f][k].seq # 0 => rec[f][k].inc = k
 
 \* DeadStateSkipped (votes M31, M33) -- state of another generation is a deleted
 \* file's: no dead open's stage or pin stands under a name Same as a live open's,
 \* so no leg of the new file lands it or waits on it, and it refuses no
 \* registration (LARDER-DESIGN 12.6). BUGGY_NUMBER_KEY and BUGGY_UNNAMED_WALK
-\* violate it.
+\* violate it. An open with no name is outside it by vote M35: its legs land
+\* every run at its number, a deleted file's too, and its pin goes by number, so
+\* a deleted file's unnamed write in flight holds off staging until its ESTALE.
 DeadStateSkipped ==
-    \A f \in Files, o \in Opens : Live(f, o) =>
+    \A f \in Files, o \in Opens : Live(f, o) /\ name[f][o] # Unnamed =>
         \A p \in Opens \ {o} :
-            Live(f, p) \/ ~Same(name[f][o], name[f][p]) \/ (stage[f][p] = 0 /\ ~wpend[f][p])
+            \/ Live(f, p) \/ ~Same(name[f][o], name[f][p])
+            \/ stage[f][p] = 0 /\ (~wpend[f][p] \/ name[f][p] = Unnamed)
 
 \* NoMisdirectedLoss (votes M31, M33, M35) -- no fsync is ever told a loss of a
 \* file other than its own, through its report or its own leg. BUGGY_NUMBER_KEY
 \* and BUGGY_UNNAMED_WALK violate it; the two arms are checked apart by the told
-\* cfgs.
-NoMisdirectedLoss   == bad_tell = {}
+\* cfgs. The "unnamed" arm is vote M35's accepted cost (an open with no name
+\* reports by number), shown reachable by NeverMisToldUnnamed.
+NoMisdirectedLoss   == bad_tell \subseteq {"unnamed"}
 NoMisdirectedReport == "report" \notin bad_tell
 NoMisdirectedLeg    == "leg" \notin bad_tell
+
+\* NoMisdirectedSeen (audit round 10 of M15, F2) -- no record is marked told by
+\* an fsync of another incarnation: the mark says the record's own file heard
+\* the loss, and that file's later opens sample past it (Sample). TLC's shortest
+\* counterexample marks a deleted file's record, which takes no later opens; the
+\* same mark made by a deleted file's open on the live file's record hides the
+\* loss from the live file's next opens. An open with no name marks nothing;
+\* BUGGY_UNNAMED_MARKS_SEEN violates it.
+NoMisdirectedSeen   == ~bad_seen
 
 \* CacheOfLiveFile (vote M34) -- every entry the Larder holds is of the file its
 \* number names now: the guest's create drops the number's entries before the new
 \* file's install (dev9p_create), so a dead open served an entry is always served
-\* another incarnation's, which Read judges a wrong read.
+\* another incarnation's, which Read judges a wrong read. It is definitional for
+\* the guest's own reuse (Reuse drops the entry, and every install is the live
+\* incarnation's), standing for the create's invalidate, which is pinned by
+\* dev9p.create_invalidates_reused_child and
+\* dev9p.create_invalidates_reused_child_pages (audit round 10 of M15, F5). An
+\* external reuse leaves the deleted file's entry in place, so
+\* fs_cache_reuse_external.cfg checks NoWrongRead without it: there the serve's
+\* name check alone keeps the new file's opens off the older entry.
 CacheOfLiveFile == \A f \in Files : cache[f].valid => cache[f].einc = gen[f]
 
 InvariantsReuse ==
@@ -1114,16 +1288,24 @@ InvariantsReuse ==
     /\ RecordsTrue
     /\ DeadStateSkipped
     /\ NoMisdirectedLoss
+    /\ NoMisdirectedSeen
     /\ CacheOfLiveFile
 
 \* Witnesses, VIOLATED by design (fs_cache_reuse_told.cfg, _told_leg.cfg,
-\* _coexist.cfg, _served.cfg): each counterexample is a reachable state in which
-\* InvariantsReuse holds.
+\* _coexist.cfg, _served.cfg, _unnamed_told.cfg, _unnamed_residue.cfg): each
+\* counterexample is a reachable state in which InvariantsReuse holds.
 \* NeverToldReport, NeverToldLeg -- no fsync is told any loss through that arm:
 \* the counterexample is the arm telling its own file's loss, so
 \* NoMisdirectedLoss is not held by an arm that never tells.
 NeverToldReport == "report" \notin tells
 NeverToldLeg    == "leg" \notin tells
+\* NeverToldUnnamed -- no open with no name is told a loss: the counterexample is
+\* one told its own file's refused run through the record (a loss reaches it).
+NeverToldUnnamed    == "unnamed" \notin tells
+\* NeverMisToldUnnamed -- no open with no name is told another file's loss: the
+\* counterexample is the cost vote M35 accepted, a deleted file's later loss
+\* told by number.
+NeverMisToldUnnamed == "unnamed" \notin bad_tell
 \* NeverServedReused -- no open of a reused number can be served from the Larder:
 \* the counterexample is the new file's open served, so NoWrongRead is not held
 \* by a name check that serves nothing.

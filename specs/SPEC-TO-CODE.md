@@ -2690,44 +2690,71 @@ part, so the file's content takes a fresh token), and `FsyncLeg` is an fsync
 answered by its own leg's refusal (vote M25); `bad_tell` and `tells` record
 each arm apart, so each has its witness and its counterexample.
 
+Audit round 10 (S-17, F2, F5) found three more. The model had no open without
+a name, so every rule for one was pinned by runtime tests alone, as round 9's
+F1 had been a stated exclusion: `EnableUnnamed` mints one (`Unnamed`, the
+failed Tgetattr). It is served nothing, registers and stages nothing, samples
+the current sequence, takes no refusal from a holder named by a generation on
+its leg, and reports by number, the `"unnamed"` arm vote M35 accepted. Its
+report marked the record told (F2), so a deleted file's unnamed open that found
+the live file's record by number hid the loss from the live file's next opens:
+it marks nothing now (`NoMisdirectedSeen`, the history flag `bad_seen`). And
+`CacheOfLiveFile` held by construction (F5): the guest's own reuse drops the
+entry and every install is the live incarnation's, so a serve checking one
+direction passed every cfg. `ExternalReuse` reuses a number without this
+session's create, the Larder keeping the deleted file's entry; there the name
+check must refuse an older entry as well as a newer one. The unnamed and
+external cfgs run one file: their rules are within one number, and two files
+multiply the unnamed state space past a practical run (one file: 14848
+distinct states, against 2870 without unnamed opens; the two-file run of the
+S-17 draft was stopped at 39 million states with its queue still growing).
+
 | Spec action / operator | Impl site |
 |---|---|
 | `Same(a, b)` | `kernel/dev9p.c::wb_same`, at the registry's find (`wb_reg_find_locked`), the pin's (`wb_pin_find_locked`) and the record's (`wb_loss_find_locked`). |
-| `Serves(n, e)` | `kernel/larder.c::own_serves` and `attr_serves`; a page read from the server is checked by version instead (the `e->cvers == want_cvers` arm of `larder_page_serve_who`), the same test, since Stratum starts a reused number's version past the old file's. The open's side is `kernel/dev9p.c::wb_who_of`: a generation serves under it, NONE by number; an unnamed plain file is served neither (beneath the model). |
-| `ReadCache(f, o)` | `dev9p_read` (`larder_attr_fresh_size_who`, `larder_page_serve_who`), `dev9p_stat_native` (`larder_attr_serve_who`), and the cached open's hint and snapshot (`larder_pages_cover_who`, `larder_pages_snapshot_who`), each with the open's who. |
+| `Serves(n, e)` | `kernel/larder.c::own_serves` and `attr_serves`; a page read from the server is checked by version instead (the `e->cvers == want_cvers` arm of `larder_page_serve_who`), the same test, since Stratum starts a reused number's version past the old file's. The open's side is `kernel/dev9p.c::wb_who_of`: a generation serves under it, NONE by number; an unnamed plain file is served neither (`Unnamed`; `BUGGY_UNNAMED_SERVE` serves it by number). An older generation's entry is refused as a newer one's is (`BUGGY_SERVE_OLDER` admits it; only `ExternalReuse` leaves one in place). |
+| `ReadCache(f, o)` | `dev9p_read` (`larder_attr_fresh_size_who`, `larder_page_serve_who`) and `dev9p_stat_native` (`larder_attr_serve_who`), each with the open's who. The cached open has no open's name yet: it checks its hint (`larder_pages_cover_who`) by the generation the Larder's attributes hold for the leaf (by number without one), and its snapshot (`larder_pages_snapshot_who`) by the would-be open's name, on a loose session the Larder's generation at mint and on a strict one the reply's (round 10 F5). |
 | `cache[f].ename` (`einc` is the model's truth) | `struct larder_page_ent`'s `own_has_gen`/`own_gen`, set by `larder_page_install_own_run` from the holder's `wb_holder_key`; `struct larder_attr_ent`'s `gen_known`/`gen`, the reply's generation. |
-| `Mint(f, o)` (the name and the sample, where the fid is made) | `dev9p_walk` (a plain walk to a plain file: `wb_name_learn(p, path, true)`, one Tgetattr on the new fid asking BASIC and GEN that also fills the attribute entry (vote M36), before the walk publishes the priv; a caught note or a death fails the walk (round 9 F3); a clone that walks no name copies its source's), `walk_attrs_pass` (the Twalkgetattr's generation), `dev9p_create` (`wb_name_learn(p, path, false)`), `dev9p_open_cached` (the Larder's identity for the leaf); each then `wb_open_sample`, and `dev9p_open` samples again under the same name. |
+| `Mint(f, o)` (the name and the sample, where the fid is made) | `dev9p_walk` (a plain walk to a plain file: `wb_name_learn(p, path, true)`, one Tgetattr on the new fid asking BASIC and GEN that also fills the attribute entry (vote M36), before the walk publishes the priv; a caught note or a death fails the walk (round 9 F3); a clone that walks no name copies its source's), `walk_attrs_pass` (the Twalkgetattr's generation), `dev9p_create` (`wb_name_learn(p, path, false)`), `dev9p_open_cached` (the Larder's identity for the leaf); each then `wb_open_sample`, and `dev9p_open` samples again under the same name. With `EnableUnnamed` the Tgetattr fails and the open has no name (`DEV9P_WB_FAILED`): `wb_open_sample` gives it the current sequence. |
 | `Reuse(f)` | not an impl site: Stratum's inode reuse (`si_gen` bumps; the old file's fids answer `ESTALE`). The guest's own create drops the child's Larder entry (`dev9p_create`). |
+| `ExternalReuse(f)` | not an impl site: another client's or another session's create of the next file at the number. No invalidate reaches this session's Larder, which keeps the deleted file's entries; `own_serves` and `attr_serves` refuse them to the new file's opens by generation. |
 | `FlushRefused(f, o)` | `wb_flush_locked`'s refused arm, for any holder: `wb_loss_record` under `wb_holder_key`, as the closer's job records a run it gives up. |
-| `FsyncLeg(f, o, p)` | `dev9p_fsync`: `wb_holder_flush(..., &refused)` lands p's run and meets its refusal (recorded in `wb_flush_locked`), `wb_loss_report` catches the open up past it, and `refused` is the answer (vote M25). An unnamed open's leg takes no refusal from a named holder (`!(k.unnamed && hg[i])`, vote M35), beneath the model. |
+| `FsyncLeg(f, o, p)` | `dev9p_fsync`: `wb_holder_flush(..., &refused)` lands p's run and meets its refusal (recorded in `wb_flush_locked`), `wb_loss_report` catches the open up past it, and `refused` is the answer (vote M25). An unnamed open's leg takes no refusal from a named holder (`!(k.unnamed && hg[i])`, vote M35: `FsyncLeg`'s `Unnamed` guard; `BUGGY_UNNAMED_LEG_TOLD` drops it). |
 | `OwnWriteDead(f, o)` | `dev9p_write`: the wire op's error goes back to the writer, then `wb_unpin`. |
-| `Fsync(f, o)` | `wb_loss_report` at `dev9p_fsync` and at `dev9p_fsync_report` (the ring's FSYNC, vote M32). |
-| `StageWrite`, `OwnWriteBegin`, `Read` (their peers under `Same`) | `wb_register` refuses only under a Same name; `wb_holder_flush`'s leg skips a holder or pin of another generation (a named key matches at most one entry; an unnamed key visits every holder at the number, S-15). |
+| `Fsync(f, o)` | `wb_loss_report` at `dev9p_fsync` and at `dev9p_fsync_report` (the ring's FSYNC, vote M32). An unnamed key reports by number, the `"unnamed"` arm, and catches its open up but marks no record told (`if (!k.unnamed) r->seen = true`, round 10 F2: `marks`; `BUGGY_UNNAMED_MARKS_SEEN` marks). |
+| `StageWrite`, `OwnWriteBegin`, `Read` (their peers under `Same`) | `wb_register` refuses only under a Same name, and an open with no name registers nothing (`wb_named`: `StageWrite`'s `name[f][o] # Unnamed`); `wb_holder_flush`'s leg skips a holder or pin of another generation (a named key matches at most one entry; an unnamed key visits every holder at the number, S-15). |
 
 | Spec name | Obligation |
 |---|---|
-| `NoWrongRead` (with reuse) | a deleted file's open is never served another incarnation's own page or attribute: the serve compares the open's name with the entry's (vote M34). |
-| `CacheOfLiveFile` | the guest's create drops the number's attribute and pages before the new file's install (`dev9p_create`), so an entry served to a dead open is always another incarnation's. |
-| `NoMisdirectedLoss` (`NoMisdirectedReport`, `NoMisdirectedLeg`) | a record names its file by number and generation, and so does the open that samples and reports it, and a named open's leg reaches only its own file's holder: no fsync is told another file's loss, through its report or its own leg. |
-| `DeadStateSkipped` | a dead file's stage or pin never stands under a name Same as a live open's: a leg skips it, it refuses no registration. |
+| `NoWrongRead` (with reuse) | a deleted file's open is never served another incarnation's own page or attribute: the serve compares the open's name with the entry's (vote M34). With `ExternalReuse` the Larder holds an older incarnation's entry too, and the comparison refuses it to a newer open (round 10 F5). |
+| `CacheOfLiveFile` | definitional for the guest's own reuse (`Reuse` drops the entry, and every install is the live incarnation's). It stands for the guest's create dropping the number's attribute and pages before the new file's install (`dev9p_create`), so an entry served to a dead open is always another incarnation's; pinned by `dev9p.create_invalidates_reused_child` and `dev9p.create_invalidates_reused_child_pages`. Not checked with `ExternalReuse`, which breaks it by design (round 10 F5). |
+| `NoMisdirectedLoss` (`NoMisdirectedReport`, `NoMisdirectedLeg`) | a record names its file by number and generation, and so does the open that samples and reports it, and a named open's leg reaches only its own file's holder: no fsync is told another file's loss, through its report or its own leg. An open with no name reports by number: its `"unnamed"` arm is admitted, the cost vote M35 accepted (`NeverMisToldUnnamed` shows it reachable). |
+| `NoMisdirectedSeen` (round 10 F2) | a record is marked told only by an fsync of its own incarnation: its file's later opens sample past a marked record. An unnamed key marks nothing (`wb_loss_report`), pinned by `dev9p.m35_unnamed_report_marks_no_record_told`. TLC's shortest counterexample marks a deleted file's record, which takes no later opens; the harmful mark, a deleted file's unnamed open marking the live file's record, is 7 states (Init, unnamed mint, reuse, mint, stage, refuse, fsync), measured on a scratch copy with the flag narrowed to the live file's records. |
+| `DeadStateSkipped` | a dead file's stage or pin never stands under a name Same as a live open's: a leg skips it, it refuses no registration. An open with no name is outside it (vote M35: its legs and pin go by number). |
 | `NamesTrue`, `RecordsTrue` | definitional here (`Mint` names by `gen[f]`, a refusal records `inc[f][o]`); they keep the buggy flags honest. The obligation they stand for is the impl's, pinned outside the model: a plain walk's Tgetattr asks about the walk's own new fid (`dev9p.m33_plain_walk_names_the_file` asserts the Tgetattr's fid is the Twalk's newfid), and Stratum answers a fid whose number was reused with `ESTALE`, never the new file's generation (`h_getattr`). |
 | `OneHolder` (per incarnation) | one holder per client and file; a dead holder may stand beside the new file's. |
 
-Outside the model (its server always reports the generation, and every
-Tgetattr is answered), pinned by runtime tests instead: an open with no name
-(its Tgetattr failed, or a strict session asked none) is served no own page or
-attribute (`dev9p.m34_unnamed_file_misses_m34a_unnamed_dir_by_number`), registers
-nothing and writes through, is told only losses recorded after it was made, and
-its legs and pin go by number, visiting every holder there, taking no refusal
-from a named one, and stopping every holder's buffering on a change
-(`dev9p.m33_unnamed_open_writes_through`, `dev9p.m33_the_name_does_not_move`,
+The model's open with no name is the failed Tgetattr's (`EnableUnnamed`); its
+rules are pinned at runtime too: served no own page or attribute
+(`dev9p.m34_unnamed_file_misses_m34a_unnamed_dir_by_number`), registering
+nothing and writing through, its legs and pin by number, taking no refusal from
+a named holder, stopping every holder's buffering on a change, and marking no
+record told (`dev9p.m33_unnamed_open_writes_through`,
+`dev9p.m33_the_name_does_not_move`,
 `dev9p.m35_unnamed_leg_takes_no_named_refusal`,
 `dev9p.m35a_unnamed_change_stops_the_holder`,
-`dev9p.s15_unnamed_leg_visits_every_holder`); an unnamed directory handle is
-served by number (vote M34a); a server that reports no generation keeps
-number-only names, vote M31's allowance (`dev9p.m33_plain_walk_names_the_file`);
-the record table's capacity (an evicted record tells less, never another file's
-loss); and a loss racing an open's sample, told to it as if the open came first.
+`dev9p.m35_unnamed_report_marks_no_record_told`). Outside the model (its server
+always reports the generation): a strict session's open, which asks no
+Tgetattr, is unnamed too but samples by number (`wb_open_sample`). Pinned by
+runtime tests instead: an unnamed leg visits every holder at its number
+(registration is not modelled apart from staging, and `PeersClear` already asks
+every Same holder clear: `dev9p.s15_unnamed_leg_visits_every_holder`,
+`dev9p.s15_leg_visits_past_its_batch`, `dev9p.s15_leg_resumes_after_a_closer`);
+an unnamed directory handle is served by number (vote M34a); a server that
+reports no generation keeps number-only names, vote M31's allowance
+(`dev9p.m33_plain_walk_names_the_file`); the record table's capacity (an
+evicted record tells less, never another file's loss); and a loss racing an
+open's sample, told to it as if the open came first.
 The serve by name is pinned by `dev9p.m34_dead_open_no_other_files_own_page` and
 `dev9p.m34_dead_open_no_other_files_attr`; the name at each mint by
 `dev9p.m33_plain_walk_names_the_file`, `dev9p.m33_plain_walk_to_a_dir_asks_nothing`,

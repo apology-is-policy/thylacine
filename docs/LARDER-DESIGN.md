@@ -1006,7 +1006,14 @@ refusal) has no name, and so has an open made before its session named files
 a death during a plain walk's Tgetattr fails the walk instead, as every wait in
 a call does (ARCH 8.8.3: a caller that sees its note RETURNS -T_E_INTR and never
 sleeps again in the same call), and a restarted call names its open; a
-create's keeps the open unnamed, its file already made. An open with no name
+create's keeps the open unnamed, its file already made. The resolver keeps the
+same rule across a union's members: a member whose cross, search check or walk
+fails once the call's note is caught (the mark stands until an operation's own
+reply) or while its thread dies ends the search with `EINTR` instead of trying
+the next member, which could resolve the path to a file an earlier member
+shadows; the readdir merge returns what it has gathered, else `EINTR` (audit
+round 10 of M15, F1). A server's own `EINTR` is that member's refusal, and the
+next member is tried. An open with no name
 registers nothing and writes through, and is told only losses recorded after it
 was made. Its legs go by number, since any holder at the number may be its own
 file's: a leg lands every holder's held run at the number, not only the first
@@ -1132,7 +1139,10 @@ M22a), samples at its walk. An fsync is told every loss since its open was last
 told, once: it returns the refusal its leg met (vote M25), else a record past
 its sample, as `EIO` (or the space errno, as above), and either way it catches
 its open up to the record and marks the record told; the holder's own fsync,
-which answers with its latch, does the same. An fsync told of a loss still
+which answers with its latch, does the same. An open with no name catches
+itself up but marks nothing told: the record it found by number may be another
+incarnation's (a deleted file's open finds the live file's), whose own later
+opens must still be told (audit round 10 of M15, F2). An fsync told of a loss still
 writes back its own open's run first, as Linux's writes back before it reports,
 and skips only the Tfsync. So a peer is told of a
 holder's refusal even when the holder heard it from a write or an fsync, as
