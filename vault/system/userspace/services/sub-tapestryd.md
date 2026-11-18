@@ -36,9 +36,14 @@ under 1 ms past its boundary; at every phase -- a millisecond walk and a sweep
 of whole milliseconds before each fractional boundary, a nanosecond either
 side -- a wake has exactly one more tick due and none a millisecond earlier; a
 tick already due polls at once; the old period's rates), ten mutants killed;
-and ls-gfx-quake's ceiling, a timedemo at most 61 fps (one present per tick
-cannot beat the clock). Round 49 (Opus 5.5, same-family): 0 P0, 0 P1, 1 P2 (a
-"never late" assertion that let a skipped tick through), 3 P3.
+and ls-gfx-throttle's rate leg: while Leg B's DYNAMIC pin holds the clock at
+60, the ctl's `tick` counter (one per delivered tick) is read twice ten
+seconds apart, timed on the host, and 59..61 Hz passes. A client cannot be the
+witness: the first try, a 61 fps ceiling on ls-gfx-quake's timedemo, passed the
+restored 62.5 Hz tick at 60.9 fps (q-fc1 MQ) -- a timedemo reads under the
+clock whenever a frame misses a tick -- so it was removed. Round 49 (Opus 5.5,
+same-family): 0 P0, 0 P1, 1 P2 (a "never late" assertion that let a skipped
+tick through), 3 P3; round 50 audits the rate leg.
 
 ## FRAME is opt-in per surface (November 18, vote 144)
 
