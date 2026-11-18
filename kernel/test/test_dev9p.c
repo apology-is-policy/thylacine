@@ -171,6 +171,7 @@ static void wb_wire_reset(void) {
 static u32  g_wga_seen, g_lopen_seen, g_clunk_seen;
 static u32  g_wga_newfid, g_tlopen_fid, g_tread_fid, g_setattr_fid;   // which fid each op named
 static u32  g_tfsync_seen, g_tfsync_fid;   // Tfsyncs since a test zeroed it; the last one's fid
+static u32  g_tfsync_fail_ecode;          // != 0: the NEXT Tfsync answers Rlerror(ecode), then clears
 static u64  g_wga_mask;                 // the last Twalkgetattr's request mask
 static u32  g_clunk_fids[4], g_clunk_fid_n;   // the first Tclunks' fids since a reset
 static u32  g_wga_newfids[4], g_wga_newfid_n; // the first Twalkgetattrs' newfids since a test zeroed it
@@ -546,6 +547,11 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         g_tfsync_last_seq = g_wire_seq;   // F1 wb ordering witness
         g_tfsync_seen++;
         if (req_len >= (size_t)P9_HDR_LEN + 4) g_tfsync_fid = le32_at(req + 7);
+        if (g_tfsync_fail_ecode) {
+            u32 ec = g_tfsync_fail_ecode;
+            g_tfsync_fail_ecode = 0;
+            return lock_rlerror(resp, resp_cap, tag, ec);
+        }
         // Rfsync = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -849,6 +855,7 @@ static struct Spoor *make_open_client_and_root(void) {
     g_twalk_path_ov = 0;
     g_tlopen_path_ov = 0;
     g_setattr_fail_ecode = 0;
+    g_tfsync_fail_ecode = 0;
     // The attribute replies' fixtures: an assert returns from its test, so a
     // test that failed between setting one and restoring it left it set.
     g_ga_mode = 0100644u;
@@ -5914,6 +5921,538 @@ void test_dev9p_m30a_a_loss_is_told_once(void) {
     TEST_ASSERT(oc == 0 && qc == 0 && rcl == 0, "every peer closes");
 }
 
+// Vote M30a: every fsync that reports a loss brings its open up to date, the
+// holder's own included, so its refused fsync marks the record told: an open made
+// after it hears nothing, as on Linux. The control, one variable away (when the
+// open was made): an open made before is told by the record, once.
+void test_dev9p_m30a_holders_fsync_marks_the_loss_told(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    long w0 = dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = T_E_ACCES;   // crosses the client as itself: EIO is M28's
+    int fh1 = dev9p.fsync(f, 0);
+    g_twrite_fail_ecode = 0;
+    struct Spoor *a = m23_peer(root, 0 /*OREAD*/);
+    int fa1 = a ? dev9p.fsync(a, 0) : 1;
+    int fo1 = o ? dev9p.fsync(o, 0) : 1;
+    int fo2 = o ? dev9p.fsync(o, 0) : 1;
+    int fh2 = dev9p.fsync(f, 0);
+    u32 seen = g_twrite_seen;
+    int oc = o ? d9_close(o) : -1, ac = a ? d9_close(a) : -1;
+    int hc = d9_close(f);
+    m23_end(root);
+
+    TEST_ASSERT(o && a, "a peer opened before the holder's fsync and one after");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(s64)fh1, (u64)(s64)-T_E_IO, "the holder's fsync is refused, as EIO");
+    TEST_EXPECT_EQ((u64)(s64)fa1, 0ull, "an open made after the holder was told hears nothing");
+    TEST_EXPECT_EQ((u64)(s64)fo1, (u64)(s64)-T_E_IO, "CONTROL: an open made before is told by the record");
+    TEST_EXPECT_EQ((u64)(s64)fo2, 0ull, "CONTROL: once");
+    TEST_EXPECT_EQ((u64)(s64)fh2, (u64)(s64)-T_E_IO, "the holder's latch answers again");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "one Twrite: the refused run");
+    TEST_EXPECT_EQ((u64)(s64)hc, (u64)(s64)-T_E_IO, "the holder's last close reports its latch");
+    TEST_ASSERT(oc == 0 && ac == 0, "both peers close");
+}
+
+// Vote M31's fixtures: a loose cacheable session; a create of wbfile whose new
+// file the server names by generation `gen`, or by none; an open of wbfile through
+// a walk that asks the generation, which the server answers `gen`.
+static void lk_drop(struct Spoor *c);
+
+static struct Spoor *m31_root(void) {
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return NULL;
+    g_client.loose = true;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    return root;
+}
+
+static struct Spoor *m31_create(struct Spoor *root, bool named, u64 gen) {
+    g_ga_valid = named ? (P9_GETATTR_BASIC | P9_GETATTR_GEN) : P9_GETATTR_BASIC;
+    g_ga_gen   = gen;
+    struct Spoor *f = m23_create(root);
+    g_ga_valid = 0x7ffu;
+    return f;
+}
+
+static struct Spoor *m31_peer(struct Spoor *root, u64 gen) {
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    const char *names[1] = { "wbfile" };
+    size_t lens[1] = { 6 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    g_wga_path_base  = M23_PATH;
+    g_tlopen_path_ov = M23_PATH;
+    g_ga_gen         = gen;
+    struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 1, sts);
+    if (w == DEV_WALK_ATTRS_UNSUPPORTED) w = NULL;
+    bool bound = w && w->nqid == 1 && w->spoor == nc;
+    if (w) walkqid_free(w);
+    if (!bound) {
+        nc->aux = NULL;                 // unbound, the clone shares root's priv
+        spoor_unref(nc);
+        return NULL;
+    }
+    struct Spoor *o = dev9p.open(nc, 0 /*OREAD*/);
+    if (!o) spoor_clunk(nc);
+    return o;
+}
+
+// Vote M31: a deleted file's unheard loss is its own. A new file at its inode
+// number, which the server names by another generation, is not told it. The
+// controls, one variable away: the same generation is the same file, and a server
+// that names none leaves the number alone to name it, so each is told, once.
+void test_dev9p_m31_a_dead_files_loss_is_not_the_new_files(void) {
+    for (u32 i = 0; i < 3; i++) {
+        bool other = i == 1, named = i != 2;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        dev9p_wb_test_loss_gen(&g_client, M23_PATH, 0x51u, -T_E_IO);   // the dead file's
+        struct Spoor *f = m31_create(root, named, other ? 0x52u : 0x51u);
+        struct dev9p_priv *fp = f ? dev9p_priv_of(f) : NULL;
+        bool e = fp && fp->wb_eligible;
+        int f1 = f ? dev9p.fsync(f, 0) : 1;
+        int f2 = f ? dev9p.fsync(f, 0) : 1;
+        int fc = f ? d9_close(f) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(f != NULL, "a create at the dead file's number");
+        TEST_ASSERT(e, "it holds");
+        if (other) {
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull,
+                           "another generation: the dead file's loss is not the new file's");
+        } else {
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO,
+                           named ? "CONTROL: the same generation is told"
+                                 : "CONTROL: a server that names no generation: told by number");
+            TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "CONTROL: once");
+        }
+        TEST_EXPECT_EQ((u64)(s64)fc, 0ull, "it closes");
+    }
+}
+
+// Vote M31: Stratum gives a deleted file's inode number to the next file created,
+// while the dead file's holder keeps its entry until its last close. A new file at
+// that number, of another generation, holds; its fsync neither lands the dead
+// holder's run nor hears that run refused; the dead holder's last close tells its
+// own file's other open, once. The control, one variable away (the server names
+// the same generation): the second create is the same file, which has a holder, so
+// it writes through, and its fsync lands the holder's run and hears it refused.
+void test_dev9p_m31_a_new_file_at_a_dead_files_number(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool reborn = i == 1;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, true, 0x51u);
+        struct Spoor *o  = f1 ? m31_peer(root, 0x51u) : NULL;
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        g_twrite_fail_ecode = T_E_STALE;         // the next Twrite: the dead file's fid
+        struct Spoor *f2 = f1 ? m31_create(root, true, reborn ? 0x52u : 0x51u) : NULL;
+        struct dev9p_priv *p2 = f2 ? dev9p_priv_of(f2) : NULL;
+        bool e2   = p2 && p2->wb_eligible;
+        int  s1   = f2 ? dev9p.fsync(f2, 0) : 1;
+        u32  seen1 = g_twrite_seen;
+        int  c1   = f1 ? d9_close(f1) : 1;
+        u32  seen2 = g_twrite_seen;
+        g_twrite_fail_ecode = 0;
+        int  fo1 = o ? dev9p.fsync(o, 0) : 1;
+        int  fo2 = o ? dev9p.fsync(o, 0) : 1;
+        int  s2  = f2 ? dev9p.fsync(f2, 0) : 1;
+        int  oc  = o ? d9_close(o) : -1, c2 = f2 ? d9_close(f2) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(f1 && o && f2, "a holder, its file's other open, and a second create");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        if (reborn) {
+            TEST_ASSERT(e2, "a new file at the dead file's number holds");
+            TEST_EXPECT_EQ((u64)(s64)s1, 0ull, "its fsync succeeds");
+            TEST_EXPECT_EQ((u64)seen1, 0ull, "and lands nothing of the dead holder's");
+            TEST_EXPECT_EQ((u64)(s64)c1, (u64)(s64)-T_E_IO,
+                           "the dead holder's last close meets the refusal, as EIO");
+            TEST_EXPECT_EQ((u64)seen2, 1ull, "sending its run");
+            TEST_EXPECT_EQ((u64)(s64)s2, 0ull, "the new file's open is not told it");
+        } else {
+            TEST_ASSERT(!e2, "CONTROL: the same file has a holder: the second create writes through");
+            TEST_EXPECT_EQ((u64)(s64)s1, (u64)(s64)-T_E_IO,
+                           "CONTROL: its fsync lands the holder's run and hears it refused");
+            TEST_EXPECT_EQ((u64)seen1, 1ull, "CONTROL: one Twrite");
+            TEST_EXPECT_EQ((u64)(s64)c1, (u64)(s64)-T_E_IO,
+                           "CONTROL: the holder's last close reports its latch");
+            TEST_EXPECT_EQ((u64)seen2, 1ull, "CONTROL: and sends nothing more");
+            TEST_EXPECT_EQ((u64)(s64)s2, 0ull, "CONTROL: told once");
+        }
+        TEST_EXPECT_EQ((u64)(s64)fo1, (u64)(s64)-T_E_IO, "the dead file's other open is told of the loss");
+        TEST_EXPECT_EQ((u64)(s64)fo2, 0ull, "once");
+        TEST_ASSERT(oc == 0 && c2 == 0, "both close");
+    }
+}
+
+// Vote M31: a create asks its new file's generation with one Tgetattr, on a loose
+// cacheable session only, and one that cannot learn it writes through: its name
+// could not tell its file from a dead one's. The control, one variable away (the
+// Tgetattr is answered): the create holds, named by the generation, and stages.
+void test_dev9p_m31_create_that_cannot_learn_writes_through(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 3; i++) {
+        bool answered = i == 0, strict = i == 2;
+        struct Spoor *root = strict ? make_open_client_and_root() : m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        u32 ga0 = g_tgetattr_seen;
+        g_tgetattr_mask = 0;
+        g_ga_fail_ecode = (answered || strict) ? 0u : (u32)T_E_IO;
+        struct Spoor *f = m31_create(root, true, 0x61u);
+        g_ga_fail_ecode = 0;
+        u32 asked = g_tgetattr_seen - ga0;
+        u64 mask  = g_tgetattr_mask;
+        struct dev9p_priv *fp = f ? dev9p_priv_of(f) : NULL;
+        bool e   = fp && fp->wb_eligible;
+        u8 ident = fp ? __atomic_load_n(&fp->lock_ident, __ATOMIC_ACQUIRE) : 0xff;
+        u64 gen  = fp ? __atomic_load_n(&fp->lock_gen, __ATOMIC_RELAXED) : 0;
+        wb_wire_reset();
+        long w0  = f ? dev9p.write(f, chunk, 256, 0) : -1;
+        u32 seen = g_twrite_seen;
+        int fc   = f ? d9_close(f) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(f != NULL, "a create");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "its write is taken");
+        if (strict) {
+            TEST_EXPECT_EQ((u64)asked, 0ull, "a strict session's create asks nothing");
+            TEST_ASSERT(!e, "and writes through");
+            TEST_EXPECT_EQ((u64)seen, 1ull, "its write on the wire");
+        } else {
+            TEST_EXPECT_EQ((u64)asked, 1ull, "a loose cacheable create asks once");
+            TEST_ASSERT((mask & P9_GETATTR_GEN) != 0, "for the generation");
+            if (answered) {
+                TEST_ASSERT(e, "CONTROL: answered, it holds");
+                TEST_EXPECT_EQ((u64)ident, (u64)DEV9P_IDENT_GEN, "CONTROL: named by the generation");
+                TEST_EXPECT_EQ(gen, 0x61ull, "CONTROL: the new file's");
+                TEST_EXPECT_EQ((u64)seen, 0ull, "CONTROL: and stages");
+            } else {
+                TEST_ASSERT(!e, "a create that cannot learn its generation does not hold");
+                TEST_EXPECT_EQ((u64)ident, (u64)DEV9P_IDENT_UNKNOWN, "and knows no identity");
+                TEST_EXPECT_EQ((u64)seen, 1ull, "its write goes through");
+            }
+        }
+        TEST_EXPECT_EQ((u64)(s64)fc, 0ull, "it closes");
+    }
+}
+
+// Votes M27, M31: a create samples the file's lost runs, so a loss told before it
+// is not told to it. The control, one variable away (nobody told the loss): its
+// first fsync is told, once.
+void test_dev9p_m27_create_samples_the_record(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool told = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_IO);
+        struct Spoor *a = told ? m23_peer(root, 0 /*OREAD*/) : NULL;
+        int fa = a ? dev9p.fsync(a, 0) : 1;
+        struct Spoor *f = m23_create(root);
+        int f1 = f ? dev9p.fsync(f, 0) : 1;
+        int f2 = f ? dev9p.fsync(f, 0) : 1;
+        int ac = a ? d9_close(a) : 0, fc = f ? d9_close(f) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(f != NULL, "a create of the file");
+        if (told) {
+            TEST_ASSERT(a != NULL, "a peer");
+            TEST_EXPECT_EQ((u64)(s64)fa, (u64)(s64)-T_E_IO, "premise: the peer's fsync tells the loss");
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull, "a create after the loss was told hears nothing");
+        } else {
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "CONTROL: nobody told it: the create's fsync is told");
+            TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "CONTROL: once");
+        }
+        TEST_ASSERT(ac == 0 && fc == 0, "both close");
+    }
+}
+
+// Votes M22a, M27: a navigation handle, which fsync accepts, samples the file's
+// lost runs at its walk, either walk: a loss told before the walk is not told to
+// it. The control, one variable away (nobody told the loss): its first fsync is
+// told, once.
+static struct Spoor *m27_nav(struct Spoor *root, bool attrs) {
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    const char *names[1] = { "wbfile" };
+    size_t lens[1] = { 6 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    g_twalk_path_ov = M23_PATH;
+    g_wga_path_base = M23_PATH;
+    struct Walkqid *w = attrs ? dev9p.walk_attrs(root, nc, names, lens, 1, sts)
+                              : dev9p.walk(root, nc, names, 1);
+    if (w == DEV_WALK_ATTRS_UNSUPPORTED) w = NULL;
+    bool bound = w && w->nqid == 1 && dev9p_priv_of(nc) != dev9p_priv_of(root);
+    if (w) walkqid_free(w);
+    if (!bound) {
+        nc->aux = NULL;
+        spoor_unref(nc);
+        return NULL;
+    }
+    return nc;
+}
+
+void test_dev9p_m27_navigation_handle_samples_at_its_walk(void) {
+    for (u32 i = 0; i < 4; i++) {
+        bool attrs = i >= 2, told = (i & 1u) == 0;
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "root");
+        dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_IO);
+        struct Spoor *a = told ? m23_peer(root, 0 /*OREAD*/) : NULL;
+        int fa = a ? dev9p.fsync(a, 0) : 1;
+        struct Spoor *nav = m27_nav(root, attrs);
+        bool plain = nav && nav->qid.path == M23_PATH && nav->qid.type == 0;
+        int fn1 = nav ? dev9p.fsync(nav, 0) : 1;
+        int fn2 = nav ? dev9p.fsync(nav, 0) : 1;
+        int ac = a ? d9_close(a) : 0;
+        if (nav) lk_drop(nav);
+        m23_end(root);
+
+        TEST_ASSERT(plain, attrs ? "a navigation handle on the file, through the walk that asks attributes"
+                                 : "a navigation handle on the file, through the plain walk");
+        if (told) {
+            TEST_ASSERT(a != NULL, "a peer");
+            TEST_EXPECT_EQ((u64)(s64)fa, (u64)(s64)-T_E_IO, "premise: the peer's fsync tells the loss");
+            TEST_EXPECT_EQ((u64)(s64)fn1, 0ull,
+                           "a navigation handle walked after the loss was told hears nothing");
+        } else {
+            TEST_EXPECT_EQ((u64)(s64)fn1, (u64)(s64)-T_E_IO,
+                           "CONTROL: nobody told it: the handle's first fsync is told");
+            TEST_EXPECT_EQ((u64)(s64)fn2, 0ull, "CONTROL: once");
+        }
+        TEST_EXPECT_EQ((u64)(s64)ac, 0ull, "the peer closes");
+    }
+}
+
+// Round 7 F5 (LARDER-DESIGN 12.6): an fsync told of a loss still writes back its
+// own open's run first, as Linux's writes back before it reports, and skips only
+// the Tfsync. The control, one variable away (no loss recorded): the same fsync
+// writes the run back and syncs.
+void test_dev9p_m27_told_fsync_writes_back_first(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool lost = i == 0;
+        struct Spoor *root = NULL;
+        struct Spoor *f = wb_make_created(&root);
+        TEST_ASSERT(f != NULL, "create");
+        if (lost) dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_IO);   // older than the run
+        wb_wire_reset();
+        g_tfsync_seen = 0;
+        long w0  = dev9p.write(f, chunk, 256, 0);
+        int  f1  = dev9p.fsync(f, 0);
+        u32  seen = g_twrite_seen, len = g_twrite_cap_len, fs1 = g_tfsync_seen;
+        int  f2  = dev9p.fsync(f, 0);
+        u32  fs2 = g_tfsync_seen;
+        int  fc  = d9_close(f);
+        m23_end(root);
+
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        TEST_EXPECT_EQ((u64)seen, 1ull, "its fsync writes its run back");
+        TEST_EXPECT_EQ((u64)len, 256ull, "all of it");
+        if (lost) {
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "and is told the older loss");
+            TEST_EXPECT_EQ((u64)fs1, 0ull, "skipping only the Tfsync");
+            TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+            TEST_EXPECT_EQ((u64)fs2, 1ull, "the next fsync syncs");
+        } else {
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull, "CONTROL: with no loss it succeeds");
+            TEST_EXPECT_EQ((u64)fs1, 1ull, "CONTROL: and syncs");
+        }
+        TEST_EXPECT_EQ((u64)(s64)fc, 0ull, "the holder closes");
+    }
+}
+
+// One ring FSYNC of registered handle `h`, waited for: its CQE's result, or 1 when
+// no CQE of its own came.
+static s64 d9_ring_fsync(struct Loom *l, u32 h) {
+    struct loom_ring_hdr *hdr = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 *sqa  = (u32 *)(l->ring_kva + l->sq_array_off);
+    u32 t     = hdr->sq_tail;
+    u32 slot  = t & (l->sq_entries - 1u);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode     = LOOM_OP_FSYNC;
+    s->handle_idx = h;
+    s->user_data  = 0xF5000000u + t;
+    sqa[slot] = slot;
+    u32 c0 = l->cq_tail;
+    __atomic_store_n(&hdr->sq_tail, t + 1u, __ATOMIC_RELEASE);
+    if (loom_enter(l, 1, 1, 0) != 1 || l->cq_tail != c0 + 1u) return 1;
+    struct loom_cqe *q = &cqes[c0 & (l->cq_entries - 1u)];
+    __atomic_store_n(&hdr->cq_head, c0 + 1u, __ATOMIC_RELEASE);   // reaped
+    return q->user_data == 0xF5000000u + t ? (s64)q->result : 1;
+}
+
+// Vote M32: a ring FSYNC whose Tfsync succeeds is told the file's lost runs as an
+// fsync is, once, ENOSPC as it is, and its open is caught up. Each control is one
+// variable away: before the loss the same FSYNC hears nothing; a FSYNC whose
+// Tfsync fails returns that failure and tells nothing, so the next one is told.
+// The ring lands nothing first: every FSYNC reaches the server.
+void test_dev9p_m32_ring_fsync_is_told(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    struct Loom *l = o ? loom_create(8, 16, false) : NULL;
+    int reg = -1;
+    if (l) {
+        rights_t rt = RIGHT_READ;
+        spoor_ref(o);                             // the table adopts this one
+        reg = loom_register_handles(l, &o, &rt, 1);
+        if (reg != 0) spoor_clunk(o);
+    }
+    s64 r0 = 1, r1 = 1, r2 = 1, r3 = 1, r4 = 1, r5 = 1;
+    int fo = 1;
+    u32 fs = 0;
+    if (reg == 0) {
+        g_tfsync_seen = 0;
+        r0 = d9_ring_fsync(l, 0);
+        dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_NOSPC);
+        r1 = d9_ring_fsync(l, 0);
+        r2 = d9_ring_fsync(l, 0);
+        fo = dev9p.fsync(o, 0);
+        dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_IO);
+        g_tfsync_fail_ecode = T_E_ROFS;
+        r3 = d9_ring_fsync(l, 0);
+        g_tfsync_fail_ecode = 0;
+        r4 = d9_ring_fsync(l, 0);
+        r5 = d9_ring_fsync(l, 0);
+        fs = g_tfsync_seen;
+    }
+    if (l) loom_unref(l);
+    int oc = o ? d9_close(o) : -1;
+    m23_end(root);
+
+    TEST_ASSERT(o != NULL, "an open of the file");
+    TEST_ASSERT(l != NULL, "loom_create");
+    TEST_EXPECT_EQ((u64)(s64)reg, 0ull, "registered with the ring");
+    TEST_EXPECT_EQ((u64)r0, 0ull, "CONTROL: before any loss a ring FSYNC hears nothing");
+    TEST_EXPECT_EQ((u64)r1, (u64)(s64)-T_E_NOSPC, "after a loss it is told, ENOSPC as it is");
+    TEST_EXPECT_EQ((u64)r2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)(s64)fo, 0ull, "and the open was caught up: its fsync hears nothing");
+    TEST_EXPECT_EQ((u64)r3, (u64)(s64)-T_E_ROFS, "CONTROL: a FSYNC whose Tfsync fails returns that failure");
+    TEST_EXPECT_EQ((u64)r4, (u64)(s64)-T_E_IO, "and told nothing: the next FSYNC is told");
+    TEST_EXPECT_EQ((u64)r5, 0ull, "once");
+    TEST_EXPECT_EQ((u64)fs, 7ull, "every FSYNC and the fsync reached the server");
+    TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "the open closes");
+}
+
+// Vote M28 through the syscall: a last close whose run the server refuses for space
+// returns ENOSPC or EDQUOT as it is, and the fd is closed either way. The control,
+// one variable away (the refusal's errno): any other refusal is EIO.
+void test_dev9p_m28_sys_close_passes_space_errnos(void) {
+    static const u32 ec[3]   = { T_E_NOSPC, T_E_DQUOT, T_E_ACCES };
+    static const s64 want[3] = { -T_E_NOSPC, -T_E_DQUOT, -T_E_IO };
+    static const char *const what[3] = {
+        "ENOSPC as it is", "EDQUOT as it is", "CONTROL: another refusal is EIO",
+    };
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 3; i++) {
+        struct Spoor *root = NULL;
+        struct Spoor *f = wb_make_created(&root);
+        TEST_ASSERT(f != NULL, "create");
+        struct Proc *p = proc_alloc();
+        hidx_t fd = p ? handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, f) : -1;
+        if (fd < 0) spoor_clunk(f);              // the slot did not take the reference
+        wb_wire_reset();
+        long w0 = fd >= 0 ? dev9p.write(f, chunk, 256, 0) : -1;
+        g_twrite_fail_ecode = ec[i];
+        s64 rc  = fd >= 0 ? sys_close_for_test(p, (u64)fd) : 1;
+        u32 seen = g_twrite_seen;
+        g_twrite_fail_ecode = 0;
+        s64 rc2 = fd >= 0 ? sys_close_for_test(p, (u64)fd) : 1;
+        if (p) { p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+        m23_end(root);
+
+        TEST_ASSERT(p != NULL && fd >= 0, "a Proc holding the created file");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "its write is held");
+        TEST_EXPECT_EQ((u64)rc, (u64)want[i], what[i]);
+        TEST_EXPECT_EQ((u64)seen, 1ull, "the close sent the run");
+        TEST_EXPECT_EQ((u64)rc2, (u64)(s64)-T_E_BADF, "and the fd is closed");
+    }
+}
+
+// Vote M28: EDQUOT, the other space errno, passes as it is wherever ENOSPC does:
+// through a peer's leg, a third open told by the record, the holder's latch on its
+// write and fsync, and its last close.
+void test_dev9p_m28_edquot_through_the_leg_and_the_latch(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+    struct Spoor *q = m23_peer(root, 0 /*OREAD*/);
+    wb_wire_reset();
+    long w0 = dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = T_E_DQUOT;
+    int  fo = o ? dev9p.fsync(o, 0) : 1;
+    int  fq = q ? dev9p.fsync(q, 0) : 1;
+    long we = dev9p.write(f, chunk + 256, 256, 256);
+    int  fh = dev9p.fsync(f, 0);
+    u32  seen = g_twrite_seen;
+    int  oc = o ? d9_close(o) : -1, qc = q ? d9_close(q) : -1;
+    int  hc = d9_close(f);
+    m23_end(root);
+
+    TEST_ASSERT(o && q, "two peers");
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(s64)fo, (u64)(s64)-T_E_DQUOT, "the peer's leg meets the refusal: EDQUOT as it is");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "one Twrite: the refused run");
+    TEST_EXPECT_EQ((u64)(s64)fq, (u64)(s64)-T_E_DQUOT, "a third open is told by the record, EDQUOT");
+    TEST_EXPECT_EQ((u64)(s64)we, (u64)(s64)-T_E_DQUOT, "the holder's write reports its latch, EDQUOT");
+    TEST_EXPECT_EQ((u64)(s64)fh, (u64)(s64)-T_E_DQUOT, "and so does its fsync");
+    TEST_EXPECT_EQ((u64)(s64)hc, (u64)(s64)-T_E_DQUOT, "and its last close");
+    TEST_ASSERT(oc == 0 && qc == 0, "both peers close");
+}
+
+// Vote M26: every Loom registration pins the file until its drops are done, the
+// holder's own included: its own run lands under the pin, released after.
+void test_dev9p_m26_holder_loom_registration_pins(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    wb_wire_reset();
+    long w0 = dev9p.write(f, chunk, 256, 0);
+    m24_probe_on();
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    spoor_ref(f);                                 // the table adopts this one
+    int reg = loom_register_handles(l, &f, &rt, 1);
+    if (reg != 0) spoor_clunk(f);
+    u32 p1 = dev9p_wb_pins(&g_client, M23_PATH);
+    g_m24_probe = false;
+    u32 n   = g_m24_log_n;
+    u8  ty0 = g_m24_type[0];
+    u32 pn0 = g_m24_pins[0];
+    loom_unref(l);
+    int fcc = d9_close(f);
+    m23_end(root);
+
+    TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+    TEST_EXPECT_EQ((u64)(s64)reg, 0ull, "its registration succeeds");
+    TEST_EXPECT_EQ((u64)n, 1ull, "one wire operation: its run's Twrite");
+    TEST_ASSERT(ty0 == P9_TWRITE && pn0 == 1, "the holder's own run lands under its registration's pin");
+    TEST_EXPECT_EQ((u64)p1, 0ull, "released once its drops are done");
+    TEST_EXPECT_EQ((u64)(s64)fcc, 0ull, "the holder closes");
+}
+
 // Vote M29: a mapping made through an open that can stage is its own private
 // Image, never shared: its pages would fill through that open's read, which
 // serves bytes the server may yet refuse. A peer's mapping misses it and is
@@ -8387,6 +8926,47 @@ void test_dev9p_cached_open_loose_stale(void) {
     teardown(root);
 }
 
+// Votes M27, M31: a loose cached open samples the file's lost runs at its mint,
+// under the generation the Larder keeps, so a loss told before it is not told to
+// it, and neither is a loss of another generation. The control, one variable away
+// (nobody told the loss): its first fsync is told.
+void test_dev9p_m31_cached_mint_samples_by_generation(void) {
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 7 + 3);
+    for (u32 i = 0; i < 3; i++) {
+        bool told = i == 0, other = i == 2;
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "root");
+        dev9p_wb_test_loss_gen(&g_client, 0x20u, other ? 0x78u : 0x77u, -T_E_IO);
+        struct Spoor *a = told ? co_loose_mint(root, data, (u32)sizeof(data), 0x77) : NULL;
+        int fa = a ? dev9p.fsync(a, 0) : 1;
+        if (a) { spoor_clunk(a); (void)p9_client_reader_pump_ready(&g_client); }
+        struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+        struct dev9p_priv *cp = co ? dev9p_priv_of(co) : NULL;
+        bool named = cp && cp->cached_open &&
+                     __atomic_load_n(&cp->lock_ident, __ATOMIC_ACQUIRE) == DEV9P_IDENT_GEN;
+        int f1 = co ? dev9p.fsync(co, 0) : 1;
+        int f2 = co ? dev9p.fsync(co, 0) : 1;
+        if (co) { spoor_clunk(co); (void)p9_client_reader_pump_ready(&g_client); }
+        g_wga_no_gen = false;
+        lock_wire_reset();
+        larder_destroy(&g_client.larder);
+        __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+        teardown(root);
+
+        TEST_ASSERT(named, "a loose cached open, named by the Larder's generation");
+        if (told) {
+            TEST_EXPECT_EQ((u64)(s64)fa, (u64)(s64)-T_E_IO, "premise: an earlier cached open is told the loss");
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull, "one minted after the loss was told hears nothing");
+        } else if (other) {
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull, "a loss of another generation is not told to it");
+        } else {
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "CONTROL: nobody told it: its fsync is told");
+            TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "CONTROL: once");
+        }
+    }
+}
+
 // fchmod and futimens through a read-only descriptor of a loose cached open:
 // the wstat binds, and the fstat after it asks the server through that fid with
 // the snapshot's size. Before the bind, fstat costs no wire. If the file moved,
@@ -8922,6 +9502,53 @@ void test_dev9p_lock_ident_generation(void) {
     if (g) lk_close(g);
     if (f) lk_close(f);
     teardown(root);
+}
+
+// Vote M31: a walk that asks the leaf's generation names the fid's file by it, so
+// the file locks ask nothing more. The control, one variable away (the answer
+// carries no generation): the name stays unknown, and the file locks ask, once.
+void test_dev9p_m31_walk_names_the_file(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    u8  ident[2] = { 0xff, 0xff };
+    u64 gen[2]   = { 0, 0 };
+    u32 asked[2] = { 9, 9 };
+    bool bound[2] = { false, false };
+    for (u32 i = 0; i < 2; i++) {
+        lock_wire_reset();
+        g_wga_no_gen = i == 1;
+        g_ga_gen     = 0x4242u;
+        g_ga_valid   = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        struct Spoor *nc = spoor_clone(root);
+        struct Walkqid *w = nc ? dev9p.walk_attrs(root, nc, names, lens, 1, sts) : NULL;
+        if (w == DEV_WALK_ATTRS_UNSUPPORTED) w = NULL;
+        bound[i] = w && w->nqid == 1 && w->spoor == nc;
+        if (w) walkqid_free(w);
+        if (!bound[i]) {
+            if (nc) { nc->aux = NULL; spoor_unref(nc); }
+            continue;
+        }
+        struct dev9p_priv *np = dev9p_priv_of(nc);
+        ident[i] = __atomic_load_n(&np->lock_ident, __ATOMIC_ACQUIRE);
+        gen[i]   = __atomic_load_n(&np->lock_gen, __ATOMIC_RELAXED);
+        u32 g0 = g_tgetattr_seen;
+        (void)dev9p.lock_ident(nc);
+        asked[i] = g_tgetattr_seen - g0;
+        lk_drop(nc);
+    }
+    g_ga_valid = 0x7ffu;
+    lock_wire_reset();
+    teardown(root);
+
+    TEST_ASSERT(bound[0] && bound[1], "two walks bind the leaf");
+    TEST_EXPECT_EQ((u64)ident[0], (u64)DEV9P_IDENT_GEN, "a walk answered with the generation names the file by it");
+    TEST_EXPECT_EQ(gen[0], 0x4242ull, "the leaf's");
+    TEST_EXPECT_EQ((u64)asked[0], 0ull, "and the file locks ask nothing more");
+    TEST_EXPECT_EQ((u64)ident[1], (u64)DEV9P_IDENT_UNKNOWN, "CONTROL: no generation in the answer: unknown");
+    TEST_EXPECT_EQ((u64)asked[1], 1ull, "CONTROL: so the file locks ask, once");
 }
 
 // A strict cached open keeps its walk's fid (operator vote 20), so it locks

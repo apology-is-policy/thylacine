@@ -2652,6 +2652,26 @@ static void wb_close_swap(struct dev9p_priv *p, struct dev9p_close_job *j,
 // reference (a test's bare client), or no memory. Either way p has left the
 // holder registry, a run it could not hand on recorded as lost first (vote
 // M27); on success the job stands in its place.
+// A close job's buffer, or none when a test has asked for an allocation failure.
+#ifdef KERNEL_TESTS
+static u32 g_wb_fail_close_jobs;
+
+u32 dev9p_wb_fail_close_jobs_for_test(u32 n) {
+    return __atomic_exchange_n(&g_wb_fail_close_jobs, n, __ATOMIC_RELAXED);
+}
+#endif // KERNEL_TESTS
+
+static struct dev9p_close_job *wb_close_job_alloc(void) {
+#ifdef KERNEL_TESTS
+    u32 n = __atomic_load_n(&g_wb_fail_close_jobs, __ATOMIC_RELAXED);
+    while (n > 0)
+        if (__atomic_compare_exchange_n(&g_wb_fail_close_jobs, &n, n - 1, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return NULL;
+#endif // KERNEL_TESTS
+    return kmalloc(sizeof(struct dev9p_close_job), 0);
+}
+
 static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
     struct dev9p_fkey k = wb_holder_key(p, qid_path);
     if (!p->fid_owned || !p->attached_owner) {
@@ -2659,7 +2679,7 @@ static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
         wb_unregister(p);
         return -T_E_IO;
     }
-    struct dev9p_close_job *j = kmalloc(sizeof(*j), 0);
+    struct dev9p_close_job *j = wb_close_job_alloc();
     if (!j) {
         wb_loss_record(p->client, k, -T_E_NOMEM);
         wb_unregister(p);

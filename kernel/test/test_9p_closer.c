@@ -1410,6 +1410,67 @@ void test_p9_closer_close_job_loss_reaches_a_peer_fsync(void) {
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
 }
 
+// The hand-off arms that lose a run before any closer has it -- no job could be
+// allocated, or no closer entry for it -- record it as a closer's job does (votes
+// M27, M30a): the run never reached the server, the dying close reports the loss
+// to its caller, and a peer opened before hears it at its next fsync, once, before
+// any Tfsync. The fid is clunked all the same.
+static void closer_hand_off_loss(bool node) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct wbc w = {0};
+    bool opened = wbc_open(&w), peered = false, started = false, clunked = false;
+    struct Spoor *peer = NULL;
+    int f1 = 1, f2 = 1;
+    u32 nfs1 = 0xffffffffu, nfs2 = 0xffffffffu, left = 0xffffffffu;
+    if (opened) {
+        peer   = pw_open_peer(&w);
+        peered = peer != NULL;
+    }
+    if (peered) {
+        p9_close_flush_quiet_for_test(true);
+        if (node) (void)p9_closer_fail_nodes_for_test(1);
+        else      (void)dev9p_wb_fail_close_jobs_for_test(1);
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, wbc_drop, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        left = node ? p9_closer_fail_nodes_for_test(0) : dev9p_wb_fail_close_jobs_for_test(0);
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+        clunked = srv_clunked(&g_rec_a, w.fid);
+        p9_close_flush_quiet_for_test(false);
+        f1   = dev9p.fsync(peer, 0);
+        nfs1 = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+        f2   = dev9p.fsync(peer, 0);
+        nfs2 = __atomic_load_n(&g_rec_a.nfsync, __ATOMIC_ACQUIRE);
+    }
+    struct srv_rec rec = g_rec_a;
+    int pcc = peered ? wbc_fd_close(peer) : 0;
+    u64 budget = dev9p_wb_budget_used();
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(peered, "a peer open of the same file");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)left, 0ull, node ? "the closer entry's allocation failed"
+                                         : "the close job's allocation failed");
+    TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, (u64)(s64)-T_E_NOMEM, "the dying close reports the loss to its caller");
+    TEST_EXPECT_EQ((u64)rec.nwrite, 0ull, "the run never reached the server");
+    TEST_ASSERT(clunked, "the fid is clunked all the same");
+    TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "the peer's next fsync hears the loss");
+    TEST_EXPECT_EQ((u64)nfs1, 0ull, "before any Tfsync");
+    TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+    TEST_EXPECT_EQ((u64)nfs2, 1ull, "the next fsync syncs");
+    TEST_EXPECT_EQ((u64)(s64)pcc, 0ull, "the peer closes");
+    TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+void test_p9_closer_hand_off_job_oom_reaches_a_peer_fsync(void)  { closer_hand_off_loss(false); }
+void test_p9_closer_hand_off_node_oom_reaches_a_peer_fsync(void) { closer_hand_off_loss(true); }
+
 // The same for a lock-flush job: a last close on a thread that may not wait,
 // with another reference keeping the open, hands its flush to a job, and the
 // server refuses it past the last close.
