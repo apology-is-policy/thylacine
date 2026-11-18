@@ -924,9 +924,11 @@ reader): the menu -- and every chrome tile -- lives on halcyond's pane-tree
 session while the console's stream lives on its own private session, so a
 loop parked on the console's ring never sees a menu key (and a tile's
 CONFIGURE landed only at the next reconcile's reads). While a menu is up
-halcyond waits on the MENU's ring (its FRAME ticks bound the wait; the
-compositor's dismiss EOFs it) and polls the console's stream; the chrome
-tiles keep their reconcile-driven repaint.
+halcyond waits on the MENU's ring (the compositor's dismiss EOFs it) and
+polls the console's stream; the chrome tiles keep their reconcile-driven
+repaint. (Since KT-1.5b the console, the menus and the chrome share ONE
+SQPOLL ring that halcyond's unified poll covers. No FRAME bounds that
+wait: halcyond arms none (TAPESTRY 18.4, vote 144); its own deadlines do.)
 
 **Status bar (H-3d).** A screen-bottom `Role::Chrome` surface halcyond paints
 (Daylight §6): workspaces / focused context / the sage-cinnabar condition slot /
@@ -972,8 +974,9 @@ RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
   the SAME record the live tile keys (sage for ok, cinnabar for err,
   `status_idle` for resting) -- the bar is the redundant channel, the tile
   the primary. *Clock*: `HH:MM` off `CLOCK_REALTIME` (`t_clock_gettime`),
-  repainted at the minute (the compositor's FRAME tick is the wake; the
-  minute boundary is checked per pass). Proportional face for names,
+  repainted at the minute (the next minute boundary is a poll deadline,
+  `statusset::clock_timeout_ms`; no compositor tick wakes halcyond, which
+  arms no FRAME -- TAPESTRY 18.4). Proportional face for names,
   monospace islands for the directory and the command (Daylight 7).
 - **The working directory comes from ut, as OSC 7 -- VOTE (2026-09-02; an
   ABI addition, signed off): "OSC 7 from ut now" over "program + last command

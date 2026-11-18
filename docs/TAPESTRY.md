@@ -825,6 +825,30 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   hardware backends slots in behind the same event. A client that only
   recycles on present-CQEs never needs FRAME (the game loop); a client that
   paces (video) arms it.
+- **FRAME is opt-in per surface** (vote 144, 2026-11-17). A surface receives
+  FRAME only while it is ARMED: `frame on` on its `ctl` fid arms it, `frame
+  off` disarms it, any other value is `E_INVAL`, and a new surface starts
+  disarmed. The arm belongs to the surface, not the connection: a client
+  arms each surface that paces, and a surface it re-creates (an SDL resize
+  re-open) starts disarmed again. The arm ADDS a condition and never removes
+  one -- an armed surface still gets a tick only while it is visible (hosted,
+  not backgrounded, resident; or visible chrome), so a backgrounded console
+  leaf stays dormant. The first tick after `frame on` is the first one
+  delivered; `frame off` also drops the one FRAME the surface may have
+  queued, so once its Rwrite returns no tick reaches the surface except one
+  a read had already carried. The console renderer (FRAME is its cursor
+  blink and the heartbeat its drain rides), `SDL_thylacine` (present pacing)
+  and `tapestry-demo` arm; halcyond and its chrome do not. An idle client
+  that never arms is never woken by the clock, so an event wait is bounded
+  only by events: a client that wants its wait bounded arms FRAME or keeps
+  its own timer. The clock itself keeps running for the compositor's own
+  per-tick work (the drag coalesce, the cursor, deferred repaints, storage)
+  whether or not any surface is armed. Heritage: Plan 9's draw has no
+  compositor clock at all -- a client draws when it has something; Wayland's
+  `wl_surface.frame`, X11 Present's notify, CADisplayLink and Choreographer
+  are each requested by the client. The push-to-every-visible-surface it
+  replaces cost an idle halcyond session ~60 FRAMEs a second across its
+  surfaces, every one dropped (AS-4f gate 2: 863 of 867 events in 14.3 s).
 - **FRAME intent** (the declared throttle axis): a surface declares STATIC
   (default) or DYNAMIC via `intent <static|dynamic>` on its `ctl` fid. While a
   DYNAMIC surface is VISIBLE the compositor pins the synthesized clock to the
@@ -833,7 +857,10 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   throttle's present floor with a held key — the ~500 ms `core=dynamic` stutter).
   Visible-gated: a hidden DYNAMIC surface throttles like any other.
   `SDL_thylacine` declares DYNAMIC; console and chrome stay STATIC. See
-  reference/139 "Frame intent".
+  reference/139 "Frame intent". Intent and the arm are separate axes:
+  intent sets the clock's RATE while the surface is visible, the arm sets
+  DELIVERY. A DYNAMIC surface that never arms still pins the rate; an armed
+  STATIC surface still throttles.
 - The Super/Hyper compositor-control layer (§14) is intercepted ABOVE this
   stream: reserved chords never reach a surface's events.
 
