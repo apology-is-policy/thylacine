@@ -4112,6 +4112,7 @@ void test_run_all(void) {
             if (wb_knobs & DEV9P_TEST_KNOB_CLOSE_JOB)     uart_puts("close-job,");
             if (wb_knobs & DEV9P_TEST_KNOB_LEG_WINDOW)    uart_puts("leg-window,");
             if (wb_knobs & DEV9P_TEST_KNOB_REPORT_WINDOW) uart_puts("report-window,");
+            if (wb_knobs & DEV9P_TEST_KNOB_BUDGET)        uart_puts("budget,");
             if (closer_knobs & P9_CLOSER_TEST_KNOB_SPAWN) uart_puts("closer-spawn,");
             if (closer_knobs & P9_CLOSER_TEST_KNOB_NODE)  uart_puts("closer-node,");
             if (closer_knobs & P9_CLOSER_TEST_KNOB_HOLD)  uart_puts("spawn-hold,");

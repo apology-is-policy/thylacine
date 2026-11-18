@@ -398,7 +398,12 @@ u64 dev9p_wb_budget_used(void) {
     return __atomic_load_n(&g_wb_budget_used, __ATOMIC_RELAXED);
 }
 
+// The bias a test put on the budget, so the runner can take back what a failed
+// test left (round 9 F4).
+static s64 g_wb_test_budget_bias;
+
 void dev9p_wb_budget_bias_for_test(s64 n) {
+    __atomic_fetch_add(&g_wb_test_budget_bias, n, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_wb_budget_used, (u64)n, __ATOMIC_RELAXED);
 }
 #endif
@@ -1124,9 +1129,10 @@ u64 dev9p_wb_leg_sleeps(void) {
 static void (*g_wb_leg_window)(void *);
 static void  *g_wb_leg_window_arg;
 
+// Taken by exchange, by the leg or by the runner's release: exactly one of them.
 void dev9p_wb_test_leg_window(void (*fn)(void *), void *arg) {
     g_wb_leg_window_arg = arg;
-    g_wb_leg_window     = fn;
+    __atomic_store_n(&g_wb_leg_window, fn, __ATOMIC_RELEASE);
 }
 
 static void (*g_wb_report_window)(void *);
@@ -1134,7 +1140,7 @@ static void  *g_wb_report_window_arg;
 
 void dev9p_wb_test_report_window(void (*fn)(void *), void *arg) {
     g_wb_report_window_arg = arg;
-    g_wb_report_window     = fn;
+    __atomic_store_n(&g_wb_report_window, fn, __ATOMIC_RELEASE);
 }
 #endif // KERNEL_TESTS
 
@@ -1224,11 +1230,8 @@ static int wb_holder_flush(struct p9_client *cl, struct dev9p_fkey k,
     }
 
 #ifdef KERNEL_TESTS
-    void (*window)(void *) = g_wb_leg_window;
-    if (window) {
-        g_wb_leg_window = NULL;
-        window(g_wb_leg_window_arg);
-    }
+    void (*window)(void *) = __atomic_exchange_n(&g_wb_leg_window, NULL, __ATOMIC_ACQ_REL);
+    if (window) window(g_wb_leg_window_arg);
 #endif
     spin_lock(&h->wb_lock);
     int rc = 0;
@@ -1531,10 +1534,12 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     // names its source's; a plain file the walk landed on, on a session that
     // stages, asks its generation.
     if (nname == 0) {
+        // The identity before its generation: the acquire orders the gen load after
+        // it, so a GEN seen here carries the generation published with it.
+        u8 ident = __atomic_load_n(&src_priv->lock_ident, __ATOMIC_ACQUIRE);
         __atomic_store_n(&new_priv->lock_gen,
                          __atomic_load_n(&src_priv->lock_gen, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
-        __atomic_store_n(&new_priv->lock_ident,
-                         __atomic_load_n(&src_priv->lock_ident, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+        __atomic_store_n(&new_priv->lock_ident, ident, __ATOMIC_RELEASE);
         new_priv->wb_gen  = src_priv->wb_gen;
         new_priv->wb_name = src_priv->wb_name;
     } else if (nc->qid.type == 0 && wb_session_names(new_priv->client)) {
@@ -2718,15 +2723,14 @@ u32 dev9p_wb_test_release_knobs(void) {
     u32 left = 0;
     if (__atomic_exchange_n(&g_wb_fail_close_jobs, 0u, __ATOMIC_RELAXED) != 0)
         left |= DEV9P_TEST_KNOB_CLOSE_JOB;
-    if (g_wb_leg_window) {
-        g_wb_leg_window     = NULL;
-        g_wb_leg_window_arg = NULL;
+    if (__atomic_exchange_n(&g_wb_leg_window, NULL, __ATOMIC_ACQ_REL))
         left |= DEV9P_TEST_KNOB_LEG_WINDOW;
-    }
-    if (g_wb_report_window) {
-        g_wb_report_window     = NULL;
-        g_wb_report_window_arg = NULL;
+    if (__atomic_exchange_n(&g_wb_report_window, NULL, __ATOMIC_ACQ_REL))
         left |= DEV9P_TEST_KNOB_REPORT_WINDOW;
+    s64 bias = __atomic_exchange_n(&g_wb_test_budget_bias, 0, __ATOMIC_RELAXED);
+    if (bias != 0) {
+        __atomic_fetch_sub(&g_wb_budget_used, (u64)bias, __ATOMIC_RELAXED);
+        left |= DEV9P_TEST_KNOB_BUDGET;
     }
     return left;
 }
@@ -3286,11 +3290,9 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
         int lr = wb_holder_flush(p->client, wb_key_of(p, c->qid.path), p, NULL, &refused);
         if (lr < 0) return lr;
 #ifdef KERNEL_TESTS
-        void (*window)(void *) = g_wb_report_window;
-        if (window) {
-            g_wb_report_window = NULL;
-            window(g_wb_report_window_arg);
-        }
+        void (*window)(void *) = __atomic_exchange_n(&g_wb_report_window, NULL,
+                                                     __ATOMIC_ACQ_REL);
+        if (window) window(g_wb_report_window_arg);
 #endif
     }
     // F1 write-behind: flush the staged run FIRST -- fsync is the reliable
@@ -3855,11 +3857,12 @@ static struct Spoor *dev9p_lock_owner(struct Spoor *c, int *err) {
         return NULL;
     }
     np->fid_locks = true;
-    // A clone names its source's file: the identity carries over.
+    // A clone names its source's file: the identity carries over, read before its
+    // generation (the acquire orders the gen load after it).
+    u8 ident = __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE);
     __atomic_store_n(&np->lock_gen, __atomic_load_n(&p->lock_gen, __ATOMIC_RELAXED),
                      __ATOMIC_RELAXED);
-    __atomic_store_n(&np->lock_ident,
-                     __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+    __atomic_store_n(&np->lock_ident, ident, __ATOMIC_RELEASE);
     np->wb_gen  = p->wb_gen;
     np->wb_name = p->wb_name;
     nc->aux = np;
