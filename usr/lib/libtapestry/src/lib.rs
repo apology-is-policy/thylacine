@@ -1439,6 +1439,16 @@ impl EventRing {
     pub fn layout_hint(&self) -> bool {
         self.core.borrow().layout_hint
     }
+
+    /// Whether an event reached a surface after its owner drained it, since
+    /// the last call (clearing the marks). Any surface's poll reaps the whole
+    /// ring, so a later pump can file an event for a surface the pass has
+    /// already serviced, and the ring fd no longer shows it. A multi-surface
+    /// client asks this before it blocks: FRAME is opt-in (TAPESTRY 18.4), so
+    /// no tick comes to re-run the pass for it.
+    pub fn take_stranded(&self) -> bool {
+        ring::take_stranded(&mut self.core.borrow_mut().slots)
+    }
 }
 
 #[cfg(feature = "guest")]

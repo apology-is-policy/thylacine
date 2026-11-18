@@ -836,12 +836,16 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   leaf stays dormant. The first tick after `frame on` is the first one
   delivered; `frame off` also drops the one FRAME the surface may have
   queued, so once its Rwrite returns no tick reaches the surface except one
-  a read had already carried. The console renderer (FRAME is its cursor
-  blink and the heartbeat its drain rides), `SDL_thylacine` (present pacing)
-  and `tapestry-demo` arm; halcyond and its chrome do not. An idle client
-  that never arms is never woken by the clock, so an event wait is bounded
-  only by events: a client that wants its wait bounded arms FRAME or keeps
-  its own timer. The clock itself keeps running for the compositor's own
+  a read had already carried. aurora, the shell image's console renderer
+  (FRAME is its cursor blink and the heartbeat its drain rides),
+  `SDL_thylacine` (present pacing) and `tapestry-demo` arm; halcyond -- the
+  console renderer of the Halcyon image, and the session compositor -- and
+  its chrome do not. An idle client that never arms is never woken by the
+  clock, so an event wait is bounded only by events: a client that wants its
+  wait bounded arms FRAME or keeps its own timer. A client with several
+  surfaces on one ring must also not block on an event its own poll already
+  reaped for another surface (`EventRing::take_stranded`): no tick comes to
+  re-run its pass. The clock itself keeps running for the compositor's own
   per-tick work (the drag coalesce, the cursor, deferred repaints, storage)
   whether or not any surface is armed. Heritage: Plan 9's draw has no
   compositor clock at all -- a client draws when it has something; Wayland's

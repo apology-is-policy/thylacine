@@ -31,6 +31,15 @@ while some surface on the ring is armed and visible. A client that wants a
 bounded wait arms FRAME or keeps its own timer (halcyond folds its own
 deadlines into one poll; the battery arms A and B).
 
+`EventRing::take_stranded` (round 48 F1): any surface's poll reaps the whole
+ring into every slot's queue, so a later pump can file an event for a surface
+whose owner already drained it this pass, and the ring fd no longer shows it.
+A slot marks `drained` when a take finds it empty; routing into a drained
+slot marks it `late`; any take clears the mark. `take_stranded` reports a late
+slot that still holds events and clears every mark, so a slot its owner never
+drains costs at most one extra pass, never a spin. Host tests in ring.rs
+(three mutants of the marks, each killed).
+
 ## Cooperative hidden storage (October 4)
 
 TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and

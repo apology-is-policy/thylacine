@@ -428,15 +428,11 @@ fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
     }
 }
 
-/// Read `surf`'s stream up to the FOCUS `value` event stamped at tick `at`,
-/// counting the FRAMEs before it stamped after `after`. None = it never came.
-fn frames_before_focus(
-    surf: &mut Surface,
-    value: u32,
-    at: u64,
-    after: u64,
-    tag: &str,
-) -> Option<(u32, u64)> {
+/// Read `surf`'s stream up to the next pressed KEY, counting the FRAMEs
+/// before it stamped after `after`. None = the stream ended or the budget ran
+/// out (with the clock frozen the budget barely moves: the harness's own wait
+/// for the leg's OK line is what bounds a key that never comes).
+fn frames_before_key(surf: &mut Surface, after: u64, tag: &str) -> Option<(u32, u64)> {
     let mut budget = LEG_EVENT_BUDGET;
     let (mut n, mut last) = (0u32, 0u64);
     loop {
@@ -446,12 +442,12 @@ fn frames_before_focus(
                     n += 1;
                     last = ev.tick;
                 }
-                if ev.kind == TEV_FOCUS && ev.value == value && ev.tick == at {
+                if ev.kind == TEV_KEY && ev.value != 0 {
                     return Some((n, last));
                 }
                 budget -= 1;
                 if budget == 0 {
-                    say!("tapestry-battery: FAIL {} focus {} never arrived", tag, value);
+                    say!("tapestry-battery: FAIL {} key never arrived", tag);
                     return None;
                 }
             }
@@ -464,28 +460,19 @@ fn frames_before_focus(
 }
 
 /// TAPESTRY 18.4, FRAME opt-in, with the clock frozen (`tick` is the only
-/// tick source, so delivery is exact). A FOCUS event the leg causes AFTER
-/// its ticks bounds each read: the server queues events per surface in
-/// order, so every FRAME those ticks gave A sits ahead of that FOCUS, and
-/// the FOCUS's own tick stamp tells it from a stale one. Disarmed, A must
-/// see none; armed, the SAME observation must see exactly the tick -- the
-/// positive control one variable away. `frame maybe` must be refused.
-fn frame_optin_leg(root: i64, a: &mut Surface, b: &Surface) -> bool {
+/// tick source, so delivery is exact). Each read is bounded by a key the
+/// harness types on the focused A after the leg's ticks: a KEY is never
+/// coalesced, so it queues behind every FRAME those ticks gave A.
+/// Off: A is armed and its read idle (nothing has pumped A's ring since its
+/// last wait), so the armed tick's FRAME waits in A's queue on the server;
+/// `frame off` must drop it, and the two ticks after must give nothing -- A's
+/// stream up to the key holds no FRAME past t0. On: re-armed, the SAME read
+/// must hold exactly the next tick, the positive control one variable away.
+/// `frame maybe` must be refused.
+fn frame_optin_leg(root: i64, a: &mut Surface) -> bool {
     let tick = || ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ");
-    let l = read_file(root, "layout").unwrap_or_default();
-    let (pa, pb) = match (find_pane(&l, a.id), find_pane(&l, b.id)) {
-        (Some(pa), Some(pb)) => (pa, pb),
-        _ => {
-            say!("tapestry-battery: FAIL frame leg: A or B unhosted");
-            return false;
-        }
-    };
     if a.surface_ctl("frame maybe").is_ok() {
         say!("tapestry-battery: FAIL frame accepted a value that is not on|off");
-        return false;
-    }
-    if a.frame(false).is_err() {
-        say!("tapestry-battery: FAIL A frame off");
         return false;
     }
     let t0 = match tick() {
@@ -495,18 +482,23 @@ fn frame_optin_leg(root: i64, a: &mut Surface, b: &Surface) -> bool {
             return false;
         }
     };
+    if !write_file(root, "ctl", "tick") {
+        say!("tapestry-battery: FAIL frame leg tick write");
+        return false;
+    }
+    if a.frame(false).is_err() {
+        say!("tapestry-battery: FAIL A frame off");
+        return false;
+    }
     if !write_file(root, "ctl", "tick") || !write_file(root, "ctl", "tick") {
         say!("tapestry-battery: FAIL frame leg tick write");
         return false;
     }
-    if !write_file(root, "layout", &alloc::format!("focus {}", pb.id)) {
-        say!("tapestry-battery: FAIL frame leg focus B");
-        return false;
-    }
-    match frames_before_focus(a, 0, t0 + 2, t0, "frame off") {
+    say!("battery: frame-off ready");
+    match frames_before_key(a, t0, "frame off") {
         Some((0, _)) => {}
         Some((n, last)) => {
-            say!("tapestry-battery: FAIL disarmed A got {} FRAME(s), last tick {}", n, last);
+            say!("tapestry-battery: FAIL disarmed A got {} FRAME(s), last tick {} (t0 {})", n, last, t0);
             return false;
         }
         None => return false,
@@ -519,18 +511,15 @@ fn frame_optin_leg(root: i64, a: &mut Surface, b: &Surface) -> bool {
         say!("tapestry-battery: FAIL frame leg tick write");
         return false;
     }
-    if !write_file(root, "layout", &alloc::format!("focus {}", pa.id)) {
-        say!("tapestry-battery: FAIL frame leg focus A");
-        return false;
-    }
-    match frames_before_focus(a, 1, t0 + 3, t0 + 2, "frame on") {
-        Some((1, last)) if last == t0 + 3 => true,
+    say!("battery: frame-on ready");
+    match frames_before_key(a, t0 + 3, "frame on") {
+        Some((1, last)) if last == t0 + 4 => true,
         Some((n, last)) => {
             say!(
                 "tapestry-battery: FAIL armed A got {} FRAME(s), last tick {} (want 1 at {})",
                 n,
                 last,
-                t0 + 3
+                t0 + 4
             );
             false
         }
@@ -1793,7 +1782,7 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     say!("battery: test-mode OK");
-    if !frame_optin_leg(root, &mut a, &b) {
+    if !frame_optin_leg(root, &mut a) {
         return 1;
     }
     say!("battery: frame opt-in OK");

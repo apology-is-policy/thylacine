@@ -2947,6 +2947,13 @@ pub fn run(home: Option<String>) -> i64 {
         if ring.layout_hint() {
             continue;
         }
+        // FRAME is opt-in (TAPESTRY 18.4) and halcyond arms none, so no tick
+        // re-runs a pass any more. An event a later pump filed for a surface
+        // this pass already drained (the ring fd no longer shows it), and a
+        // notice a rail action raised after the bar's refresh, get it here.
+        if ring.take_stranded() || (up_announced && status.notice_owed()) {
+            continue;
+        }
 
         // (4) Block: poll { ring | each LIVE tile's up-pipe }. A dead/crashed
         // tile's pipe is skipped (EOF'd); its surface events still arrive via

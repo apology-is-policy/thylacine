@@ -146,6 +146,10 @@ pub struct StatusBar {
     /// is-a-refusal, its deadline on the monotonic clock in ns). The last
     /// message resets the timer; `notice` clears it once expired.
     notice: Option<(String, bool, u64)>,
+    /// Bumped per `notify`; `refreshed_seq` is its value when `refresh`
+    /// last ran. They differ while a notice waits for the pass that shows it.
+    notice_seq: u64,
+    refreshed_seq: u64,
 }
 
 /// How long a transient status message shows (8.2: 1800 ms).
@@ -161,7 +165,15 @@ impl StatusBar {
             failed_said: false,
             want_mint: true,
             notice: None,
+            notice_seq: 0,
+            refreshed_seq: 0,
         }
+    }
+
+    /// A notice was raised after the last `refresh` looked: the pass that
+    /// shows it is owed. FRAME is opt-in (TAPESTRY 18.4), so no tick runs it.
+    pub fn notice_owed(&self) -> bool {
+        self.notice_seq != self.refreshed_seq
     }
 
     /// Show a transient message in the condition slot (8.2): `refusal`
@@ -171,6 +183,7 @@ impl StatusBar {
     pub fn notify(&mut self, text: &str, refusal: bool) {
         let deadline = libthyla_rs::time::monotonic_ns().saturating_add(NOTICE_MS * 1_000_000);
         self.notice = Some((String::from(text), refusal, deadline));
+        self.notice_seq = self.notice_seq.wrapping_add(1);
         #[cfg(feature = "test-mode")]
         say(&format!(
             "halcyond: status notice \"{}\" ({})",
@@ -309,6 +322,7 @@ impl StatusBar {
 
     /// Paint `model` if it differs from what is showing.
     pub fn refresh(&mut self, model: &StatusModel, sheet: &Sheet, gs: &mut GlyphSource) {
+        self.refreshed_seq = self.notice_seq;
         let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
         let same = match self.painted.as_ref() {
             Some(p) if inst => p == model,

@@ -32,14 +32,21 @@ throttle reads neither the arm nor delivery (intent still sets the rate).
 
 Who arms: aurora, `SDL_thylacine` (both of its open paths), `tapestry-demo`
 (not under its `idle` lever) and the battery's A and B, whose waits count
-events. halcyond and its chrome do not. Before this an idle halcyond session
+events. halcyond and its chrome do not (its loops gained a pre-block check
+for stranded events and owed notices -- [[sub-halcyond]]); gallery and
+cursor_demo are purely event-driven; warp-prove, `usr/halcyon`, joey,
+kaua-term and the scenario surface openers (ls-gpu-dead, warp-poison-retire)
+read no surface events. Before this an idle halcyond session
 took ~60 FRAMEs a second across its surfaces and dropped every one (AS-4f
 gate 2). Witnesses: the battery's frame opt-in leg in ls-gfx-panes (frozen
 clock; disarmed, A's stream up to a FOCUS caused after two ticks holds no
 FRAME; re-armed, the same read holds exactly the next tick; `frame maybe` is
-refused); ls-gfx-quake's 40 fps paced floor for SDL's arm (unarmed, SDL paces
-on its 50 ms timeout); the graphical console gates for aurora's (unarmed, it
-would render output only when a key arrived).
+refused; a typed key bounds each read, and the armed tick's FRAME is queued
+when `frame off` lands, so the purge is tested too); ls-gfx-quake's SDL arm,
+judged twice -- the test build's `tapestryd: surface N frame on` line and the
+40 fps paced floor (unarmed, SDL paces on its 50 ms timeout); the graphical
+console gates for aurora's (unarmed, it would render output only when a key
+arrived). Round 48 (Opus 5.5, same-family): 0 P0, 0 P1, 1 P2, 4 P3.
 
 ## Cooperative hidden storage (October 4)
 

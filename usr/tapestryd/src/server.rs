@@ -20211,6 +20211,10 @@ impl Conn {
                 if !armed {
                     surf.events.retain(|e| e.kind != TEV_FRAME);
                 }
+                // Test builds: a gate can see a pacer arm (SDL's would
+                // otherwise show only as a slower present rate).
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: surface {} frame {}", n, if armed { "on" } else { "off" });
             }
             return Ok(());
         }

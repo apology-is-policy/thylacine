@@ -60,8 +60,25 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-11-17
+updated: 2026-11-18
 ---
+## No tick re-runs a pass: the pre-block check (November 18, vote 144, round 48)
+
+FRAME is opt-in (TAPESTRY 18.4) and halcyond arms none, so nothing wakes it
+15-60 times a second any more. Two things that tick had been covering for
+now get a pass of their own, in both loops, just before the unified poll
+blocks. (1) A stranded event: every surface's `poll_event` pumps the one
+shared ring, so a later pump in the pass (the chrome, the bar, the rail, or
+the console poll at the top of the console loop) can file an event for a
+surface the pass already drained, and the ring fd no longer shows it --
+`EventRing::take_stranded` ([[sub-libtapestry]]) reports it. (2) An owed
+notice: a rail action or a menu choice can `notify` after the bar's
+`refresh` ran; `StatusBar::notice_owed` compares a sequence `notify` bumps
+with the value `refresh` last saw. The session loop `continue`s; the console
+loop polls with timeout 0. Both are gated on the bar being announced (before
+that `refresh` never runs, and the check would spin), and both clear on the
+pass they cause, so neither can spin. Found by round 48 (F1 P2, F2 P3).
+
 ## Modal status presentation
 
 `modeview` supplies five labels and opaque Nora-compatible palette roles for

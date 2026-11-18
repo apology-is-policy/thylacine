@@ -924,11 +924,14 @@ reader): the menu -- and every chrome tile -- lives on halcyond's pane-tree
 session while the console's stream lives on its own private session, so a
 loop parked on the console's ring never sees a menu key (and a tile's
 CONFIGURE landed only at the next reconcile's reads). While a menu is up
-halcyond waits on the MENU's ring (the compositor's dismiss EOFs it) and
-polls the console's stream; the chrome tiles keep their reconcile-driven
+halcyond's unified poll wakes for the menu's events like any other (the
+compositor's dismiss EOFs it); the chrome tiles keep their reconcile-driven
 repaint. (Since KT-1.5b the console, the menus and the chrome share ONE
-SQPOLL ring that halcyond's unified poll covers. No FRAME bounds that
-wait: halcyond arms none (TAPESTRY 18.4, vote 144); its own deadlines do.)
+SQPOLL ring that the unified poll covers. No FRAME bounds that wait:
+halcyond arms none (TAPESTRY 18.4, vote 144). Its own deadlines do, and
+before it blocks it runs one more pass when an event its poll reaped is
+waiting for a surface that pass already drained (`take_stranded`), or when
+a notice was raised after the bar's refresh (`notice_owed`).)
 
 **Status bar (H-3d).** A screen-bottom `Role::Chrome` surface halcyond paints
 (Daylight §6): workspaces / focused context / the sage-cinnabar condition slot /

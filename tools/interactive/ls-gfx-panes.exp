@@ -480,13 +480,25 @@ expect {
     timeout { lc_fail "battery never completed test-mode" }
 }
 
-# FRAME opt-in (TAPESTRY 18.4), still under the frozen clock: disarmed, A's
-# stream up to a later FOCUS holds no tick; re-armed, the same read holds
-# exactly the next one; `frame maybe` is refused.
+# FRAME opt-in (TAPESTRY 18.4), still under the frozen clock. Each half ends
+# on a key typed here (a KEY never coalesces, so it queues behind every FRAME
+# the half's ticks gave A): disarmed -- with the armed tick's FRAME queued when
+# `frame off` lands -- A's stream up to the key holds no FRAME; re-armed, the
+# same read holds exactly the next tick; `frame maybe` is refused.
+foreach {half key} {off f on g} {
+    expect {
+        -ex "battery: frame-$half ready" {}
+        -ex "tapestry-battery: FAIL" { lc_fail_detail "the FRAME opt-in leg failed before frame-$half" }
+        timeout { lc_fail "battery never reached frame-$half ready" }
+    }
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $key} err]} {
+        lc_fail "qmp-sendtext (frame-$half) failed: $err"
+    }
+}
 expect {
-    -ex "battery: frame opt-in OK" { lc_pass "panes: FRAME reaches a surface only while armed" }
+    -ex "battery: frame opt-in OK" { lc_pass "panes: FRAME reaches a surface only while armed; frame off drops the queued tick" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the FRAME opt-in leg failed" }
-    timeout { lc_fail "battery never completed the FRAME opt-in leg" }
+    timeout { lc_fail "battery never completed the FRAME opt-in leg (a sentinel key that never reached A hangs it here)" }
 }
 
 # The cfg-3 apply-authority gate leg: the battery (NOT the console

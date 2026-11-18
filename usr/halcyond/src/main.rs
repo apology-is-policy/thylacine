@@ -1438,6 +1438,16 @@ pub extern "C" fn rs_main() -> i64 {
                     let clock = statusset::clock_timeout_ms();
                     let timeout = libhalcyon::motion::fold_timeout(clock, status.notice_timeout_ms());
                     let timeout = if places.as_ref().is_some_and(|p| p.runnable()) { 0 } else { timeout };
+                    // FRAME is opt-in (TAPESTRY 18.4) and halcyond arms none,
+                    // so no tick re-runs the pass: an event this poll's pump
+                    // filed for a menu, chrome tile, bar or rail the last pass
+                    // already drained (the ring fd no longer shows it), or a
+                    // notice raised after the bar's refresh, gets one now.
+                    let timeout = if ring.take_stranded() || (announced && status.notice_owed()) {
+                        0
+                    } else {
+                        timeout
+                    };
                     if unsafe { t_poll(waitfds.as_mut_ptr(), nfds, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;

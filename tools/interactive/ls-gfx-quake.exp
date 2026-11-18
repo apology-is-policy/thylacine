@@ -58,6 +58,10 @@ proc gfx_dump_or_fail {out} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
+# The session transcript from here (the ls-gfx-age idiom), for lc_logged.
+set transcript /tmp/ls-gfx-quake-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
 lc_send "tyr-quake -window +timedemo demo1"
 # N-2a-3: sound is ON. "Sound Initialized" prints in Host_Init BEFORE the
 # "Quake Initialized" banner, so it is expected FIRST (a later expect would
@@ -83,15 +87,23 @@ expect {
         # ~clock_hz (57-60); a surface that never armed paces on the timeout
         # instead -- <= 20 fps -- and would still finish inside 120 s, so only
         # this floor can see it.
-        if {$fps < 40.0} {
-            lc_fail "timedemo paced at $fps fps, under the 40 fps floor: SDL's FRAME pacing is on its 50 ms timeout (is the surface armed?)"
-        }
-        lc_pass "timedemo: $nframes frames @ $fps fps (SDL software Quake, present-to-scanout)"
+        set paced [expr {$fps >= 40.0}]
+        lc_step "timedemo: $nframes frames @ $fps fps (SDL software Quake, present-to-scanout)"
     }
     "user fault" { lc_fail "tyr-quake segv during the timedemo" }
     "Sys_Error"  { lc_fail "tyr-quake Sys_Error during the timedemo" }
     timeout      { lc_fail "no timedemo fps line within 120s" }
 }
+# The SDL arm (TAPESTRY 18.4), both halves judged before either fails, so a
+# run that breaks the arm shows what each half saw. Deterministic: a test
+# build's tapestryd says each `frame` verb, and SDL's window open must have
+# said `frame on` (on either side of the lines matched above, hence the
+# transcript). Behavioural: the paced floor above.
+set armed [expr {[llength [lc_logged $transcript {tapestryd: surface [0-9]+ frame on} 5 "SDL's frame arm"]] > 0}]
+if {!$armed || !$paced} {
+    lc_fail "SDL's FRAME arm: said 'frame on' = $armed, paced >= 40 fps = $paced ($fps fps)"
+}
+lc_pass "timedemo paced at $fps fps on an armed surface"
 
 # The render leg: Quake's world is on the scanout. Two dumps a beat apart
 # -- the color-richness floor is the HARD gate (a flat/black surface would
