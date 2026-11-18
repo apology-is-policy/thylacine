@@ -289,6 +289,7 @@ static int g_fix_walkattrs_calls;
 // A zero-name walk (the clone every crossing and anchor mints) fails while
 // set: a dead session's Twalk. Set from a readlink hook, cleared by the test.
 static bool g_fix_walk0_fail;
+static u64  g_fix_walk0_fail_qid;   // the same for the clone of this source only
 
 static u32  g_fix_intr_walks;
 static bool g_fix_walk_intr;
@@ -306,11 +307,12 @@ static int         g_fix_walk_err_skip;
 static u64         g_fix_stat_err_qid;
 static u64         g_fix_walk_err2_parent;
 static int         g_fix_walk_err2_rc;
-// A refusal above (the walk's first arm, the stat's, the readdir's) also leaves the
-// call's mark, as a caught note's unwind does (ARCH 8.8.3), and a stat or readdir
-// refusal answers EINTR.
+// A refusal above (the walk's first arm, a clone's, the stat's, the readdir's) also
+// leaves the call's mark, as a caught note's unwind does (ARCH 8.8.3), and a stat or
+// readdir refusal answers EINTR.
 static bool        g_fix_err_marks;
 static u64         g_fix_readdir_err_qid;   // a readdir of this directory is refused
+static int         g_fix_readdir_calls;     // readdirs of an opened directory
 
 static bool fix_walk_refused(u64 parent, const char *name) {
     if (!g_fix_walk_err_name || !fix_streq(name, g_fix_walk_err_name)) return false;
@@ -330,7 +332,11 @@ static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
     g_fix_intr_walks++;
     g_fix_walk_intr = g_fix_walk_intr || current_thread()->note_interruptible;
     if (!c || nname < 0) return NULL;
-    if (nname == 0 && g_fix_walk0_fail) return NULL;
+    if (nname == 0 && (g_fix_walk0_fail ||
+                       (g_fix_walk0_fail_qid && c->qid.path == g_fix_walk0_fail_qid))) {
+        if (g_fix_err_marks) current_thread()->note_call_unwound = true;
+        return NULL;
+    }
     // R2-F1 regression: a 9P server rejects a Twalk (any nwname) from an OPENED
     // fid (Stratum h_walk: is_open -> EINVAL). The fixture must refuse what
     // production refuses, else the union readdir dedup -- which walks earlier
@@ -600,6 +606,7 @@ static long fix_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     // tests fail on the old cross-without-open path and pass ONLY on the
     // opened-member snapshot (union_snap).
     if (!(c->flag & COPEN)) return -1;
+    g_fix_readdir_calls++;
     if (g_fix_readdir_err_qid && c->qid.path == g_fix_readdir_err_qid) {
         if (!g_fix_err_marks) return -T_E_IO;
         current_thread()->note_call_unwound = true;
@@ -5023,6 +5030,17 @@ void test_stalk_open_create_exists_before_access(void) {
     s64 x_new  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/new", 7, excl, 0644);
     s64 m_nox  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/nox/sekret", 11, 0, mk);
     s64 p_lnk  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/lnk", 7, 1, 0644);
+    // A caught note in the probe's walk ends the create; the server's own EINTR is
+    // that walk's refusal, and the name reads as absent.
+    g_fix_walk_err_name = "kid";
+    g_fix_walk_err_rc   = -T_E_INTR;
+    g_fix_err_marks     = true;
+    s64 n_kid  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, 0, mk);
+    current_thread()->note_call_unwound = false;
+    g_fix_err_marks     = false;
+    s64 r_kid  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, 0, mk);
+    g_fix_walk_err_name = NULL;
+    g_fix_walk_err_rc   = 0;
     u64 live_after = spoor_total_allocated() - spoor_total_freed();
     int calls = g_fix_create_calls;
     ocp_teardown(p);
@@ -5038,6 +5056,10 @@ void test_stalk_open_create_exists_before_access(void) {
                    "no search right, no disclosure: a held name in a no-X dir is EACCES");
     TEST_EXPECT_EQ(p_lnk,  -(s64)T_E_NOENT,
                    "a plain O_CREAT through a dangling link is NOENT, never EEXIST");
+    TEST_EXPECT_EQ(n_kid,  -(s64)T_E_INTR,
+                   "a caught note in the existence probe ends the create: EINTR");
+    TEST_EXPECT_EQ(r_kid,  -(s64)T_E_ACCES,
+                   "CONTROL: the server's own EINTR in the probe reads as absent: EACCES");
     TEST_EXPECT_EQ(calls, 0, "no leg reached the Dev's create");
     TEST_EXPECT_EQ(live_after, live_before, "the existence probe leaks no Spoor");
 }
@@ -5784,7 +5806,7 @@ void test_stalk_union_note_ends_the_search(void) {
     struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
     TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
     TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt");
-    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE umpt");
     struct Thread *t = current_thread();
     TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
     struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);   // for the readdir arms
@@ -5792,7 +5814,7 @@ void test_stalk_union_note_ends_the_search(void) {
     for (u32 i = 0; i < 2; i++) {
         bool noted = i == 0;
         g_fix_err_marks = noted;
-        walk_reason_set("shared", 22, T_E_INTR, 0);     // um1's "shared" is refused
+        walk_reason_set("shared", 22, -T_E_INTR, 0);    // um1's "shared" is refused: EINTR
 
         g_fix_walk_calls = 0;
         int eh = 0;
@@ -5811,15 +5833,25 @@ void test_stalk_union_note_ends_the_search(void) {
         int hc = stalk_union_has_child(&p, um1, "shared", 6);
         t->note_call_unwound = false;
 
+        t->note_call_unwound = noted;                  // a call a note has ended already
+        g_fix_walk_calls = 0;
+        int hp = stalk_union_has_child(&p, um1, "only1", 5);
+        int hpw = g_fix_walk_calls;
+        t->note_call_unwound = false;
+
         u8  buf[512];
         u64 q2 = 0;
+        g_fix_readdir_calls = 0;
         s64 gd = q ? union_readdir_run(&p, q, buf, (long)sizeof(buf), 0) : -1;
+        int rdd = g_fix_readdir_calls;
         t->note_call_unwound = false;
         long nd = un_count_entries(buf, gd, &q2);
 
         walk_reason_clear();
         g_fix_readdir_err_qid = 22;                    // um1's own listing is refused
+        g_fix_readdir_calls = 0;
         s64 gr = q ? union_readdir_run(&p, q, buf, (long)sizeof(buf), 0) : -1;
+        int rdr = g_fix_readdir_calls;
         t->note_call_unwound = false;
         g_fix_readdir_err_qid = 0;
         long nr = un_count_entries(buf, gr, NULL);
@@ -5829,9 +5861,24 @@ void test_stalk_union_note_ends_the_search(void) {
         struct Spoor *o = stalk_err(&p, root, "umpt", 4, STALK_OPEN, 0, &eo);
         t->note_call_unwound = false;
         g_fix_stat_err_qid = 0;
-        g_fix_err_marks = false;
         int on = (o && o->union_snap) ? o->union_snap->n : -1;
         if (o) spoor_clunk(o);
+
+        g_fix_walk0_fail_qid = 25;                     // um2, the last member, cannot be crossed
+        int ex = 0;
+        struct Spoor *x = stalk_union_create_member(&p, pt, &ex);
+        t->note_call_unwound = false;
+        if (x) spoor_clunk(x);
+        int e2 = 0;
+        struct Spoor *h2 = stalk_union_member_holding(&p, pt, "only2", &e2);
+        t->note_call_unwound = false;
+        if (h2) spoor_clunk(h2);
+        int c2e = 0;
+        struct Spoor *c2 = stalk_err(&p, root, "umpt/only2", 10, STALK_WALK, 0, &c2e);
+        t->note_call_unwound = false;
+        if (c2) spoor_clunk(c2);
+        g_fix_walk0_fail_qid = 0;
+        g_fix_err_marks = false;
 
         TEST_ASSERT(q != NULL, "the union opens");
         if (noted) {
@@ -5841,25 +5888,43 @@ void test_stalk_union_note_ends_the_search(void) {
             TEST_ASSERT(c == NULL, "the path walk ends too");
             TEST_EXPECT_EQ(ec, T_E_INTR, "with EINTR");
             TEST_EXPECT_EQ(hc, -T_E_INTR, "the dedup probe answers EINTR");
+            TEST_EXPECT_EQ(hp, -T_E_INTR, "a probe in a call a note has ended answers EINTR");
+            TEST_EXPECT_EQ(hpw, 0, "and walks nothing");
             TEST_EXPECT_EQ(nd, 2l, "the listing stops at the probe: um1's two entries");
+            TEST_EXPECT_EQ(rdd, 3, "and reads no member after it: um1 to its end, um2 once");
             TEST_EXPECT_EQ(gr, -(s64)T_E_INTR, "a refused member listing ends the readdir: EINTR");
+            TEST_EXPECT_EQ(rdr, 1, "um2 is never read");
             TEST_ASSERT(o == NULL, "a refused member's search check fails the union open");
             TEST_EXPECT_EQ(eo, T_E_INTR, "with EINTR");
+            TEST_ASSERT(x == NULL, "the create target's cross failed");
+            TEST_EXPECT_EQ(ex, T_E_INTR, "a caught note in the create target's cross answers EINTR");
+            TEST_ASSERT(h2 == NULL && c2 == NULL, "um2 holds only2 but could not be crossed");
+            TEST_EXPECT_EQ(e2, T_E_INTR, "the last member's cross ends the holder search: EINTR");
+            TEST_EXPECT_EQ(c2e, T_E_INTR, "and the path walk: EINTR");
         } else {
             TEST_EXPECT_EQ(hq, (u64)25, "CONTROL: um1 refused on its own: um2 holds shared");
             TEST_EXPECT_EQ(hw, 2, "CONTROL: both members walked");
             TEST_EXPECT_EQ(cq, (u64)26, "CONTROL: the path walk finds um2's shared");
             TEST_EXPECT_EQ(hc, 0, "CONTROL: the probe reads as absent");
+            TEST_EXPECT_EQ(hp, 1, "CONTROL: a probe in a call no note ended walks: um1 holds only1");
+            TEST_EXPECT_EQ(hpw, 1, "CONTROL: one walk");
             TEST_EXPECT_EQ(nd, 4l, "CONTROL: the listing goes on, um2's shared listed too");
             TEST_EXPECT_EQ(q2, (u64)26, "CONTROL: the third entry is um2's shared");
+            TEST_EXPECT_EQ(rdd, 4, "CONTROL: both members read to their end");
             TEST_EXPECT_EQ(nr, 1l, "CONTROL: um1's listing skipped: um2's only2 alone");
+            TEST_EXPECT_EQ(rdr, 3, "CONTROL: um1 refused once, um2 read to its end");
             TEST_EXPECT_EQ(on, 1, "CONTROL: the open skips um2: one member");
+            TEST_ASSERT(x == NULL, "CONTROL: the create target's cross failed");
+            TEST_EXPECT_EQ(ex, T_E_IO, "CONTROL: the cross's own failure answers EIO");
+            TEST_ASSERT(h2 == NULL && c2 == NULL, "CONTROL: um2 could not be crossed");
+            TEST_EXPECT_EQ(e2, T_E_IO, "CONTROL: the holder search answers EIO, not absent");
+            TEST_EXPECT_EQ(c2e, T_E_IO, "CONTROL: the path walk the same");
         }
     }
 
     // A death pending: the holder search walks no member. Control, one variable away
     // (the same refusal, no death): um2 holds shared.
-    walk_reason_set("shared", 22, T_E_IO, 0);
+    walk_reason_set("shared", 22, -T_E_IO, 0);
     int ek = 0;
     g_fix_walk_calls = 0;
     struct Spoor *hk = stalk_union_member_holding(&p, pt, "shared", &ek);
