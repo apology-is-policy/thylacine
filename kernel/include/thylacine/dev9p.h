@@ -97,6 +97,14 @@ enum dev9p_lock_ident_state {
     DEV9P_IDENT_NONE    = 2,   // the server reports none: identity by qid.path
 };
 
+// What dev9p_priv.wb_name holds (LARDER-DESIGN 12.6, votes M31, M33).
+enum dev9p_wb_name {
+    DEV9P_WB_UNASKED = 0,   // a session that does not stage, or not a plain file
+    DEV9P_WB_GEN     = 1,   // wb_gen is the file's generation
+    DEV9P_WB_NONE    = 2,   // the server reports none: the number names the file
+    DEV9P_WB_FAILED  = 3,   // the Tgetattr that would have named it failed
+};
+
 // LARDER-DESIGN 12.6 (vote M31): a file by its number and, where the server
 // reports one, its generation. A name with no generation matches every
 // generation of its number.
@@ -160,6 +168,12 @@ struct dev9p_priv {
     // dev9p_lock_ident_state, published with release after lock_gen.
     u64                lock_gen;
     u8                 lock_ident;
+    // The name write-behind knows the fid's file by (votes M31, M33): set where
+    // the fid is made, before the priv is published, and never changed after --
+    // a generation the file locks learn later stays theirs, so an open's sample
+    // and its report read the same records. wb_name is a dev9p_wb_name.
+    u64                wb_gen;
+    u8                 wb_name;
     // #99 (#102 errno-loss): the last dev9p_create failure's real errno, in the
     // syscall passthrough range (e.g. -T_E_EXIST on a racing/duplicate create).
     // Transient create-path state: born 0 (kzalloc), set by dev9p_create on a

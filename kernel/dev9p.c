@@ -507,13 +507,45 @@ static bool wb_same(struct dev9p_fkey k, u64 path, bool has_gen, u64 gen) {
     return k.path == path && (!k.has_gen || !has_gen || k.gen == gen);
 }
 
-// An open's name for its file: the generation its walk, create or mint learned.
+// An open's name for its file: the one fixed where its fid was made.
 static struct dev9p_fkey wb_key_of(const struct dev9p_priv *p, u64 path) {
-    bool g = __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE) == DEV9P_IDENT_GEN;
-    return (struct dev9p_fkey){
-        .path = path, .has_gen = g,
-        .gen = g ? __atomic_load_n(&p->lock_gen, __ATOMIC_RELAXED) : 0,
-    };
+    bool g = p->wb_name == DEV9P_WB_GEN;
+    return (struct dev9p_fkey){ .path = path, .has_gen = g, .gen = g ? p->wb_gen : 0 };
+}
+
+// A name a holder can register under: a generation, or a server that has none.
+static bool wb_named(const struct dev9p_priv *p) {
+    return p->wb_name == DEV9P_WB_GEN || p->wb_name == DEV9P_WB_NONE;
+}
+
+// A session that stages (loose and cacheable) names every plain file it opens
+// (vote M33); a strict one keeps nothing to name against.
+static bool wb_session_names(const struct p9_client *cl) {
+    return cl->loose && __atomic_load_n(&cl->cacheable, __ATOMIC_RELAXED);
+}
+
+// What a Tgetattr asking GEN answered, for write-behind and the file locks alike.
+// Before the priv is published.
+static void wb_name_from_attr(struct dev9p_priv *p, const struct p9_attr *a) {
+    if (a->valid & P9_GETATTR_GEN) {
+        p->wb_gen  = a->gen;
+        p->wb_name = DEV9P_WB_GEN;
+        __atomic_store_n(&p->lock_gen, a->gen, __ATOMIC_RELAXED);
+        __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_GEN, __ATOMIC_RELEASE);
+    } else {
+        p->wb_name = DEV9P_WB_NONE;
+        __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_NONE, __ATOMIC_RELEASE);
+    }
+}
+
+// Ask the generation of the file p's new fid names, once (votes M31, M33). A fid
+// that cannot learn it has no name; the file locks may still ask later.
+static void wb_name_learn(struct dev9p_priv *p) {
+    struct p9_attr a;
+    if (p9_client_getattr(p->client, p->fid, P9_GETATTR_GEN, &a) == 0)
+        wb_name_from_attr(p, &a);
+    else
+        p->wb_name = DEV9P_WB_FAILED;
 }
 
 // The name a holder registered under, fixed before its entry was linked.
@@ -670,6 +702,14 @@ static u64 wb_loss_sample(struct p9_client *cl, struct dev9p_fkey k) {
     if (r) s = r->seen ? r->seq : r->seq - 1u;
     spin_unlock(&t->lock);
     return s;
+}
+
+// The sample an open takes where it is made: by its name, or, with none, the
+// current sequence, so it is told only what is lost after it (vote M33).
+static u64 wb_open_sample(struct dev9p_priv *p, u64 path) {
+    if (p->wb_name == DEV9P_WB_FAILED)
+        return __atomic_load_n(&p->client->wb_loss.seq, __ATOMIC_ACQUIRE);
+    return wb_loss_sample(p->client, wb_key_of(p, path));
 }
 
 // fsync's report: the file's record, once, when this open's sample is behind it.
@@ -1487,10 +1527,22 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     nc->qid.path = (w->nqid > 0) ? w->qid[w->nqid - 1].path : c->qid.path;
     nc->qid.vers = (w->nqid > 0) ? w->qid[w->nqid - 1].vers : c->qid.vers;
     nc->qid.type = (w->nqid > 0) ? w->qid[w->nqid - 1].type : c->qid.type;
+    // The fid's file, named before it is published (votes M31, M33): a clone
+    // names its source's; a plain file the walk landed on, on a session that
+    // stages, asks its generation.
+    if (nname == 0) {
+        __atomic_store_n(&new_priv->lock_gen,
+                         __atomic_load_n(&src_priv->lock_gen, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+        __atomic_store_n(&new_priv->lock_ident,
+                         __atomic_load_n(&src_priv->lock_ident, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+        new_priv->wb_gen  = src_priv->wb_gen;
+        new_priv->wb_name = src_priv->wb_name;
+    } else if (nc->qid.type == 0 && wb_session_names(new_priv->client)) {
+        wb_name_learn(new_priv);
+    }
     // A navigation handle's sample (votes M22a, M27); an open takes its own.
     if (nc->qid.type == 0)
-        new_priv->wb_errseq = wb_loss_sample(new_priv->client,
-                                             wb_key_of(new_priv, nc->qid.path));
+        new_priv->wb_errseq = wb_open_sample(new_priv, nc->qid.path);
     w->spoor = nc;
     return w;
 }
@@ -1984,18 +2036,22 @@ static struct Walkqid *walk_attrs_pass(struct Spoor *c, struct Spoor *nc,
         // G2: the fid's birth gen is the pre-RPC snapshot -- an invalidation
         // event naming this qid DURING the walk already makes it unparkable.
         new_priv->fid_gen = wga_seq0;
-        // The fid's file is the walk's leaf: its generation names it (vote M31;
-        // the file locks read the same). Unknown stays unknown, asked later.
+        // The fid's file is the walk's leaf: its generation names it (votes M31,
+        // M33; the file locks read the same). A reply without one is a server
+        // that reports none: write-behind names the file by its number, and the
+        // file locks ask later.
         if (leaf.has_gen) {
             new_priv->lock_gen   = leaf.gen;
             new_priv->lock_ident = (u8)DEV9P_IDENT_GEN;
         }
+        new_priv->wb_gen  = leaf.has_gen ? leaf.gen : 0;
+        new_priv->wb_name = leaf.has_gen ? (u8)DEV9P_WB_GEN : (u8)DEV9P_WB_NONE;
         nc->aux = new_priv;
         nc->qid = w->qid[w->nqid - 1];
         // An open samples the file's lost runs at its open; a navigation handle,
         // which fsync accepts (vote M22a), keeps its walk's (votes M27, M31).
         if (nc->qid.type == 0)
-            new_priv->wb_errseq = wb_loss_sample(new_priv->client, leaf);
+            new_priv->wb_errseq = wb_open_sample(new_priv, nc->qid.path);
         w->spoor = nc;
     } else {
         // Partial walk (bind form: new_fid was never bound; nc still
@@ -2267,7 +2323,10 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     }
     np->lock_gen     = cogen;
     np->lock_ident   = coident;
-    np->wb_errseq    = wb_loss_sample(client, wb_key_of(np, leaf->qid_path));   // M27, M31
+    np->wb_gen       = coident == DEV9P_IDENT_GEN ? cogen : 0;
+    np->wb_name      = coident == DEV9P_IDENT_GEN  ? (u8)DEV9P_WB_GEN
+                     : coident == DEV9P_IDENT_NONE ? (u8)DEV9P_WB_NONE : (u8)DEV9P_WB_UNASKED;
+    np->wb_errseq    = wb_open_sample(np, leaf->qid_path);   // M27, M31, M33
     co->aux      = np;
     co->qid.path = leaf->qid_path;
     co->qid.vers = leaf->qid_vers;
@@ -2361,16 +2420,16 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
         // invalidate; append only extends, so the extension range was never
         // cached and the range-invalidate is conservative). One holder per
         // client and file (12.6): with another open holding it, or a change's
-        // pin on it, write through.
+        // pin on it, or no name for its file (vote M33), write through.
         if (p->client->loose &&
             __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-            c->qid.type == 0 &&
+            c->qid.type == 0 && wb_named(p) &&
             !(omode & SYS_WALK_OPEN_OAPPEND))
             (void)wb_register(p, c, &pin);
     }
     wb_unpin(&pin);                  // a no-op once the registration took it
     // The lost runs of the file this open has not been told of (votes M27, M30a).
-    p->wb_errseq = wb_loss_sample(p->client, wb_key_of(p, c->qid.path));
+    p->wb_errseq = wb_open_sample(p, c->qid.path);
     c->flag |= COPEN;
     c->mode  = omode;
     c->offset = 0;
@@ -2484,6 +2543,8 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // The fid now names the new file, not the directory the walk named: its
     // generation is learned below or asked later (vote M31, the file locks).
     __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_UNKNOWN, __ATOMIC_RELEASE);
+    p->wb_gen   = 0;
+    p->wb_name  = DEV9P_WB_UNASKED;
     c->offset   = 0;
     // L1c invalidate (fs_cache.tla OwnWrite): a create changes TWO qid.paths.
     //  - the PARENT dir (nlink/mtime/cvers) -- G3 DOWNGRADE, not drop: a child
@@ -2540,25 +2601,16 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // plain file's create on a loose cacheable session asks for it, once. One
     // that cannot learn it writes through.
     bool named = false;
-    if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && p->client->loose &&
-        __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
+    if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && wb_session_names(p->client) &&
         c->qid.type == 0) {
-        struct p9_attr ga;
-        if (p9_client_getattr(p->client, p->fid, P9_GETATTR_GEN, &ga) == 0) {
-            if (ga.valid & P9_GETATTR_GEN) {
-                __atomic_store_n(&p->lock_gen, ga.gen, __ATOMIC_RELAXED);
-                __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_GEN, __ATOMIC_RELEASE);
-            } else {
-                __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_NONE, __ATOMIC_RELEASE);
-            }
-            named = true;
-        }
+        wb_name_learn(p);
+        named = wb_named(p);
     }
     // One holder per client and file (LARDER-DESIGN 12.6): a new file has none,
     // unless a change through an open that reached it by name has pinned it.
     if (named && !(omode & SYS_WALK_OPEN_OAPPEND))
         (void)wb_register(p, c, NULL);
-    p->wb_errseq = wb_loss_sample(p->client, wb_key_of(p, c->qid.path));   // M27, M31
+    p->wb_errseq = wb_open_sample(p, c->qid.path);   // M27, M31, M33
     return c;
 }
 
@@ -3789,6 +3841,8 @@ static struct Spoor *dev9p_lock_owner(struct Spoor *c, int *err) {
                      __ATOMIC_RELAXED);
     __atomic_store_n(&np->lock_ident,
                      __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+    np->wb_gen  = p->wb_gen;
+    np->wb_name = p->wb_name;
     nc->aux = np;
     return nc;
 }
