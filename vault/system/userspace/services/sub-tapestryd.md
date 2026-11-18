@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs, usr/tapestryd/Cargo.toml]
+code: [usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/frame_clock.rs, usr/tapestryd/src/warp_ids.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -14,6 +14,26 @@ design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
 updated: 2026-11-18
 ---
+## The FRAME clock ticks at its rate (November 18)
+
+The serve loop's FRAME tick is counted from an anchor, rate-exact
+(`frame_clock.rs`, in the host-tested lib): `ticks_due(elapsed_ns, hz)` is
+floor(elapsed x hz / 1 s), and the poll timeout `ms_until_next` is the time to
+the first nanosecond at which one more tick is due, rounded UP to whole
+milliseconds (at least 1), so a wake is never early and never a tick late. The
+loop still fires at most one `frame_tick` per pass (a stalled loop coalesces
+its backlog) and re-anchors on a rate change or an unfreeze. Before, the period
+was `1000 / hz` in integer milliseconds: 16 ms at 60 Hz ran 62.5 Hz, 66 ms at
+the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- every mac quake timedemo
+read 62.5 fps. TAPESTRY 18.4 says 60 Hz, now true. Witnesses: three host tests
+(the count over 10 s at 1, 7, 15, 60, 144 and 240 Hz with and without pass
+overhead; no early wake at any phase, including a whole number of milliseconds
+before a fractional boundary and a nanosecond either side; the boundaries
+themselves), four mutants killed (the integer-ms period, a timeout rounded
+down, the next tick read as the current one, the boundary floored); and
+ls-gfx-quake's ceiling, a timedemo at most 61 fps (one present per tick
+cannot beat the clock).
+
 ## FRAME is opt-in per surface (November 18, vote 144)
 
 TAPESTRY 18.4 (vote 144): `Comp::frame_tick` pushes a FRAME only to a surface
@@ -39,7 +59,7 @@ kaua-term and the scenario surface openers (ls-gpu-dead, warp-poison-retire)
 read no surface events. Before this an idle halcyond session
 took ~60 FRAMEs a second across its surfaces and dropped every one (AS-4f
 gate 2). Witnesses: the battery's frame opt-in leg in ls-gfx-panes (frozen
-clock; disarmed, A's stream up to a FOCUS caused after two ticks holds no
+clock; disarmed, A's stream up to a typed key after two ticks holds no
 FRAME; re-armed, the same read holds exactly the next tick; `frame maybe` is
 refused; a typed key bounds each read, and the armed tick's FRAME is queued
 when `frame off` lands, so the purge is tested too); ls-gfx-quake's SDL arm,

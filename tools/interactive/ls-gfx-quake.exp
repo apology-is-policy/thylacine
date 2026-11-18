@@ -86,8 +86,11 @@ expect {
         # pacing waits on it with a 50 ms bound. Armed, the timedemo reads
         # ~clock_hz (57-60); a surface that never armed paces on the timeout
         # instead -- <= 20 fps -- and would still finish inside 120 s, so only
-        # this floor can see it.
+        # this floor can see it. The ceiling is the clock's own rate: one
+        # present per tick cannot beat 60 Hz, so a timedemo past 61 fps means
+        # the clock runs fast (an integer-millisecond tick read 62.5).
         set paced [expr {$fps >= 40.0}]
+        set exact [expr {$fps <= 61.0}]
         lc_step "timedemo: $nframes frames @ $fps fps (SDL software Quake, present-to-scanout)"
     }
     "user fault" { lc_fail "tyr-quake segv during the timedemo" }
@@ -100,8 +103,8 @@ expect {
 # said `frame on` (on either side of the lines matched above, hence the
 # transcript). Behavioural: the paced floor above.
 set armed [expr {[llength [lc_logged $transcript {tapestryd: surface [0-9]+ frame on} 5 "SDL's frame arm"]] > 0}]
-if {!$armed || !$paced} {
-    lc_fail "SDL's FRAME arm: said 'frame on' = $armed, paced >= 40 fps = $paced ($fps fps)"
+if {!$armed || !$paced || !$exact} {
+    lc_fail "SDL's FRAME arm: said 'frame on' = $armed, paced >= 40 fps = $paced, clock <= 61 fps = $exact ($fps fps)"
 }
 lc_pass "timedemo paced at $fps fps on an armed surface"
 

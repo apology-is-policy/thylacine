@@ -72,6 +72,7 @@ use crate::input::{
 };
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
 const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES <= 64);
+use tapestryd::frame_clock;
 use tapestryd::keymap::{self, Mods};
 
 // =============================================================================
@@ -749,10 +750,9 @@ impl Driver for Tapestryd {
                 ticks_done = 0;
             }
             was_frozen = frozen;
-            let period_ms = (1000 / cur_hz.max(1)) as u64;
-            let elapsed_ms = anchor.elapsed().as_millis() as u64;
+            let elapsed_ns = anchor.elapsed().as_nanos() as u64;
             if !frozen {
-                let due = elapsed_ms / period_ms.max(1);
+                let due = frame_clock::ticks_due(elapsed_ns, cur_hz);
                 if due > ticks_done {
                     ticks_done = due;
                     self.comp.frame_tick();
@@ -872,11 +872,10 @@ impl Driver for Tapestryd {
             }
             let interaction_base = pollfds.len();
             self.comp.interaction_poll(&mut pollfds);
-            let remain = period_ms.saturating_sub(elapsed_ms % period_ms.max(1));
             let timeout = if frozen {
                 30 // no tick scheduled; a short pace keeps input drained
             } else {
-                remain.clamp(1, period_ms.max(1)) as i32
+                frame_clock::ms_until_next(elapsed_ns, cur_hz)
             };
             // W2d: the GPU IRQ is not pollable (the G-5 engine owns it;
             // irq.wait only inside a sync submit), so while fenced chains
