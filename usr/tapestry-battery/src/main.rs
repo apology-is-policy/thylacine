@@ -72,7 +72,8 @@ use libthyla_rs::{
     t_close, t_open, t_read, t_setsid, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
-    Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
+    Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_FRAME, TEV_KEY,
+    TEV_PTR_REL,
 };
 
 macro_rules! say {
@@ -91,6 +92,7 @@ const MAGENTA: u32 = 0xFFFF_00FF;
 
 /// Give up a focus-leg wait after this many non-matching events (~20 s of
 /// FRAME ticks): the host harness failed; exit loudly instead of hanging.
+/// FRAME is opt-in (TAPESTRY 18.4), so A and B arm it for exactly this.
 const LEG_EVENT_BUDGET: u32 = 1200;
 
 /// The static-screen window a pixel stage holds for the host dump.
@@ -401,7 +403,7 @@ fn wait_key(surf: &mut Surface, tag: &str) -> bool {
 
 /// Wait for a TEV_PTR_REL on `surf`; returns the decoded signed deltas.
 /// Non-REL events (FRAME ticks, MOVE noise from the motion itself) count
-/// down the budget -- the 60 Hz FRAME stream bounds the wait.
+/// down the budget -- the 60 Hz FRAME stream A arms bounds the wait.
 fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
     let mut budget = LEG_EVENT_BUDGET;
     loop {
@@ -423,6 +425,116 @@ fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
                 return None;
             }
         }
+    }
+}
+
+/// Read `surf`'s stream up to the FOCUS `value` event stamped at tick `at`,
+/// counting the FRAMEs before it stamped after `after`. None = it never came.
+fn frames_before_focus(
+    surf: &mut Surface,
+    value: u32,
+    at: u64,
+    after: u64,
+    tag: &str,
+) -> Option<(u32, u64)> {
+    let mut budget = LEG_EVENT_BUDGET;
+    let (mut n, mut last) = (0u32, 0u64);
+    loop {
+        match surf.wait_event() {
+            Ok(ev) => {
+                if ev.kind == TEV_FRAME && ev.tick > after {
+                    n += 1;
+                    last = ev.tick;
+                }
+                if ev.kind == TEV_FOCUS && ev.value == value && ev.tick == at {
+                    return Some((n, last));
+                }
+                budget -= 1;
+                if budget == 0 {
+                    say!("tapestry-battery: FAIL {} focus {} never arrived", tag, value);
+                    return None;
+                }
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
+                return None;
+            }
+        }
+    }
+}
+
+/// TAPESTRY 18.4, FRAME opt-in, with the clock frozen (`tick` is the only
+/// tick source, so delivery is exact). A FOCUS event the leg causes AFTER
+/// its ticks bounds each read: the server queues events per surface in
+/// order, so every FRAME those ticks gave A sits ahead of that FOCUS, and
+/// the FOCUS's own tick stamp tells it from a stale one. Disarmed, A must
+/// see none; armed, the SAME observation must see exactly the tick -- the
+/// positive control one variable away. `frame maybe` must be refused.
+fn frame_optin_leg(root: i64, a: &mut Surface, b: &Surface) -> bool {
+    let tick = || ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ");
+    let l = read_file(root, "layout").unwrap_or_default();
+    let (pa, pb) = match (find_pane(&l, a.id), find_pane(&l, b.id)) {
+        (Some(pa), Some(pb)) => (pa, pb),
+        _ => {
+            say!("tapestry-battery: FAIL frame leg: A or B unhosted");
+            return false;
+        }
+    };
+    if a.surface_ctl("frame maybe").is_ok() {
+        say!("tapestry-battery: FAIL frame accepted a value that is not on|off");
+        return false;
+    }
+    if a.frame(false).is_err() {
+        say!("tapestry-battery: FAIL A frame off");
+        return false;
+    }
+    let t0 = match tick() {
+        Some(t) => t,
+        None => {
+            say!("tapestry-battery: FAIL frame leg tick read");
+            return false;
+        }
+    };
+    if !write_file(root, "ctl", "tick") || !write_file(root, "ctl", "tick") {
+        say!("tapestry-battery: FAIL frame leg tick write");
+        return false;
+    }
+    if !write_file(root, "layout", &alloc::format!("focus {}", pb.id)) {
+        say!("tapestry-battery: FAIL frame leg focus B");
+        return false;
+    }
+    match frames_before_focus(a, 0, t0 + 2, t0, "frame off") {
+        Some((0, _)) => {}
+        Some((n, last)) => {
+            say!("tapestry-battery: FAIL disarmed A got {} FRAME(s), last tick {}", n, last);
+            return false;
+        }
+        None => return false,
+    }
+    if a.frame(true).is_err() {
+        say!("tapestry-battery: FAIL A frame on again");
+        return false;
+    }
+    if !write_file(root, "ctl", "tick") {
+        say!("tapestry-battery: FAIL frame leg tick write");
+        return false;
+    }
+    if !write_file(root, "layout", &alloc::format!("focus {}", pa.id)) {
+        say!("tapestry-battery: FAIL frame leg focus A");
+        return false;
+    }
+    match frames_before_focus(a, 1, t0 + 3, t0 + 2, "frame on") {
+        Some((1, last)) if last == t0 + 3 => true,
+        Some((n, last)) => {
+            say!(
+                "tapestry-battery: FAIL armed A got {} FRAME(s), last tick {} (want 1 at {})",
+                n,
+                last,
+                t0 + 3
+            );
+            false
+        }
+        None => false,
     }
 }
 
@@ -634,6 +746,10 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
+    if a.frame(true).is_err() {
+        say!("tapestry-battery: FAIL A frame on");
+        return 1;
+    }
     fill(&mut a, RED);
     if a.present(None).is_err() {
         say!("tapestry-battery: FAIL A present");
@@ -676,6 +792,10 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
+    if b.frame(true).is_err() {
+        say!("tapestry-battery: FAIL B frame on");
+        return 1;
+    }
     fill(&mut b, BLUE);
     if b.present(None).is_err() {
         say!("tapestry-battery: FAIL B present");
@@ -1673,6 +1793,10 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     say!("battery: test-mode OK");
+    if !frame_optin_leg(root, &mut a, &b) {
+        return 1;
+    }
+    say!("battery: frame opt-in OK");
 
     // cfg-3: the apply-authority gate (AURORA-CONFIG.md section 3.3). The
     // battery is NOT the console renderer, so the AUTHORITY verbs must

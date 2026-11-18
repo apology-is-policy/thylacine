@@ -18,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/AURORA-CONFIG.md", "docs/HALCYON.md section 14.3"]
 created: 2026-08-04
-updated: 2026-09-28
+updated: 2026-11-18
 ---
 ## Purpose
 
@@ -85,7 +85,10 @@ would wedge the compositor for every other client.
 
 **And the two halves of that had to be fixed separately.** Holding the
 bytes is useless if the loop stops turning — the compositor's frame ticks
-reach visible surfaces only, so a backgrounded aurora receives nothing at
+reach visible surfaces only (and only armed ones: FRAME is opt-in, TAPESTRY
+18.4, and aurora arms its surface at connect, failing loudly on a refusal,
+since unarmed it would render output only when a key arrived), so a
+backgrounded aurora receives nothing at
 all and an untimed block parks the user's keystrokes until they come
 back, whereupon the bytes land in whatever the shell is doing *then*. So
 the wait is bounded exactly when the queue is non-empty. The rejected

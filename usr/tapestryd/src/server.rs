@@ -1131,6 +1131,9 @@ struct Surface {
     /// reference/139 "Frame intent": whether the idle throttle may drop this
     /// surface's rate. Default Static; set via the `intent` ctl verb.
     intent: FrameIntent,
+    /// TAPESTRY 18.4: FRAME reaches this surface only while armed (`frame
+    /// on|off`). Default off -- an idle client is never woken by the clock.
+    frame_armed: bool,
 }
 
 /// The deferred flush a held present leaves behind. The pixel work
@@ -2881,6 +2884,7 @@ impl Comp {
             is_rail: false,
             shown_slot: None,
             intent: FrameIntent::Static,
+            frame_armed: false,
             comp_attached: false,
             gpu_said: false,
             held: None,
@@ -9686,10 +9690,12 @@ impl Comp {
         })
     }
 
-    /// Emit the FRAME tick to every VISIBLE hosted surface (G-6: hidden
-    /// surfaces -- tab-background, unhosted -- get no pacing signal; a
-    /// paced client naturally suspends while hidden). Wedged surfaces
-    /// retire inline.
+    /// Emit the FRAME tick to every ARMED, VISIBLE hosted or chrome surface
+    /// (TAPESTRY 18.4: delivery is opt-in, `frame on`; G-6: hidden surfaces
+    /// -- tab-background, unhosted -- get no pacing signal, so a paced
+    /// client naturally suspends while hidden). The rest of the tick -- the
+    /// compositor's own work -- runs whether or not any surface is armed.
+    /// Wedged surfaces retire inline.
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
@@ -9713,15 +9719,24 @@ impl Comp {
         self.storage_sync();
         // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
         // FRAME -- that is exactly what makes the console renderer's FRAME-driven
-        // loop go dormant while the session owns the display.
+        // loop go dormant while the session owns the display. The arm is one
+        // more condition on top of visibility, never a substitute for it.
         let mut vis: Vec<usize> = self
             .layout
             .visible_hosted()
             .iter()
-            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded && s.storage.resident()))
+            .filter(|v| {
+                self.surf(v.1)
+                    .map_or(false, |s| s.frame_armed && !s.backgrounded && s.storage.resident())
+            })
             .map(|v| v.1)
             .collect();
-        vis.extend(self.visible_chrome().iter().map(|v| v.0));
+        vis.extend(
+            self.visible_chrome()
+                .iter()
+                .filter(|v| self.surf(v.0).map_or(false, |s| s.frame_armed))
+                .map(|v| v.0),
+        );
         for n in vis {
             let ev = Tevent {
                 kind: TEV_FRAME,
@@ -20179,6 +20194,23 @@ impl Conn {
             let intent = FrameIntent::parse(rest.trim()).ok_or(p9::E_INVAL)?;
             if let Some(surf) = comp.surf_mut(n) {
                 surf.intent = intent;
+            }
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("frame ") {
+            // TAPESTRY 18.4: arm or disarm FRAME delivery to this surface.
+            // Disarming also drops the queued FRAME, so no tick reaches the
+            // surface after this Rwrite but one a read already carried.
+            let armed = match rest.trim() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(p9::E_INVAL),
+            };
+            if let Some(surf) = comp.surf_mut(n) {
+                surf.frame_armed = armed;
+                if !armed {
+                    surf.events.retain(|e| e.kind != TEV_FRAME);
+                }
             }
             return Ok(());
         }

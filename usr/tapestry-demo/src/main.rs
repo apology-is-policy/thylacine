@@ -119,6 +119,15 @@ pub extern "C" fn rs_main() -> i64 {
             _ => {}
         }
     }
+    // TAPESTRY 18.4: the plasma animates per FRAME, so arm the clock. The
+    // idle lever stays unarmed: it never paces, and its intent leg then
+    // shows that intent pins the RATE without arming delivery.
+    if !idle_mode {
+        if let Err(e) = surf.frame(true) {
+            say!("tapestry-demo: FAIL frame on {:?}", e);
+            return 1;
+        }
+    }
 
     // The plasma block: display-center, clear of the -v quadrant sample
     // points by construction (samples at (w/4,h/4),(3w/4,h/4),(w/4,3h/4),

@@ -105,6 +105,10 @@ int thyla_tap_glsrc(ThylaTap *t, uint32_t ctx_pub);
  * ctl "intent <dynamic|static>". Returns 0 or -1. */
 int thyla_tap_intent(ThylaTap *t, int dynamic);
 
+/* TAPESTRY 18.4: arm (on != 0) or disarm FRAME delivery to this surface; a
+ * new surface starts disarmed. ctl "frame <on|off>". Returns 0 or -1. */
+int thyla_tap_frame(ThylaTap *t, int on);
+
 /* Copy a bounded UTF-8 title to this surface's hosted pane. */
 int thyla_tap_title(ThylaTap *t, const char *title);
 

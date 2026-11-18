@@ -19,7 +19,8 @@
 // extinction) stay serial-only by design -- the screen shows the SESSION.
 //
 // The loop BLOCKS on the tapestry event stream (wait_event) -- the 60 Hz
-// FRAME clock is the heartbeat, so every pass turns within one frame. This
+// FRAME clock, which aurora arms on its surface (TAPESTRY 18.4: FRAME is
+// opt-in), is the heartbeat, so every pass turns within one frame. This
 // is load-bearing, not a style choice: a non-SQPOLL Loom ring's completions
 // are pumped by the thread BLOCKED in enter (the Loom-4 CQ-wait drives the
 // elected 9P reader); a never-blocking reap loop would never pump and no
@@ -458,6 +459,13 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let mut surf = surf.unwrap();
     let (mut w, mut h) = (surf.w as usize, surf.h as usize);
+    // TAPESTRY 18.4: FRAME is opt-in, and it is this loop's heartbeat (the
+    // drain rides it, the blink counts it). Unarmed, output would render
+    // only when a key arrived -- so a refusal is fatal, not degraded.
+    if let Err(e) = surf.frame(true) {
+        say!("aurora: FAIL frame on {:?}", e);
+        return 1;
+    }
 
     // cfg-4: push the compositor tier (chords + gaps) on aurora's OWN
     // renderer conn (surf.global_ctl -- the gated ctl; aurora holds the

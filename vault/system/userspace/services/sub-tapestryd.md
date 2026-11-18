@@ -12,8 +12,35 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-13
+updated: 2026-11-18
 ---
+## FRAME is opt-in per surface (November 18, vote 144)
+
+TAPESTRY 18.4 (vote 144): `Comp::frame_tick` pushes a FRAME only to a surface
+whose `frame_armed` is set, on top of the visibility filter it already had (a
+visible hosted surface that is not backgrounded and is resident, or a visible
+chrome surface). `frame on|off` on the surface's own ctl fid sets the flag,
+parsed beside `intent`; any other value is `E_INVAL`. `mint` starts it false,
+so every incarnation starts disarmed and a client re-arms after a re-create.
+`frame off` also drops the surface's one queued FRAME (`events.retain`), so
+after its Rwrite no tick reaches the surface but one a read had already
+carried. The arm adds a condition and never removes one: the d-1b dormancy
+of a backgrounded console leaf is unchanged. The rest of `frame_tick` -- the
+drag coalesce, the cursor sync, the C-3 repaint, deferred imports, storage
+sync -- runs every tick whether or not anything is armed, and the idle
+throttle reads neither the arm nor delivery (intent still sets the rate).
+
+Who arms: aurora, `SDL_thylacine` (both of its open paths), `tapestry-demo`
+(not under its `idle` lever) and the battery's A and B, whose waits count
+events. halcyond and its chrome do not. Before this an idle halcyond session
+took ~60 FRAMEs a second across its surfaces and dropped every one (AS-4f
+gate 2). Witnesses: the battery's frame opt-in leg in ls-gfx-panes (frozen
+clock; disarmed, A's stream up to a FOCUS caused after two ticks holds no
+FRAME; re-armed, the same read holds exactly the next tick; `frame maybe` is
+refused); ls-gfx-quake's 40 fps paced floor for SDL's arm (unarmed, SDL paces
+on its 50 ms timeout); the graphical console gates for aurora's (unarmed, it
+would render output only when a key arrived).
+
 ## Cooperative hidden storage (October 4)
 
 TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and

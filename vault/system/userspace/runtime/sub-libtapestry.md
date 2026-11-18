@@ -18,8 +18,19 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-11-03
+updated: 2026-11-18
 ---
+## `Surface::frame` -- FRAME is opt-in (November 18, vote 144)
+
+`Surface::frame(on)` writes `frame on` or `frame off` on the surface's ctl
+(TAPESTRY 18.4). A surface starts disarmed and receives no FRAME until a
+pacing client arms it; a re-created surface must arm again. Intent is a
+separate axis (the clock's rate, not delivery). So `EventRing::wait` and
+`Surface::wait_event` are bounded only by events now: FRAME ticks count only
+while some surface on the ring is armed and visible. A client that wants a
+bounded wait arms FRAME or keeps its own timer (halcyond folds its own
+deadlines into one poll; the battery arms A and B).
+
 ## Cooperative hidden storage (October 4)
 
 TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and

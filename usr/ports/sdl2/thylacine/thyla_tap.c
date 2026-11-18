@@ -275,6 +275,18 @@ int thyla_tap_intent(ThylaTap *t, int dynamic)
     return t_write(t->ctl, "intent static", 13) < 0 ? -1 : 0;
 }
 
+/* TAPESTRY 18.4: arm (on != 0) or disarm FRAME delivery to this surface.
+ * A new surface starts disarmed, so a pacing client arms it after every
+ * open. ctl "frame on" | "frame off". Returns 0 or -1. */
+int thyla_tap_frame(ThylaTap *t, int on)
+{
+    if (t->ctl < 0)
+        return -1;
+    if (on)
+        return t_write(t->ctl, "frame on", 8) < 0 ? -1 : 0;
+    return t_write(t->ctl, "frame off", 9) < 0 ? -1 : 0;
+}
+
 int thyla_tap_reweave(ThylaTap *t, uint32_t w, uint32_t h, uint16_t serial)
 {
     /* resize W H <serial>: the Rwrite is the server's generation fence. */
