@@ -223,6 +223,8 @@ struct larder_page_ent {
     bool own;          // G1 write-populate: the writer's OWN landed bytes; the serve
                        // bypasses the cvers gate (sound under the loose single-writer
                        // premise the wb asserts -- fs_cache.tla EnableFlushPopulate)
+    bool own_has_gen;  // an own page's file: the generation its writer registered
+    u64  own_gen;      //   under (votes M34/M34a), else none (a server without one)
     s32  hnext;        // (qid_path,page_index) hash chain: next slot in this bucket, -1 = end
     s32  qnext;        // qid_path-only hash chain (page_qhash): O(pages-of-file) invalidate
     u64  epoch;        // l->epoch at install: another value is an empty slot
@@ -314,6 +316,18 @@ void larder_init(struct larder *l);
 bool larder_attr_serve(struct larder *l, u64 qid_path,
                        struct t_stat *out, u64 *seq0_out);
 
+// Whose read, fill or fstat a serve through a handle answers (LARDER-DESIGN 13,
+// votes M34 and M34a): a handle named by its file's generation; one served by
+// number (a server that reports no generation, or a directory with no name);
+// or a plain file's handle with no name. An own page and an attribute are its
+// file's alone: served by number, or to the same generation, never unnamed.
+enum larder_who_kind { LARDER_WHO_NUMBER, LARDER_WHO_GEN, LARDER_WHO_UNNAMED };
+struct larder_who { u8 kind; u64 gen; };
+
+// The serves through a handle. The plain names above serve by number.
+bool larder_attr_serve_who(struct larder *l, u64 qid_path, const struct larder_who *who,
+                           struct t_stat *out, u64 *seq0_out);
+
 // Capture the current gen for a populate site that does NOT serve first (the
 // walk_attrs free-populate). Call BEFORE the RPC; pass the result to
 // larder_attr_install.
@@ -329,6 +343,8 @@ u64 larder_gen_snapshot(struct larder *l);
 // A perm_only entry is a miss (its size is exactly what the downgrade staled).
 bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
                             u64 *size_out);
+bool larder_attr_fresh_size_who(struct larder *l, u64 qid_path, u32 cvers,
+                                const struct larder_who *who, u64 *size_out);
 
 // Populate (Open/Refetch). Install {attr, cvers} for `qid_path` -- overwriting an
 // existing entry (revalidate-by-overwrite), using a free slot, or evicting the
@@ -450,6 +466,11 @@ void larder_dentry_invalidate_name(struct larder *l, u64 parent_qid_path,
 u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
                       u32 page_off, u32 want, u32 want_cvers,
                       u8 *out, u64 *seq0_out);
+// An own page serves only its own file (votes M34/M34a); a cvers page any handle
+// whose open-time version matches, and an own page never through that arm.
+u32 larder_page_serve_who(struct larder *l, u64 qid_path, u64 page_index,
+                          u32 page_off, u32 want, u32 want_cvers,
+                          const struct larder_who *who, u8 *out, u64 *seq0_out);
 
 // Populate (Open/Refetch). Install page (qid_path, page_index) with `len` bytes
 // [0, len) of `data` (content from the page's aligned start), tagged `cvers`, IFF
@@ -480,8 +501,10 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
 // install each page as own while no event has named the file since that drop. A
 // hit skips the rest and drops every page of the file, as a failed flush does;
 // false then. True when every page went in (a page an OOM skipped included).
+// The pages carry `writer`, the name the holder registered under (vote M34).
 bool larder_page_install_own_run(struct larder *l, u64 seq0, u64 qid_path,
-                                 u64 off, u32 total, const u8 *buf);
+                                 u64 off, u32 total, const u8 *buf,
+                                 const struct larder_who *writer);
 
 void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_index,
                          u32 cvers, const u8 *data, u32 len);
@@ -521,6 +544,8 @@ void larder_page_invalidate_range(struct larder *l, u64 qid_path,
 
 // The RPC-free hint: is [0, size) of qid_path fully cached at cvers?
 bool larder_pages_cover(struct larder *l, u64 qid_path, u32 cvers, u64 size);
+bool larder_pages_cover_who(struct larder *l, u64 qid_path, u32 cvers, u64 size,
+                            const struct larder_who *who);
 
 // Verify coverage AND copy [0, size) into `out` (caller-owned, >= size bytes)
 // under ONE lock hold -- atomic vs a concurrent invalidate (it precedes, failing
@@ -534,6 +559,9 @@ bool larder_pages_cover(struct larder *l, u64 qid_path, u32 cvers, u64 size);
 // fs_cache.tla Open linearization for the cached-open path.
 bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
                            u64 size, u8 *out, u64 seq0);
+bool larder_pages_snapshot_who(struct larder *l, u64 qid_path, u32 cvers,
+                               u64 size, u8 *out, u64 seq0,
+                               const struct larder_who *who);
 
 // Free every lazily-allocated array + page buffer (all three sub-caches are
 // heap). Called from p9_client_destroy. No op is in flight at destroy (the last

@@ -146,15 +146,36 @@ static s32 attr_clock_evict_locked(struct larder *l) {
     return (s32)l->attr_hand;
 }
 
+static const struct larder_who larder_by_number = { .kind = LARDER_WHO_NUMBER };
+
+// An attribute is its file's: by number, or to the generation its reply carried
+// (votes M34/M34a); a plain file's handle with no name asks the server.
+static bool attr_serves(const struct larder_attr_ent *e, const struct larder_who *who) {
+    if (who->kind == LARDER_WHO_NUMBER) return true;
+    return who->kind == LARDER_WHO_GEN && e->gen_known && e->gen == who->gen;
+}
+
+// An own page is its writer's file's content: by number (a server without
+// generations has no other name), or to the generation its writer registered.
+static bool own_serves(const struct larder_page_ent *e, const struct larder_who *who) {
+    if (who->kind == LARDER_WHO_NUMBER) return true;
+    return who->kind == LARDER_WHO_GEN && e->own_has_gen && e->own_gen == who->gen;
+}
+
 bool larder_attr_serve(struct larder *l, u64 qid_path,
                        struct t_stat *out, u64 *seq0_out) {
-    if (!l || !out) return false;
+    return larder_attr_serve_who(l, qid_path, &larder_by_number, out, seq0_out);
+}
+
+bool larder_attr_serve_who(struct larder *l, u64 qid_path, const struct larder_who *who,
+                           struct t_stat *out, u64 *seq0_out) {
+    if (!l || !out || !who) return false;
     spin_lock(&l->lock);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
     // G3: a perm_only entry misses here -- the stat consumers read size/times,
     // exactly the fields the downgrade staled. The getattr this miss triggers
     // re-installs full (the upgrade).
-    if (e && !e->perm_only) {
+    if (e && !e->perm_only && attr_serves(e, who)) {
         // Read: copy the whole entry out UNDER the lock (a concurrent invalidate
         // cannot tear it). CLOCK: touched.
         *out = e->attr;
@@ -181,13 +202,18 @@ u64 larder_gen_snapshot(struct larder *l) {
 
 bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
                             u64 *size_out) {
-    if (!l || !size_out) return false;
+    return larder_attr_fresh_size_who(l, qid_path, cvers, &larder_by_number, size_out);
+}
+
+bool larder_attr_fresh_size_who(struct larder *l, u64 qid_path, u32 cvers,
+                                const struct larder_who *who, u64 *size_out) {
+    if (!l || !size_out || !who) return false;
     spin_lock(&l->lock);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
     // Freshness gate: cvers must match the reading fid's open-time qid.vers
     // (the page-serve rule -- larder.h). A stale/newer entry is a miss; a
     // perm_only entry too (its size is what the G3 downgrade staled).
-    if (e && !e->perm_only && e->cvers == cvers) {
+    if (e && !e->perm_only && e->cvers == cvers && attr_serves(e, who)) {
         *size_out = e->attr.size;
         e->ref = true;              // CLOCK: touched
         spin_unlock(&l->lock);
@@ -727,7 +753,14 @@ static s32 page_clock_evict_locked(struct larder *l) {
 u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
                       u32 page_off, u32 want, u32 want_cvers,
                       u8 *out, u64 *seq0_out) {
-    if (!l || !out || want == 0) return 0;
+    return larder_page_serve_who(l, qid_path, page_index, page_off, want, want_cvers,
+                                 &larder_by_number, out, seq0_out);
+}
+
+u32 larder_page_serve_who(struct larder *l, u64 qid_path, u64 page_index,
+                          u32 page_off, u32 want, u32 want_cvers,
+                          const struct larder_who *who, u8 *out, u64 *seq0_out) {
+    if (!l || !out || want == 0 || !who) return 0;
     spin_lock(&l->lock);
     struct larder_page_ent *e = page_find_locked(l, qid_path, page_index);
     // Serve only a fresh (cvers-matching), in-range slot. A cvers mismatch is a
@@ -735,7 +768,11 @@ u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
     // page's known content (the caller's next read, at valid_len, refetches -- so
     // a partial page needs no EOF determination). Copy [0, chunk) out UNDER the
     // lock so a concurrent invalidate/evict cannot free `page` mid-copy.
-    if (e && (e->cvers == want_cvers || e->own) && page_off < e->valid_len) {
+    // An own page answers only its own file (votes M34/M34a) and never through
+    // the version arm: its cvers field is 0, which a handle opened at version 0
+    // would otherwise match.
+    if (e && (e->own ? own_serves(e, who) : e->cvers == want_cvers) &&
+        page_off < e->valid_len) {
         u32 avail = e->valid_len - page_off;
         u32 chunk = (want < avail) ? want : avail;
         larder_pagecopy(out, e->page + page_off, chunk);
@@ -834,7 +871,10 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
 
 // Under l->lock, with page_off < LARDER_PAGE_SIZE and len <= the room after it.
 static void page_install_own_locked(struct larder *l, u64 qid_path, u64 page_index,
-                                    u32 page_off, const u8 *data, u32 len) {
+                                    u32 page_off, const u8 *data, u32 len,
+                                    const struct larder_who *writer) {
+    bool has_gen = writer->kind == LARDER_WHO_GEN;
+    u64  gen     = has_gen ? writer->gen : 0;
     if (!page_ensure_array_locked(l)) return;
     if (page_off != 0) {
         // Append-chain continuation ONLY: an existing OWN page ending exactly
@@ -843,7 +883,8 @@ static void page_install_own_locked(struct larder *l, u64 qid_path, u64 page_ind
         // or overlap is skipped (appends are monotonic; anything else is a
         // shape this API refuses -- the wire serves those reads).
         struct larder_page_ent *e = page_find_locked(l, qid_path, page_index);
-        if (e && e->valid && e->own && e->valid_len == page_off) {
+        if (e && e->valid && e->own && e->valid_len == page_off &&
+            e->own_has_gen == has_gen && e->own_gen == gen) {
             larder_pagecopy(e->page + page_off, data, len);
             e->valid_len = page_off + len;
             e->ref = true;
@@ -867,6 +908,8 @@ static void page_install_own_locked(struct larder *l, u64 qid_path, u64 page_ind
     e->epoch     = l->epoch;
     e->ref       = true;
     e->own       = true;
+    e->own_has_gen = has_gen;
+    e->own_gen     = gen;
     l->page_own_installs++;
 }
 
@@ -876,13 +919,15 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
     if (page_off >= LARDER_PAGE_SIZE) return;
     if (len > LARDER_PAGE_SIZE - page_off) len = LARDER_PAGE_SIZE - page_off;
     spin_lock(&l->lock);
-    page_install_own_locked(l, qid_path, page_index, page_off, data, len);
+    page_install_own_locked(l, qid_path, page_index, page_off, data, len,
+                            &larder_by_number);
     spin_unlock(&l->lock);
 }
 
 bool larder_page_install_own_run(struct larder *l, u64 seq0, u64 qid_path,
-                                 u64 off, u32 total, const u8 *buf) {
-    if (!l || !buf || total == 0) return false;
+                                 u64 off, u32 total, const u8 *buf,
+                                 const struct larder_who *writer) {
+    if (!l || !buf || total == 0 || !writer) return false;
     spin_lock(&l->lock);
     bool hit = inval_hits_locked(l, seq0, qid_path);
     attr_invalidate_locked(l, qid_path);
@@ -899,7 +944,7 @@ bool larder_page_install_own_run(struct larder *l, u64 seq0, u64 qid_path,
         hit = inval_hits_locked(l, seq1, qid_path);
         if (!hit)
             page_install_own_locked(l, qid_path, idx, (u32)(s - idx * ps),
-                                    buf + (s - off), (u32)(e2 - s));
+                                    buf + (s - off), (u32)(e2 - s), writer);
         spin_unlock(&l->lock);
     }
     if (!hit) return true;
@@ -1004,11 +1049,11 @@ void larder_page_invalidate_range(struct larder *l, u64 qid_path,
 // client_max_read_count -- NOT an EOF) FAILS coverage; serving around it would
 // be a hole. size == 0 is trivially covered (the empty-file 1-RT open).
 static bool pages_cover_locked(struct larder *l, u64 qid_path, u32 cvers,
-                               u64 size, u8 *out) {
+                               u64 size, u8 *out, const struct larder_who *who) {
     u64 npages = (size + LARDER_PAGE_SIZE - 1u) / LARDER_PAGE_SIZE;
     for (u64 i = 0; i < npages; i++) {
         struct larder_page_ent *e = page_find_locked(l, qid_path, i);
-        if (!e || (e->cvers != cvers && !e->own)) return false;
+        if (!e || !(e->own ? own_serves(e, who) : e->cvers == cvers)) return false;
         u64 need64 = size - i * LARDER_PAGE_SIZE;
         u32 need   = (need64 >= LARDER_PAGE_SIZE) ? LARDER_PAGE_SIZE : (u32)need64;
         if (e->valid_len < need) return false;
@@ -1020,16 +1065,28 @@ static bool pages_cover_locked(struct larder *l, u64 qid_path, u32 cvers,
 }
 
 bool larder_pages_cover(struct larder *l, u64 qid_path, u32 cvers, u64 size) {
-    if (!l) return false;
+    return larder_pages_cover_who(l, qid_path, cvers, size, &larder_by_number);
+}
+
+bool larder_pages_cover_who(struct larder *l, u64 qid_path, u32 cvers, u64 size,
+                            const struct larder_who *who) {
+    if (!l || !who) return false;
     spin_lock(&l->lock);
-    bool ok = pages_cover_locked(l, qid_path, cvers, size, NULL);
+    bool ok = pages_cover_locked(l, qid_path, cvers, size, NULL, who);
     spin_unlock(&l->lock);
     return ok;
 }
 
 bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
                            u64 size, u8 *out, u64 seq0) {
-    if (!l) return false;
+    return larder_pages_snapshot_who(l, qid_path, cvers, size, out, seq0,
+                                     &larder_by_number);
+}
+
+bool larder_pages_snapshot_who(struct larder *l, u64 qid_path, u32 cvers,
+                               u64 size, u8 *out, u64 seq0,
+                               const struct larder_who *who) {
+    if (!l || !who) return false;
     if (size > 0 && !out) return false;
     spin_lock(&l->lock);
     // The GEN WITNESS (B1-audit F1): the two-party invalidate-vs-snapshot
@@ -1056,7 +1113,7 @@ bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
     // FALSE; the gen witness above catches the repopulated-stale case) or
     // follows the entire copy -- the snapshot is atomically the open-time
     // content at `cvers` (the fs_cache.tla Open linearization).
-    bool ok = pages_cover_locked(l, qid_path, cvers, size, out);
+    bool ok = pages_cover_locked(l, qid_path, cvers, size, out, who);
     if (ok) l->co_snapshots++; else l->co_misses++;
     spin_unlock(&l->lock);
     return ok;

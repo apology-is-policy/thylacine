@@ -637,8 +637,12 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
         larder_attr_invalidate(&p->client->larder, qid_path);
         larder_page_invalidate(&p->client->larder, qid_path);
     } else {
+        // The pages carry the name the holder registered under (vote M34).
+        struct dev9p_fkey hk = wb_holder_key(p, qid_path);
+        struct larder_who writer = { .kind = hk.has_gen ? LARDER_WHO_GEN : LARDER_WHO_NUMBER,
+                                     .gen  = hk.gen };
         (void)larder_page_install_own_run(&p->client->larder, seq0, qid_path, off,
-                                          total, buf);
+                                          total, buf, &writer);
     }
 
     spin_lock(&p->wb_lock);
