@@ -49,6 +49,11 @@ static struct p9_loopback g_loopback;
 // first reply that actually needs it -- the "hello"-era 4096 was under-msize).
 static u8 g_recv_buf[8192];
 static u8 g_loopback_resp[8192];
+// The FIFO for a server whose answers wait unread: a death abandons an op with its
+// reply unread and flushes it, and the single-slot loopback refuses that Tflush
+// (no real transport does) and so latches the session dead.
+static struct p9_mq_loopback g_mq;
+static bool                  g_on_mq;
 
 // A-2a: capture the Tsetattr fields dev9p_wstat_native put on the wire so a
 // test can assert the T_WSTAT_* -> P9_SETATTR_* mask + values reached it.
@@ -873,9 +878,22 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     return -1;
 }
 
+// A FIFO server answers a Tflush, after any reply it already sent.
+static int dev9p_fifo_responder(void *ctx, const u8 *req, size_t req_len,
+                                u8 *resp, size_t resp_cap) {
+    if (req_len >= P9_HDR_LEN && req[4] == P9_TFLUSH) {
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = (u8)P9_HDR_LEN; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = (u8)P9_RFLUSH;
+        resp[5] = req[5]; resp[6] = req[6];
+        return (int)P9_HDR_LEN;
+    }
+    return dev9p_responder(ctx, req, req_len, resp, resp_cap);
+}
+
 // Helper: drive a client through handshake against the canonical
-// responder, returning a Spoor at the bound root.
-static struct Spoor *make_open_client_and_root(void) {
+// responder, returning a Spoor at the bound root; over the FIFO if `fifo`.
+static struct Spoor *open_client_and_root(bool fifo) {
     g_tlopen_fail_ecode = 0;
     g_twalk_path_ov = 0;
     g_tlopen_path_ov = 0;
@@ -892,10 +910,17 @@ static struct Spoor *make_open_client_and_root(void) {
     g_rd_name = g_rd_foo;
     g_rd_name_len = sizeof(g_rd_foo);
     lock_wire_reset();
-    if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
-                            dev9p_responder, NULL) != 0) return NULL;
-    if (p9_client_init(&g_client, /*root_fid=*/0, 8192,
-                          p9_loopback_ops_for(&g_loopback),
+    g_on_mq = fifo;
+    struct p9_transport_ops ops;
+    if (fifo) {
+        if (p9_mq_loopback_init(&g_mq, dev9p_fifo_responder, NULL) != 0) return NULL;
+        ops = p9_mq_loopback_ops_for(&g_mq);
+    } else {
+        if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                                dev9p_responder, NULL) != 0) return NULL;
+        ops = p9_loopback_ops_for(&g_loopback);
+    }
+    if (p9_client_init(&g_client, /*root_fid=*/0, 8192, ops,
                           g_recv_buf, sizeof(g_recv_buf)) != 0) return NULL;
     const u8 uname[] = {'r','o','o','t'};
     const u8 aname[] = {'/'};
@@ -904,11 +929,17 @@ static struct Spoor *make_open_client_and_root(void) {
     return dev9p_attach_client(&g_client, /*root_fid=*/0);
 }
 
+static struct Spoor *make_open_client_and_root(void) {
+    return open_client_and_root(false);
+}
+
 // Tear down helper: release the root Spoor + destroy the client.
 static void teardown(struct Spoor *root) {
     spoor_clunk(root);
     p9_client_destroy(&g_client);
-    p9_loopback_destroy(&g_loopback);
+    if (g_on_mq) p9_mq_loopback_destroy(&g_mq);
+    else         p9_loopback_destroy(&g_loopback);
+    g_on_mq = false;
 }
 
 // =============================================================================
@@ -6019,12 +6050,16 @@ void test_dev9p_m30a_holders_fsync_marks_the_loss_told(void) {
 // a walk that asks the generation, which the server answers `gen`.
 static void lk_drop(struct Spoor *c);
 
-static struct Spoor *m31_root(void) {
-    struct Spoor *root = make_open_client_and_root();
+static struct Spoor *m31_root_on(bool fifo) {
+    struct Spoor *root = open_client_and_root(fifo);
     if (!root) return NULL;
     g_client.loose = true;
     __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
     return root;
+}
+
+static struct Spoor *m31_root(void) {
+    return m31_root_on(false);
 }
 
 static struct Spoor *m31_create(struct Spoor *root, bool named, u64 gen) {
@@ -11049,10 +11084,12 @@ void test_dev9p_s15_leg_resumes_after_a_closer(void) {
 }
 
 // Round 10 F4 (ARCH 8.8.3): a death during the plain walk's Tgetattr fails the walk,
-// as a caught note does. A dying thread sends no Tclunk: the fid it bound is handed
-// on (the closer's in production; this bare client, with no attachment, reports a
-// refusal). The control, one variable away (the same refusal on a thread no death
-// has reached): the walk succeeds unnamed.
+// as a caught note does. The death abandons the Tgetattr with its reply unread and
+// flushes it, so both arms run over the FIFO, where the Tflush goes out and the
+// session lives. A dying thread sends no Tclunk: the fid it bound is handed on (the
+// closer's in production; this bare client, with no attachment, reports a refusal).
+// The control, one variable away (the same refusal on a thread no death has
+// reached): the walk succeeds unnamed.
 static struct Spoor   *g_f3_root;
 static struct Spoor   *g_f3_nc;
 static struct Walkqid *g_f3_w;
@@ -11074,7 +11111,7 @@ static void f3_walk(void *arg) {
 void test_dev9p_f3_plain_walk_death_fails_the_walk(void) {
     for (u32 i = 0; i < 2; i++) {
         bool dying = i == 0;
-        struct Spoor *root = m31_root();
+        struct Spoor *root = m31_root_on(true);
         TEST_ASSERT(root != NULL, "root");
         g_f3_root = root;
         g_f3_nc   = spoor_clone(root);
@@ -11112,7 +11149,14 @@ void test_dev9p_f3_plain_walk_death_fails_the_walk(void) {
         if (g_f3_w) walkqid_free(g_f3_w);
         struct dev9p_priv *np = bound ? dev9p_priv_of(g_f3_nc) : NULL;
         u8 wb = np ? np->wb_name : 0xff;
-        if (clunked) (void)p9_client_reader_pump_ready(&g_client);
+        // What the server answered and nobody read, one frame a pump: the abandoned
+        // Tgetattr's reply and the Rflush behind it.
+        u32 drained = 0;
+        for (u32 k = 0; k < 8u; k++) {
+            if (p9_client_reader_pump_ready(&g_client) != P9_PUMP_PROGRESS) break;
+            drained++;
+        }
+        bool alive = !g_client.dead;
         u32 cl1 = g_clunk_seen;
         if (bound) spoor_clunk(g_f3_nc);
         else { g_f3_nc->aux = NULL; spoor_unref(g_f3_nc); }
@@ -11126,6 +11170,8 @@ void test_dev9p_f3_plain_walk_death_fails_the_walk(void) {
             TEST_ASSERT(g_f3_werr != 0, "with a reason");
             TEST_EXPECT_EQ((u64)clunked, 0ull, "the dying thread sends no Tclunk");
             TEST_EXPECT_EQ(handed, 1ull, "it hands the fid on: a refusal on this bare client");
+            TEST_EXPECT_EQ((u64)drained, 2ull, "the abandoned reply and the Rflush drain");
+            TEST_ASSERT(alive, "and the session lives on");
         } else {
             TEST_ASSERT(bound, "CONTROL: no death: the refusal leaves the walk standing");
             TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_FAILED, "CONTROL: and the open has no name");
