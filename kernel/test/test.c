@@ -22,6 +22,7 @@
 
 #include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
 #include <thylacine/dev9p.h>        // the poll collector's test mode, released per test
+#include <thylacine/9p_attach.h>    // the closer's test knobs, released per test
 #include <thylacine/devramfs.h>     // test_probe_lookup: the probe and bin/joey
 #include <thylacine/dtb.h>          // test_virtio_device: the launcher's declaration
 #include <thylacine/virtio.h>       // test_virtio_device: the slot lookup
@@ -3117,6 +3118,22 @@ struct test_case g_tests[] = {
                                        test_dev9p_m27_told_fsync_writes_back_first, false, NULL },
     { "dev9p.m32_ring_fsync_is_told",
                                        test_dev9p_m32_ring_fsync_is_told, false, NULL },
+    { "dev9p.m33_plain_walk_names_the_file",
+                                       test_dev9p_m33_plain_walk_names_the_file, false, NULL },
+    { "dev9p.m33_plain_walked_holder_is_named",
+                                       test_dev9p_m33_plain_walked_holder_is_named, false, NULL },
+    { "dev9p.m33_plain_walked_open_skips_a_dead_holder",
+                                       test_dev9p_m33_plain_walked_open_skips_a_dead_holder, false, NULL },
+    { "dev9p.m33_clone_keeps_the_name",
+                                       test_dev9p_m33_clone_keeps_the_name, false, NULL },
+    { "dev9p.m33_unnamed_open_writes_through",
+                                       test_dev9p_m33_unnamed_open_writes_through, false, NULL },
+    { "dev9p.m33_the_name_does_not_move",
+                                       test_dev9p_m33_the_name_does_not_move, false, NULL },
+    { "dev9p.m31_a_generation_leg_lands_a_numbered_holder",
+                                       test_dev9p_m31_a_generation_leg_lands_a_numbered_holder, false, NULL },
+    { "dev9p.m32_ring_fsync_names_the_file",
+                                       test_dev9p_m32_ring_fsync_names_the_file, false, NULL },
     { "dev9p.m28_sys_close_passes_space_errnos",
                                        test_dev9p_m28_sys_close_passes_space_errnos, false, NULL },
     { "dev9p.m28_edquot_through_the_leg_and_the_latch",
@@ -4082,6 +4099,26 @@ void test_run_all(void) {
             uart_puts("WB-REGISTRY ");
             if (!current_test->failed)
                 test_fail("test left a write-behind holder registered (see WB-REGISTRY)");
+        }
+
+        // And the closer's and write-behind's knobs: an allocation failure left
+        // armed fails a later test's close, a held spawn parks its closer, the
+        // quiet flag hides every later lost run's line from the gates that read
+        // them, and a window left set calls into a frame that has returned.
+        u32 wb_knobs     = dev9p_wb_test_release_knobs();
+        u32 closer_knobs = p9_closer_test_release_knobs();
+        if (wb_knobs != 0 || closer_knobs != 0) {
+            uart_puts("CLOSER-KNOB(");
+            if (wb_knobs & DEV9P_TEST_KNOB_CLOSE_JOB)     uart_puts("close-job,");
+            if (wb_knobs & DEV9P_TEST_KNOB_LEG_WINDOW)    uart_puts("leg-window,");
+            if (wb_knobs & DEV9P_TEST_KNOB_REPORT_WINDOW) uart_puts("report-window,");
+            if (closer_knobs & P9_CLOSER_TEST_KNOB_SPAWN) uart_puts("closer-spawn,");
+            if (closer_knobs & P9_CLOSER_TEST_KNOB_NODE)  uart_puts("closer-node,");
+            if (closer_knobs & P9_CLOSER_TEST_KNOB_HOLD)  uart_puts("spawn-hold,");
+            if (closer_knobs & P9_CLOSER_TEST_KNOB_QUIET) uart_puts("quiet,");
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left a closer or write-behind test knob set (see CLOSER-KNOB)");
         }
 
         // And the 9P client suite's shared client: a test that fails before its

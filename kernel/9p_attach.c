@@ -915,6 +915,19 @@ void p9_closer_hold_spawn_for_test(bool hold) {
 bool p9_closer_spawn_held_for_test(void) {
     return __atomic_load_n(&g_closer_hold, __ATOMIC_ACQUIRE) == 2u;
 }
+
+u32 p9_closer_test_release_knobs(void) {
+    u32 left = 0;
+    if (__atomic_exchange_n(&g_closer_fail_spawns, 0u, __ATOMIC_RELAXED) != 0)
+        left |= P9_CLOSER_TEST_KNOB_SPAWN;
+    if (__atomic_exchange_n(&g_closer_fail_nodes, 0u, __ATOMIC_RELAXED) != 0)
+        left |= P9_CLOSER_TEST_KNOB_NODE;
+    if (__atomic_exchange_n(&g_closer_hold, 0u, __ATOMIC_ACQ_REL) != 0)
+        left |= P9_CLOSER_TEST_KNOB_HOLD;
+    if (__atomic_exchange_n(&g_close_flush_quiet, false, __ATOMIC_RELAXED))
+        left |= P9_CLOSER_TEST_KNOB_QUIET;
+    return left;
+}
 #endif
 
 static void closer_spawn_hold_for_test(void) {

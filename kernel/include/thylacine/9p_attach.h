@@ -299,6 +299,16 @@ u32 p9_closer_fail_nodes_for_test(u32 n);
 void p9_closer_hold_spawn_for_test(bool hold);
 bool p9_closer_spawn_held_for_test(void);
 
+// The runner's release, after every test: the closer knobs and the quiet flag a
+// failed test left set, cleared (a held spawn goes on); which were, as bits.
+enum {
+    P9_CLOSER_TEST_KNOB_SPAWN = 1u << 0,
+    P9_CLOSER_TEST_KNOB_NODE  = 1u << 1,
+    P9_CLOSER_TEST_KNOB_HOLD  = 1u << 2,
+    P9_CLOSER_TEST_KNOB_QUIET = 1u << 3,
+};
+u32 p9_closer_test_release_knobs(void);
+
 // #210: relabel a registered attached for /ctl/9p-sessions (label is
 // copied, truncated to the ctl_label field; id is free-form — the /srv
 // path stamps the conn's peer pid). Safe any time between create and the

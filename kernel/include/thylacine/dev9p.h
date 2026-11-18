@@ -341,6 +341,14 @@ void dev9p_wb_test_loss_gen(struct p9_client *cl, u64 path, u64 gen, int err);
 // Close-job allocations to fail from now on (the hand-off's no-job arm); returns
 // the count it replaces.
 u32  dev9p_wb_fail_close_jobs_for_test(u32 n);
+// The runner's release, after every test: the close-job failures and the leg
+// and report windows a failed test left set, cleared; which were, as bits.
+enum {
+    DEV9P_TEST_KNOB_CLOSE_JOB     = 1u << 0,
+    DEV9P_TEST_KNOB_LEG_WINDOW    = 1u << 1,
+    DEV9P_TEST_KNOB_REPORT_WINDOW = 1u << 2,
+};
+u32  dev9p_wb_test_release_knobs(void);
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth

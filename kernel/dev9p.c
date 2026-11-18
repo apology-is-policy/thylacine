@@ -2711,6 +2711,25 @@ static u32 g_wb_fail_close_jobs;
 u32 dev9p_wb_fail_close_jobs_for_test(u32 n) {
     return __atomic_exchange_n(&g_wb_fail_close_jobs, n, __ATOMIC_RELAXED);
 }
+
+// An assert returns from its test, past the line that would have disarmed a
+// knob: the runner clears what was left, and names it.
+u32 dev9p_wb_test_release_knobs(void) {
+    u32 left = 0;
+    if (__atomic_exchange_n(&g_wb_fail_close_jobs, 0u, __ATOMIC_RELAXED) != 0)
+        left |= DEV9P_TEST_KNOB_CLOSE_JOB;
+    if (g_wb_leg_window) {
+        g_wb_leg_window     = NULL;
+        g_wb_leg_window_arg = NULL;
+        left |= DEV9P_TEST_KNOB_LEG_WINDOW;
+    }
+    if (g_wb_report_window) {
+        g_wb_report_window     = NULL;
+        g_wb_report_window_arg = NULL;
+        left |= DEV9P_TEST_KNOB_REPORT_WINDOW;
+    }
+    return left;
+}
 #endif // KERNEL_TESTS
 
 static struct dev9p_close_job *wb_close_job_alloc(void) {

@@ -6411,6 +6411,378 @@ void test_dev9p_m32_ring_fsync_is_told(void) {
     TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "the open closes");
 }
 
+// Vote M33 (round 8 F1): on a session that stages, a plain walk that lands on a
+// plain file asks its generation with one Tgetattr on the new fid; the fid's
+// write-behind name and the file locks' are that answer, so the file locks ask
+// nothing more, and a server that reports none names the file by its number. The
+// control, one variable away (a strict session, which stages nothing): the walk
+// asks nothing and names nothing, and the file locks ask, once.
+void test_dev9p_m33_plain_walk_names_the_file(void) {
+    for (u32 i = 0; i < 3; i++) {
+        bool none = i == 1, strict = i == 2;
+        struct Spoor *root = strict ? make_open_client_and_root() : m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        g_ga_valid = none ? P9_GETATTR_BASIC : (P9_GETATTR_BASIC | P9_GETATTR_GEN);
+        g_ga_gen   = 0x5au;
+        g_tgetattr_mask = 0;
+        u32 ga0 = g_tgetattr_seen;
+        struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+        u32 asked = g_tgetattr_seen - ga0;
+        u64 mask  = g_tgetattr_mask;
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        u8  wb    = op ? op->wb_name : 0xff;
+        u64 wgen  = op ? op->wb_gen : 0;
+        u8  ident = op ? __atomic_load_n(&op->lock_ident, __ATOMIC_ACQUIRE) : 0xff;
+        u64 lgen  = op ? __atomic_load_n(&op->lock_gen, __ATOMIC_RELAXED) : 0;
+        u32 ga1 = g_tgetattr_seen;
+        int li  = o ? dev9p.lock_ident(o) : 1;
+        u32 lasked = g_tgetattr_seen - ga1;
+        g_ga_valid = 0x7ffu;
+        int oc = o ? d9_close(o) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "an open through the plain walk");
+        TEST_EXPECT_EQ((u64)(s64)li, 0ull, "the file locks' identity");
+        if (strict) {
+            TEST_EXPECT_EQ((u64)asked, 0ull, "CONTROL: a strict session's walk asks nothing");
+            TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_UNASKED, "CONTROL: and names nothing");
+            TEST_EXPECT_EQ((u64)lasked, 1ull, "CONTROL: so the file locks ask, once");
+        } else {
+            TEST_EXPECT_EQ((u64)asked, 1ull, "a walk on a session that stages asks once");
+            TEST_ASSERT((mask & P9_GETATTR_GEN) != 0, "for the generation");
+            if (none) {
+                TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_NONE,
+                               "a server that reports none: the number names the file");
+                TEST_EXPECT_EQ((u64)ident, (u64)DEV9P_IDENT_NONE, "for the file locks too");
+            } else {
+                TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_GEN, "the fid is named by the generation");
+                TEST_EXPECT_EQ(wgen, 0x5aull, "the file's");
+                TEST_EXPECT_EQ((u64)ident, (u64)DEV9P_IDENT_GEN, "the file locks' name is the same");
+                TEST_EXPECT_EQ(lgen, 0x5aull, "the same generation");
+            }
+            TEST_EXPECT_EQ((u64)lasked, 0ull, "and the file locks ask nothing more");
+        }
+        TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "it closes");
+    }
+}
+
+// Vote M33 (round 8 F1, the holder): a truncating open through the plain walk
+// holds under the generation its walk asked, so a new file at its number, which
+// the server names by another generation, holds too. The control, one variable
+// away (the server names the same generation): the second create is the same
+// file, whose holder refuses it, and it writes through.
+void test_dev9p_m33_plain_walked_holder_is_named(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool reborn = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        g_ga_gen   = 0x51u;
+        u32 ga0 = g_tgetattr_seen;
+        struct Spoor *o = m23_peer(root, 1 | 0x10 /*OWRITE|OTRUNC*/);
+        u32 asked = g_tgetattr_seen - ga0;
+        g_ga_valid = 0x7ffu;
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        bool e1 = op && op->wb_eligible;
+        struct Spoor *f2 = o ? m31_create(root, true, reborn ? 0x52u : 0x51u) : NULL;
+        struct dev9p_priv *p2 = f2 ? dev9p_priv_of(f2) : NULL;
+        bool e2 = p2 && p2->wb_eligible;
+        int c2 = f2 ? d9_close(f2) : -1;
+        int oc = o ? d9_close(o) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "a truncating open through the plain walk");
+        TEST_EXPECT_EQ((u64)asked, 1ull, "its walk asks the file's generation, once");
+        TEST_ASSERT(e1, "it holds");
+        TEST_ASSERT(f2 != NULL, "a create at its number");
+        if (reborn)
+            TEST_ASSERT(e2, "a new file of another generation holds too");
+        else
+            TEST_ASSERT(!e2, "CONTROL: the same generation is the same file: the create writes through");
+        TEST_ASSERT(c2 == 0 && oc == 0, "both close");
+    }
+}
+
+// Vote M33 (round 8 F1, the legs and the report): an open through the plain walk
+// of a new file at a dead holder's number lands nothing of the dead holder's run,
+// and is not told the dead file's loss. The dead holder's run goes at its own last
+// close. The control, one variable away (the server names the holder's
+// generation): the open lands the holder's run, and its fsync is told the loss,
+// once.
+void test_dev9p_m33_plain_walked_open_skips_a_dead_holder(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool reborn = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, true, 0x51u);
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        dev9p_wb_test_loss_gen(&g_client, M23_PATH, 0x51u, -T_E_IO);   // the holder's file's
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        g_ga_gen   = reborn ? 0x52u : 0x51u;
+        struct Spoor *o = f1 ? m23_peer(root, 0 /*OREAD*/) : NULL;
+        g_ga_valid = 0x7ffu;
+        u32 seen_o = g_twrite_seen;
+        int fo1 = o ? dev9p.fsync(o, 0) : 1;
+        u32 seen_f = g_twrite_seen;
+        int fo2 = o ? dev9p.fsync(o, 0) : 1;
+        int oc = o ? d9_close(o) : -1;
+        int c1 = f1 ? d9_close(f1) : -1;
+        u32 seen_end = g_twrite_seen;
+        m23_end(root);
+
+        TEST_ASSERT(f1 && o, "a holder and an open through the plain walk");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        if (reborn) {
+            TEST_EXPECT_EQ((u64)seen_o, 0ull,
+                           "the open of a new file at the number lands nothing of the dead holder's");
+            TEST_EXPECT_EQ((u64)(s64)fo1, 0ull, "its fsync is not told the dead file's loss");
+            TEST_EXPECT_EQ((u64)seen_f, 0ull, "and lands nothing");
+            TEST_EXPECT_EQ((u64)seen_end, 1ull, "the dead holder's run goes at its own last close");
+        } else {
+            TEST_EXPECT_EQ((u64)seen_o, 1ull, "CONTROL: the holder's generation: the open lands its run");
+            TEST_EXPECT_EQ((u64)(s64)fo1, (u64)(s64)-T_E_IO, "CONTROL: and its fsync is told the file's loss");
+            TEST_EXPECT_EQ((u64)(s64)fo2, 0ull, "CONTROL: once");
+            TEST_EXPECT_EQ((u64)seen_end, 1ull, "CONTROL: and nothing is left for the close");
+        }
+        TEST_ASSERT(oc == 0 && c1 == 0, "both close");
+    }
+}
+
+// Vote M33 (round 8 S-8): a clone that walks no name names its source's file, so
+// an open through it, of a new file at a dead holder's number, lands nothing of
+// the dead holder's run. The control, one variable away (the source is named by
+// the holder's generation): the clone's open lands the run.
+void test_dev9p_m33_clone_keeps_the_name(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool reborn = i == 0;
+        u64 gen = reborn ? 0x52u : 0x51u;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, true, 0x51u);
+        g_ga_gen = gen;
+        struct Spoor *nav = f1 ? m27_nav(root, true) : NULL;   // named by the walk's answer
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        struct Spoor *cl = nav ? spoor_clone(nav) : NULL;
+        struct Walkqid *w = cl ? dev9p.walk(nav, cl, NULL, 0) : NULL;
+        bool bound = w && w->nqid == 0 && dev9p_priv_of(cl) != dev9p_priv_of(nav);
+        if (w) walkqid_free(w);
+        if (cl && !bound) {
+            cl->aux = NULL;                 // unbound, the clone shares nav's priv
+            spoor_unref(cl);
+            cl = NULL;
+        }
+        struct dev9p_priv *cp = cl ? dev9p_priv_of(cl) : NULL;
+        bool kept = cp && cp->wb_name == DEV9P_WB_GEN && cp->wb_gen == gen;
+        g_tlopen_path_ov = M23_PATH;
+        struct Spoor *o = cl ? dev9p.open(cl, 0 /*OREAD*/) : NULL;
+        if (cl && !o) spoor_clunk(cl);
+        u32 seen_o = g_twrite_seen;
+        int oc = o ? d9_close(o) : -1;
+        if (nav) lk_drop(nav);
+        int c1 = f1 ? d9_close(f1) : -1;
+        u32 seen_end = g_twrite_seen;
+        m23_end(root);
+
+        TEST_ASSERT(f1 && nav, "a holder and a navigation handle on its number");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        TEST_ASSERT(o != NULL, "an open through a clone of the handle");
+        if (reborn) {
+            TEST_EXPECT_EQ((u64)seen_o, 0ull, "the clone's open lands nothing of the dead holder's");
+            TEST_ASSERT(kept, "the clone names its source's file");
+            TEST_EXPECT_EQ((u64)seen_end, 1ull, "the dead holder's run goes at its own last close");
+        } else {
+            TEST_EXPECT_EQ((u64)seen_o, 1ull, "CONTROL: the holder's generation: the clone's open lands its run");
+            TEST_ASSERT(kept, "CONTROL: the clone names its source's file");
+            TEST_EXPECT_EQ((u64)seen_end, 1ull, "CONTROL: and nothing is left for the close");
+        }
+        TEST_ASSERT(oc == 0 && c1 == 0, "both close");
+    }
+}
+
+// Vote M33: an open whose walk could not learn its file's generation has no name:
+// a truncating one does not hold, and writes through, and it is told only what is
+// lost after it was made, by its number. The control, one variable away (the
+// Tgetattr is answered): the open holds and stages, and is told the file's loss
+// from before it, which nobody heard, then the one after.
+void test_dev9p_m33_unnamed_open_writes_through(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool failed = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        dev9p_wb_test_loss_gen(&g_client, M23_PATH, 0x51u, -T_E_IO);   // before the open, unheard
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        g_ga_gen   = 0x51u;
+        g_ga_fail_ecode = failed ? (u32)T_E_IO : 0u;
+        u32 ga0 = g_tgetattr_seen;
+        struct Spoor *o = m23_peer(root, 1 | 0x10 /*OWRITE|OTRUNC*/);
+        g_ga_fail_ecode = 0;
+        g_ga_valid = 0x7ffu;
+        u32 asked = g_tgetattr_seen - ga0;
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        bool e = op && op->wb_eligible;
+        u8  wb = op ? op->wb_name : 0xff;
+        wb_wire_reset();
+        long w0 = o ? dev9p.write(o, chunk, 256, 0) : -1;
+        u32 seen = g_twrite_seen;
+        int f1 = o ? dev9p.fsync(o, 0) : 1;
+        dev9p_wb_test_loss_gen(&g_client, M23_PATH, 0x51u, -T_E_NOSPC);   // after it
+        int f2 = o ? dev9p.fsync(o, 0) : 1;
+        int f3 = o ? dev9p.fsync(o, 0) : 1;
+        int oc = o ? d9_close(o) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "a truncating open through the plain walk");
+        TEST_EXPECT_EQ((u64)asked, 1ull, "its walk asked the generation");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "its write is taken");
+        if (failed) {
+            TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_FAILED, "the Tgetattr failed: it has no name");
+            TEST_ASSERT(!e, "it does not hold");
+            TEST_EXPECT_EQ((u64)seen, 1ull, "its write goes through");
+            TEST_EXPECT_EQ((u64)(s64)f1, 0ull, "a loss from before it is not told to it");
+            TEST_EXPECT_EQ((u64)(s64)f2, (u64)(s64)-T_E_NOSPC, "one after it is, ENOSPC as it is");
+            TEST_EXPECT_EQ((u64)(s64)f3, 0ull, "once");
+        } else {
+            TEST_ASSERT(e, "CONTROL: answered, it holds");
+            TEST_EXPECT_EQ((u64)seen, 0ull, "CONTROL: and stages");
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO,
+                           "CONTROL: it is told the loss from before it, which nobody heard");
+            TEST_EXPECT_EQ((u64)(s64)f2, (u64)(s64)-T_E_NOSPC, "CONTROL: then the one after");
+            TEST_EXPECT_EQ((u64)(s64)f3, 0ull, "CONTROL: once");
+        }
+        TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "it closes");
+    }
+}
+
+// Round 8 F2 (vote M33): an open's name is fixed where it is made. One whose walk
+// could not learn its file's generation goes by its number, and the generation the
+// file locks learn later does not change that: a loss of another generation,
+// recorded after the open, is still told to it. The control, one variable away (no
+// lock call): the same loss is told.
+void test_dev9p_m33_the_name_does_not_move(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool locked = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+        g_ga_gen   = 0x51u;
+        g_ga_fail_ecode = T_E_IO;
+        struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+        g_ga_fail_ecode = 0;
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        bool unnamed = op && op->wb_name == DEV9P_WB_FAILED;
+        int li = (o && locked) ? dev9p.lock_ident(o) : 0;
+        u8 ident = op ? __atomic_load_n(&op->lock_ident, __ATOMIC_ACQUIRE) : 0xff;
+        g_ga_valid = 0x7ffu;
+        dev9p_wb_test_loss_gen(&g_client, M23_PATH, 0x50u, -T_E_IO);   // after the open
+        int f1 = o ? dev9p.fsync(o, 0) : 1;
+        int f2 = o ? dev9p.fsync(o, 0) : 1;
+        int oc = o ? d9_close(o) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "an open through the plain walk");
+        TEST_ASSERT(unnamed, "whose Tgetattr failed: it has no name");
+        if (locked) {
+            TEST_EXPECT_EQ((u64)(s64)li, 0ull, "the file locks learn the generation later");
+            TEST_EXPECT_EQ((u64)ident, (u64)DEV9P_IDENT_GEN, "premise: the file locks know it");
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO,
+                           "its report still goes by its number: it is told the loss after it");
+        } else {
+            TEST_EXPECT_EQ((u64)ident, (u64)DEV9P_IDENT_UNKNOWN, "CONTROL: no lock call: the file locks know nothing");
+            TEST_EXPECT_EQ((u64)(s64)f1, (u64)(s64)-T_E_IO, "CONTROL: it is told the loss after it, by its number");
+        }
+        TEST_EXPECT_EQ((u64)(s64)f2, 0ull, "once");
+        TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "it closes");
+    }
+}
+
+// Vote M31 (round 8 F4): a name without a generation is the file whatever its
+// generation: a holder the server named by none has its run landed by the leg of
+// an open named by a generation that is not zero. The control, one variable away
+// (the holder is named by another generation): the leg lands nothing.
+void test_dev9p_m31_a_generation_leg_lands_a_numbered_holder(void) {
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 2; i++) {
+        bool numbered = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, !numbered, 0x51u);
+        struct dev9p_priv *p1 = f1 ? dev9p_priv_of(f1) : NULL;
+        bool e1 = p1 && p1->wb_eligible;
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        struct Spoor *n = f1 ? m31_peer(root, 0x5au) : NULL;
+        u32 seen_n = g_twrite_seen;
+        int ncl = n ? d9_close(n) : -1;
+        int c1 = f1 ? d9_close(f1) : -1;
+        u32 seen_end = g_twrite_seen;
+        m23_end(root);
+
+        TEST_ASSERT(f1 && n, "a holder and an open named by generation 0x5a");
+        TEST_ASSERT(e1, "the holder holds");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "its write is held");
+        if (numbered)
+            TEST_EXPECT_EQ((u64)seen_n, 1ull,
+                           "a holder named by its number alone: the open's leg lands its run");
+        else
+            TEST_EXPECT_EQ((u64)seen_n, 0ull, "CONTROL: a holder of another generation: the leg lands nothing");
+        TEST_EXPECT_EQ((u64)seen_end, 1ull, "one Twrite in all");
+        TEST_ASSERT(ncl == 0 && c1 == 0, "both close");
+    }
+}
+
+// Votes M32, M31 (round 8 F4): a ring FSYNC is told its own file's losses by the
+// name its open was made with: a deleted file's at the same number, of another
+// generation, is not told. The control, one variable away (the loss is of the
+// open's generation): the same FSYNC is told, once.
+void test_dev9p_m32_ring_fsync_names_the_file(void) {
+    for (u32 i = 0; i < 2; i++) {
+        bool other = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *o = m31_peer(root, 0x51u);
+        struct dev9p_priv *op = o ? dev9p_priv_of(o) : NULL;
+        bool named = op && op->wb_name == DEV9P_WB_GEN && op->wb_gen == 0x51u;
+        struct Loom *l = o ? loom_create(8, 16, false) : NULL;
+        int reg = -1;
+        if (l) {
+            rights_t rt = RIGHT_READ;
+            spoor_ref(o);                         // the table adopts this one
+            reg = loom_register_handles(l, &o, &rt, 1);
+            if (reg != 0) spoor_clunk(o);
+        }
+        s64 r1 = 1, r2 = 1;
+        if (reg == 0) {
+            dev9p_wb_test_loss_gen(&g_client, M23_PATH, other ? 0x52u : 0x51u, -T_E_IO);
+            r1 = d9_ring_fsync(l, 0);
+            r2 = d9_ring_fsync(l, 0);
+        }
+        if (l) loom_unref(l);
+        int oc = o ? d9_close(o) : -1;
+        m23_end(root);
+
+        TEST_ASSERT(o != NULL, "an open of the file through the walk that asks its generation");
+        TEST_ASSERT(named, "named by the walk's generation");
+        TEST_ASSERT(l != NULL, "loom_create");
+        TEST_EXPECT_EQ((u64)(s64)reg, 0ull, "registered with the ring");
+        if (other) {
+            TEST_EXPECT_EQ((u64)r1, 0ull, "a deleted file's loss at its number is not told to its ring FSYNC");
+        } else {
+            TEST_EXPECT_EQ((u64)r1, (u64)(s64)-T_E_IO, "CONTROL: its own file's loss is told");
+            TEST_EXPECT_EQ((u64)r2, 0ull, "CONTROL: once");
+        }
+        TEST_EXPECT_EQ((u64)(s64)oc, 0ull, "the open closes");
+    }
+}
+
 // Vote M28 through the syscall: a last close whose run the server refuses for space
 // returns ENOSPC or EDQUOT as it is, and the fd is closed either way. The control,
 // one variable away (the refusal's errno): any other refusal is EIO.
