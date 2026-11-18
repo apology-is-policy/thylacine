@@ -5807,6 +5807,10 @@ void test_dev9p_m26_holder_changes_pin(void) {
 void test_dev9p_m27_lost_run_reaches_the_next_fsync(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
+    // A session that stages names its opens (vote M33), and told-once is a named
+    // open's: an unnamed report marks nothing (m35_unnamed_report_marks_no_record_told).
+    g_client.loose = true;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
     dev9p_wb_test_loss(&g_client, 0x2000u, -T_E_IO);        // the oldest record
     struct Spoor *a = m23_peer(root, 0 /*OREAD*/);           // before the loss
     dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_INTR);
@@ -6329,6 +6333,8 @@ void test_dev9p_m27_navigation_handle_samples_at_its_walk(void) {
         bool attrs = i >= 2, told = (i & 1u) == 0;
         struct Spoor *root = make_open_client_and_root();
         TEST_ASSERT(root != NULL, "root");
+        g_client.loose = true;     // the peer is named, so its report marks the record told
+        __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
         dev9p_wb_test_loss(&g_client, M23_PATH, -T_E_IO);
         struct Spoor *a = told ? m23_peer(root, 0 /*OREAD*/) : NULL;
         int fa = a ? dev9p.fsync(a, 0) : 1;
@@ -10975,22 +10981,24 @@ void test_dev9p_s15_leg_resumes_after_a_closer(void) {
         bool closer = i == 0;
         struct Spoor *root = m31_root();
         TEST_ASSERT(root != NULL, "root");
+        // The reader opens before the closer's entry stands: the open's own leg
+        // would wait it out, on this thread, with nothing to end the wait.
+        g_ga_fail_ecode = T_E_IO;
+        struct Spoor *o = m23_peer(root, 0 /*OREAD*/);
+        g_ga_fail_ecode = 0;
         struct Spoor *older = m31_create(root, true, 0x52u);
         if (closer) dev9p_wb_test_job_gen(&g_client, M23_PATH, 0x53u, true);
         struct Spoor *newer = older ? m31_create(root, true, 0x51u) : NULL;
         struct dev9p_priv *op = older ? dev9p_priv_of(older) : NULL;
         struct dev9p_priv *np = newer ? dev9p_priv_of(newer) : NULL;
         bool both = op && np && op->wb_eligible && np->wb_eligible;
-        g_ga_fail_ecode = T_E_IO;
-        struct Spoor *o = both ? m23_peer(root, 0 /*OREAD*/) : NULL;
-        g_ga_fail_ecode = 0;
         wb_wire_reset();
         long wo = older ? dev9p.write(older, chunk, 256, 0) : -1;
         long wn = newer ? dev9p.write(newer, chunk + 256, 256, 0) : -1;
         g_m23_spoor = o;
         g_m23_rc    = -1;
-        bool started = o && test_dying_start(&g_m23_thread, m23_dying_read, NULL,
-                                             /*dead_now=*/false);
+        bool started = both && o && test_dying_start(&g_m23_thread, m23_dying_read, NULL,
+                                                     /*dead_now=*/false);
         bool early = false;
         u32 nleft_mid = 0xffffffffu, oleft_mid = 0xffffffffu;
         if (started && closer) {

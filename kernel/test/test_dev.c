@@ -361,8 +361,9 @@ void test_spoor_clunk_dispatches_close(void) {
 
 // A Dev close hook's error is close(2)'s EIO, at the LAST close only: while a
 // dup holds the Spoor a close returns 0 and runs no hook; the last close runs
-// it, returns -T_E_IO, and the fd is gone all the same. The control, one
-// variable away: a hook returning 0 makes the last close 0.
+// it, returns -T_E_IO (a space refusal as it is, vote M28), and the fd is gone
+// all the same. The control, one variable away: a hook returning 0 makes the
+// last close 0.
 static void close_leg(struct Proc *pr, int hook_rc, s64 want) {
     struct Spoor *c = spoor_alloc(&g_test_only_dev);
     TEST_ASSERT(c != NULL, "alloc on test-only dev succeeds");
@@ -387,8 +388,10 @@ void test_spoor_close_error_reaches_close_syscall(void) {
     register_test_only_dev_once();
     struct Proc *pr = proc_alloc();
     TEST_ASSERT(pr != NULL, "proc");
-    close_leg(pr, 0, 0);                    // control: a clean hook
-    close_leg(pr, -28, (s64)-T_E_IO);       // a failing hook (ENOSPC) -> EIO
+    close_leg(pr, 0, 0);                                // control: a clean hook
+    close_leg(pr, -T_E_ACCES, (s64)-T_E_IO);            // a failing hook -> EIO
+    close_leg(pr, -T_E_NOSPC, (s64)-T_E_NOSPC);         // space, as it is (M28)
+    close_leg(pr, -T_E_DQUOT, (s64)-T_E_DQUOT);
     pr->state = PROC_STATE_ZOMBIE;
     proc_free(pr);
 }

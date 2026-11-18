@@ -1665,6 +1665,9 @@ void test_9p_client_loom_fsync_read_only(void) {
     int n1 = loom_enter(l, 1, 1, 0);
     u64 tail1 = l->cq_tail, flight1 = l->async_inflight;
     s64 res1 = (s64)cqes[0].result;
+    // Reaped, as a ring's user does: else the next enter's min_complete is met
+    // by this CQE and it returns before its own op completes.
+    __atomic_store_n(&h->cq_head, 1u, __ATOMIC_RELEASE);
 
     sp->flag |= CWALKONLY;
     cl_stage_sqe(l, 1, LOOM_OP_FSYNC, 0, 0, 0xAAAA0002u);
@@ -1860,9 +1863,10 @@ void test_9p_client_loom_multishot_backpressure(void) {
 // op consumed while the chain is non-empty) is HELD until its ordering gates open.
 // These tests drive the full loom_enter path against the loopback 9P client:
 // FSYNC against a write handle is async (a Rfsync drives completion); FSYNC
-// against a read-only handle fails inline (-EACCES) -- the deterministic head-
-// failure for the cancel-cascade; NOP completes inline. CQ order (cq index +
-// user_data) witnesses the admission order.
+// against a handle with neither right fails inline (-EACCES; a read-only one
+// dispatches, vote M22) -- the deterministic head-failure for the cancel-cascade;
+// NOP completes inline. CQ order (cq index + user_data) witnesses the admission
+// order.
 // =============================================================================
 
 // Stage one SQE with explicit flags (LINK / DRAIN). Identity SQ-index indirection.
@@ -1880,7 +1884,7 @@ static void cl_stage_sqe_flags(struct Loom *l, u32 slot, u8 opcode, u8 flags,
 }
 
 // LINK cancel-cascade (LinkOrdered + EveryDoneOpPosted + NoOrphanCancel): a chain
-// [FSYNC(read-only, LINK)][NOP] -- the head fails inline (-EACCES), so the linked
+// [FSYNC(neither right, LINK)][NOP] -- the head fails inline (-EACCES), so the linked
 // NOP successor is CANCELLED with exactly ONE -ECANCELED CQE and is NEVER
 // dispatched. The cancel is not silently dropped (EveryDoneOpPosted).
 void test_9p_client_loom_link_cancel_cascade(void) {
@@ -1890,8 +1894,8 @@ void test_9p_client_loom_link_cancel_cascade(void) {
 
     struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
-    rights_t rt = RIGHT_READ;            // NO RIGHT_WRITE -> the head FSYNC fails inline
-    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
+    rights_t rt = RIGHT_TRANSFER;        // neither right -> the head FSYNC fails inline
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register a handle with neither right");
 
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -2689,6 +2693,9 @@ void test_9p_client_loom_readdir_names(void) {
     int n1 = loom_enter(l, 1, 1, 0);
     s64 r1 = (s64)cqes[0].result;
     bool copied1 = bkva[22] == 2 && bkva[24] == 'a' && bkva[25] == 'b';
+    // Each CQE reaped once read: an unreaped one meets the next enter's
+    // min_complete, and it returns before its own op completes.
+    __atomic_store_n(&h->cq_head, 1u, __ATOMIC_RELEASE);
 
     static const u8 bad[] = {'a','/','b'};
     g_lrd_name = bad; g_lrd_name_len = sizeof(bad);
@@ -2699,6 +2706,7 @@ void test_9p_client_loom_readdir_names(void) {
     bool untouched2 = true;
     for (int i = 128; i < 128 + 27; i++)
         if (bkva[i] != 0) { untouched2 = false; break; }
+    __atomic_store_n(&h->cq_head, 2u, __ATOMIC_RELEASE);
 
     g_lrd_name = good; g_lrd_name_len = sizeof(good);
     g_lrd_short = 1;
@@ -2710,6 +2718,7 @@ void test_9p_client_loom_readdir_names(void) {
     bool untouched3 = true;
     for (int i = 256; i < 256 + 26; i++)
         if (bkva[i] != 0) { untouched3 = false; break; }
+    __atomic_store_n(&h->cq_head, 3u, __ATOMIC_RELEASE);
 
     g_lrd_extra = 5;
     cl_stage_rw(l, 3, LOOM_OP_READDIR, 0, 0, 64, 0, /*buf_off=*/384, 0xD11D000000000004ULL);
