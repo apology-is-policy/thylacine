@@ -20,6 +20,7 @@ mirrors:
   - "tools/interactive/ls-ut-paste.exp"
   - "tools/interactive/ls-session-account.exp"
   - "tools/interactive/ls-halcyon-paste-flow.exp"
+  - "tools/interactive/ls-halcyon-paste-latency.exp"
   - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-display-follow.exp (EXTINCTION: only)"
   - "tools/interactive/ls-display-follow-declared.exp (EXTINCTION: only)"
@@ -139,7 +140,7 @@ literal-mentions:
   - "tools/interactive/go8d.exp (a prose note)"
   - "tools/check-console-lines.py (exempts the base line by its text; a reword only drops the exemption, and the check then fails)"
 created: 2026-08-01
-updated: 2026-11-13
+updated: 2026-11-17
 ---
 ## The surface
 
@@ -577,6 +578,11 @@ run. It is a new mirror of the unchanged prefix.
 ### Paste-flow consumer (November 4)
 
 The opt-in `ls-halcyon-paste-flow` scenario fails on `EXTINCTION:` at every step of its
+session. It is a new mirror of the unchanged prefix.
+
+### Paste-latency consumer (November 17)
+
+The opt-in `ls-halcyon-paste-latency` scenario fails on `EXTINCTION:` at every wait of its
 session. It is a new mirror of the unchanged prefix.
 
 ### Paste-key consumer (November 3)

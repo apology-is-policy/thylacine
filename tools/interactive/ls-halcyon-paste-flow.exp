@@ -24,7 +24,7 @@
 #   - Logout clears the value: neither another user's next session nor the same user's
 #     later one can read it. Session by session, since one seat holds one live session.
 #
-# Not here: rendering and input latency under a paste. A commit's unknown outcome is
+# Not here: rendering and input latency under a paste (ls-halcyon-paste-latency). A commit's unknown outcome is
 # ls-halcyon-clipboard-async's, and a stopped server's is ls-nora-stopped-copy's and
 # ls-ut-paste's, since the session's real service cannot be stopped.
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]

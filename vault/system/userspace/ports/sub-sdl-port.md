@@ -30,7 +30,7 @@ hazards: []
 abis: [abi-caps]
 design: ["docs/LLVM-DESIGN.md", "docs/GPU-DESIGN.md"]
 created: 2026-09-07
-updated: 2026-10-08
+updated: 2026-11-18
 ---
 ## Purpose
 
@@ -64,9 +64,9 @@ needs to place a hunk away from a file's end.
 **Window metadata.** `SetWindowTitle` copies SDL's UTF-8 title through the
 owning surface ctl into Halcyon's canonical pane tag. The C client bounds this
 to 250 bytes without splitting a codepoint and replaces control bytes with
-spaces. Window recreation restores the title and dynamic frame intent before
-new frames are published; otherwise a DOS mode change silently creates an
-untitled, throttle-eligible surface. The session DOSBox gate captures the
+spaces. Window recreation restores the title, the dynamic frame intent and the
+FRAME arm before new frames are published; otherwise a DOS mode change silently
+creates an untitled, throttle-eligible surface that paces on a timeout. The session DOSBox gate captures the
 native pane and zoom and requires keyboard exit back to the shell.
 
 **One window per process** (`:174-176`): the compositor session is
@@ -256,7 +256,10 @@ Input is a dedicated pthread (`THYLACINE_PumpMain`, `SDL_thylacineevents.c`, `:4
 that blocks on the tapestry event fid via `thyla_tap_read_events` and feeds a
 bounded mutex ring (`q[256]`, **drop-newest on full**). `THYLA_TEV_FRAME` never
 rides the ring — the pump consumes it, bumps `frame_seq`, and signals `frame_cv`
-(`:59-66`), which is the pacing wake. `PumpEvents` (`:294`, the vtable hook)
+(`:59-66`), which is the pacing wake. It arrives only because the window armed
+FRAME when it opened the surface (`thyla_tap_frame`, TAPESTRY 18.4: FRAME is
+opt-in); unarmed, `THYLACINE_PaceFrame` falls to its 50 ms timeout (~20 fps),
+which ls-gfx-quake's 40 fps floor reports. `PumpEvents` (`:294`, the vtable hook)
 drains up to 32 records under the lock on the **SDL main thread** and runs
 `THYLACINE_HandleEvent` for each: `TEV_KEY` → `linux_scancode_table` →
 `SDL_SendKeyboardKey` (+ `SDL_SendKeyboardText` for a printable rune),

@@ -100,7 +100,8 @@ or 150 ms after the first pass it held, and a timeout abandons the frame, so a
 program that never closes one costs the console a single 150 ms stall. A frame
 whose bytes take longer than the bound to arrive -- aurora drains at most 16 KiB a
 pass, and a pass rides the compositor's frame tick (60 Hz, or 15 Hz after a quiet
-second) -- is shown as it stands at the bound, as a tile's is. The VT
+second), which aurora arms on its surface (`frame on`, TAPESTRY 18.4) -- is shown
+as it stands at the bound, as a tile's is. The VT
 answers DECRQM for the mode (`CSI ? 2026 $ p`), so a program that asks before
 using it (neovim, notcurses) gets a true answer here as in a Halcyon tile.
 

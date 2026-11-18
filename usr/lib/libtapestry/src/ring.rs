@@ -31,6 +31,12 @@ pub(crate) struct Slot {
     /// surface's.
     pub(crate) gen: u32,
     pub(crate) pending: Vec<Event>,
+    /// The owner's last take found the queue empty, and nothing has been
+    /// routed here since.
+    pub(crate) drained: bool,
+    /// An event was routed here after the owner drained it, and no take has
+    /// run since: the owner's pass already passed this slot by.
+    pub(crate) late: bool,
 }
 
 pub(crate) fn new_slots() -> Vec<Slot> {
@@ -44,6 +50,8 @@ pub(crate) fn new_slots() -> Vec<Slot> {
             closed: false,
             gen: 0,
             pending: Vec::new(),
+            drained: false,
+            late: false,
         });
     }
     slots
@@ -66,6 +74,8 @@ pub(crate) fn join(slots: &mut [Slot], event_fd: i32) -> Result<u16, TapError> {
     s.closed = false;
     s.gen = s.gen.wrapping_add(1);
     s.pending.clear();
+    s.drained = false;
+    s.late = false;
     Ok(i as u16)
 }
 
@@ -79,6 +89,8 @@ pub(crate) fn leave(slots: &mut [Slot], slot: u16) -> bool {
     }
     let s = &mut slots[i];
     s.pending.clear();
+    s.drained = false;
+    s.late = false;
     if s.armed {
         s.retiring = true;
     } else {
@@ -171,6 +183,12 @@ pub(crate) fn route_completion<'a>(
         return false;
     }
     let mut off = 0;
+    if TEVENT_LEN <= end {
+        if s.drained {
+            s.late = true;
+        }
+        s.drained = false;
+    }
     while off + TEVENT_LEN <= end {
         let g32 = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
         let g64 = |o: usize| {
@@ -209,7 +227,30 @@ pub(crate) fn take_event(slots: &mut [Slot], slot: u16) -> Result<Option<Event>,
     if s.closed && s.pending.is_empty() {
         return Err(TapError::Closed);
     }
-    Ok(s.pending.pop_first())
+    let ev = s.pending.pop_first();
+    if ev.is_some() {
+        s.drained = false;
+        s.late = false;
+    } else {
+        s.drained = true;
+    }
+    Ok(ev)
+}
+
+/// Whether some live slot holds an event routed after its owner drained it
+/// (one surface's poll reaps the whole ring, so a later pump can file an
+/// event for a surface the pass already serviced, and the ring fd no longer
+/// shows it). Clears every mark: a slot whose owner ignores it costs one
+/// extra pass, never a spin -- routing into an undrained slot marks nothing.
+pub(crate) fn take_stranded(slots: &mut [Slot]) -> bool {
+    let mut any = false;
+    for s in slots.iter_mut() {
+        if s.late {
+            any |= s.used && !s.pending.is_empty();
+            s.late = false;
+        }
+    }
+    any
 }
 
 #[cfg(test)]
@@ -480,5 +521,86 @@ mod tests {
         });
         assert!(called); assert!(slots[a].armed); assert!(!slots[b].armed);
         route_completion(&mut slots,ud(a,1),-1,|_| panic!("error borrowed bytes"));
+    }
+
+    /// One surface's poll reaps the whole ring. An event filed for a surface
+    /// whose owner already drained it this pass is stranded (the ring fd no
+    /// longer shows it) and must be reported before the owner blocks.
+    #[test]
+    fn an_event_routed_into_a_drained_slot_is_stranded_until_taken() {
+        let mut s = new_slots();
+        let mut st = buf();
+        let a = join(&mut s, 10).unwrap() as usize;
+        let b = join(&mut s, 11).unwrap() as usize;
+        // b's owner drains it (empty); then a's poll reaps b's completion.
+        assert!(take_event(&mut s, b as u16).unwrap().is_none());
+        arm(&mut s, b);
+        let n = stage(&mut st, b, 1);
+        let t = ud(b, s[b].gen);
+        route(&mut s, &st, t, n);
+        assert!(take_stranded(&mut s), "filed after b's owner passed it by");
+        assert!(!take_stranded(&mut s), "reported once: the mark clears");
+        // The owner's next pass takes it; nothing is stranded.
+        assert!(take_event(&mut s, b as u16).unwrap().is_some());
+        assert!(!take_stranded(&mut s));
+        // Taken before the check: the mark is gone, no pass is owed.
+        assert!(take_event(&mut s, b as u16).unwrap().is_none());
+        arm(&mut s, b);
+        let t = ud(b, s[b].gen);
+        route(&mut s, &st, t, n);
+        assert!(take_event(&mut s, b as u16).unwrap().is_some());
+        assert!(!take_stranded(&mut s), "the owner took it in the same pass");
+        // Two filed late, the owner takes one and stops on purpose: a take
+        // ran since, so the owner is servicing the slot -- no pass is owed.
+        assert!(take_event(&mut s, b as u16).unwrap().is_none());
+        arm(&mut s, b);
+        let n2 = stage(&mut st, b, 2);
+        let t = ud(b, s[b].gen);
+        route(&mut s, &st, t, n2);
+        assert!(take_event(&mut s, b as u16).unwrap().is_some());
+        assert!(!take_stranded(&mut s), "a take since the route clears the mark");
+        let _ = a;
+    }
+
+    /// A slot its owner never drains (or has not reached yet) is never
+    /// reported, however much is routed into it: no spin on an ignored
+    /// surface. And a reported-but-ignored slot is reported only once.
+    #[test]
+    fn an_undrained_slot_is_never_stranded_and_an_ignored_one_only_once() {
+        let mut s = new_slots();
+        let mut st = buf();
+        let i = join(&mut s, 10).unwrap() as usize;
+        let n = stage(&mut st, i, 2);
+        for _ in 0..3 {
+            arm(&mut s, i);
+            let t = ud(i, s[i].gen);
+            route(&mut s, &st, t, n);
+            assert!(!take_stranded(&mut s), "never drained: nothing to strand");
+        }
+        // Drain fully, route once, then ignore it.
+        while take_event(&mut s, i as u16).unwrap().is_some() {}
+        arm(&mut s, i);
+        let t = ud(i, s[i].gen);
+        route(&mut s, &st, t, n);
+        assert!(take_stranded(&mut s));
+        arm(&mut s, i);
+        let t = ud(i, s[i].gen);
+        route(&mut s, &st, t, n);
+        assert!(!take_stranded(&mut s), "still unread: routing marks only a drained slot");
+        // An EOF or an error routes no event and strands nothing.
+        while take_event(&mut s, i as u16).unwrap().is_some() {}
+        arm(&mut s, i);
+        let t = ud(i, s[i].gen);
+        route(&mut s, &st, t, 0);
+        assert!(!take_stranded(&mut s));
+        // A slot that leaves takes its marks with it.
+        let j = join(&mut s, 12).unwrap() as usize;
+        assert!(take_event(&mut s, j as u16).unwrap().is_none());
+        arm(&mut s, j);
+        let nj = stage(&mut st, j, 1);
+        let t = ud(j, s[j].gen);
+        route(&mut s, &st, t, nj);
+        leave(&mut s, j as u16);
+        assert!(!take_stranded(&mut s), "a gone surface owes no pass");
     }
 }

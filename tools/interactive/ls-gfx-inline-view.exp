@@ -60,16 +60,6 @@ proc dump {out} {
     if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
     return ""
 }
-# Read the whole-session transcript (order-independent grep at a checkpoint;
-# the ls-halcyon idiom -- an inline expect for a say line races the login prompt
-# on the shared serial).
-proc tbody {} {
-    global transcript
-    log_file
-    set f [open $transcript r]; set body [read $f]; close $f
-    log_file -a $transcript
-    return $body
-}
 
 set transcript /tmp/ls-gfx-inline-view-[pid].log
 catch {file delete -force $transcript}
@@ -95,17 +85,14 @@ expect {
 
 lc_login michael correct-horse-battery-staple-v1
 
-# Console up + the place channel posted (from the transcript, order-independent).
-set W 0; set H 0; set posted 0
-for {set i 0} {$i < 16} {incr i} {
-    set body [tbody]
-    if {[regexp {halcyond: console up (\d+)x(\d+) px} $body -> W H]} {}
-    if {[string first "halcyond: /srv/halcyon posted" $body] >= 0} { set posted 1 }
-    if {$W > 0 && $posted} break
-    after 500
+# Console up + the place channel posted. Both lines race the login prompt on the shared
+# serial, so each is looked for in what lc_login read and only then waited for.
+set up [lc_logged $transcript {halcyond: console up (\d+)x(\d+) px} 8 "the console renderer's size line"]
+if {[llength $up] == 0} { lc_fail "no 'halcyond: console up' after login" }
+lassign $up _ W H
+if {[llength [lc_logged $transcript {halcyond: /srv/halcyon posted} 8 "the place channel's posting"]] == 0} {
+    lc_fail "halcyond never posted /srv/halcyon -- the I-47 channel is down (MAY_POST_SERVICE grant?)"
 }
-if {$W == 0} { lc_fail "no 'halcyond: console up' after login" }
-if {!$posted} { lc_fail "halcyond never posted /srv/halcyon -- the I-47 channel is down (MAY_POST_SERVICE grant?)" }
 lc_pass "inline: console up ${W}x${H} px; /srv/halcyon posted"
 
 # Baseline: non-ground pixels BEFORE the image. gfx_region counts pixels that
@@ -127,12 +114,9 @@ lc_step "inline: ground ($gr,$gg,$gb); baseline $off_pre/$tot_pre non-ground px"
 lc_run_expect_hardfail "view /test.png" "placed inline (640x400)" "not displayed"
 
 # The injection witness: the full pipeline (accumulate + validate + inject).
-set injected 0
-for {set i 0} {$i < 20} {incr i} {
-    if {[string first "halcyond: inline image placed (640x400" [tbody]] >= 0} { set injected 1; break }
-    after 300
+if {[llength [lc_logged $transcript {halcyond: inline image placed \(640x400} 6 "halcyond's injection line"]] == 0} {
+    lc_fail "halcyond never logged the 640x400 injection -- view reported success but the raster did not complete on the reader"
 }
-if {!$injected} { lc_fail "halcyond never logged the 640x400 injection -- view reported success but the raster did not complete on the reader" }
 lc_pass "inline: view placed + halcyond injected the 640x400 raster (I-47 pipeline end to end)"
 
 # The pixel proof: the decoded image added a large block to the screen.
@@ -152,21 +136,18 @@ lc_step "inline: witness image saved to build/ls-gfx-inline-view.png"
 
 # THE FIT. A picture three times the channel's largest limit shows reduced.
 lc_run_expect_hardfail "view /test-large.png" "reduced from 2048x1536)" "not displayed"
-if {![regexp {placed inline \(([0-9]+)x([0-9]+), reduced from 2048x1536\)} [tbody] -> fw fh]} {
-    lc_fail "view's reduced line did not parse from the transcript"
-}
+set fit [lc_logged $transcript {placed inline \(([0-9]+)x([0-9]+), reduced from 2048x1536\)} 5 "view's reduced line"]
+if {[llength $fit] == 0} { lc_fail "view's reduced line did not parse from the transcript" }
+lassign $fit _ fw fh
 if {$fw * $fh > 1048576 || $fw * $fh < 65536} {
     lc_fail "view reduced the card to ${fw}x${fh}, outside the channel's limits of 64 Ki to 1 Mi pixels"
 }
 if {abs($fw * 1536 - $fh * 2048) >= 2048} {
     lc_fail "view reduced the 4:3 card to ${fw}x${fh}, losing its aspect"
 }
-set injected 0
-for {set i 0} {$i < 20} {incr i} {
-    if {[string first "halcyond: inline image placed (${fw}x${fh}" [tbody]] >= 0} { set injected 1; break }
-    after 300
+if {[llength [lc_logged $transcript "halcyond: inline image placed \\(${fw}x${fh}" 6 "halcyond's injection line for the reduced picture"]] == 0} {
+    lc_fail "halcyond never logged the ${fw}x${fh} injection -- view reported the reduced picture placed but the raster did not complete on the reader"
 }
-if {!$injected} { lc_fail "halcyond never logged the ${fw}x${fh} injection -- view reported the reduced picture placed but the raster did not complete on the reader" }
 lc_pass "inline: a 2048x1536 picture was reduced to the channel's limit (${fw}x${fh}) and injected"
 
 # THE TEXT FALLBACK. The note is typed as two quoted words, so the line cat

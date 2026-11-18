@@ -253,12 +253,44 @@ The gate mechanism — **RESOLVED at cfg-3 (2026-07-23; ground-truth-driven)**:
   so gating costs nothing — and grandfathering an ungated global mutation
   would contradict the chunk's point. Supersedes the G-6d F3
   "same-session-trust" doc'd posture.
-- **The determinism verbs (`test-mode`/`tick`/`release`) stay OUTSIDE the
-  gate.** Their production posture is already the #880 cargo-feature strip
-  (E_OPNOTSUPP in a `--no-default-features` build); in test builds the whole
-  guest is a harness and the in-guest battery — a non-renderer client — must
-  keep driving them. `release` keeps its F2 per-surface ownership gate.
-  Global-ctl READS stay ungated (the geometry query every client boots on).
+- **The determinism verbs (`test-mode`/`tick`/`probe-screen`) are gated on
+  their own axis, in every image** (operator vote 136, 2026-11-17, #880;
+  supersedes "stay OUTSIDE the gate"). `test-mode on` freezes EVERY surface's
+  FRAME clock, and `probe-screen` reads a texel of the COMPOSED screen (a GPU
+  readback on a 3D screen) and says it on tapestryd's console, up to 64 per
+  tick -- a display stall, a console flood that costs a readback per line,
+  and screen content written into the console log. So a conn is admitted
+  only if its LIVE peer holds the console-RENDERER role, or its live peer's
+  session OWNS the console (`SRV_PEER_FLAG_CONSOLE_OWNER`, the "person at the
+  keyboard" axis NOCTURNE.md 6.8 already reads) AND its principal is a user
+  principal (never SYSTEM, NONE or INVALID). Who that admits depends on the
+  image. On the shell (`ut`) image login gives the user's shell console
+  ownership, so the in-guest battery run from it is admitted. On the Halcyon
+  session image no session owns the console during a graphical session (joey
+  relinquishes it at bringup and login grants it only to `ut`, never to
+  `halcyond --session`), so there the verbs are renderer-only; that fails
+  closed, and no gate drives them from a pane. A system service, another
+  session, a `none`-dropped process and a SYSTEM mounter's shared mount are
+  refused with E_PERM, per write (revocation-correct, like the renderer
+  axis); tapestryd says a refusal on the console only when the boot's
+  refusal count reaches a power of two, with the total (the connect-refused
+  rule), so no client can flood the console or silence it. A frozen clock
+  ends when the conn that last turned it on closes (every hold released), so
+  a battery that dies mid-test cannot leave the display frozen for whoever is
+  admitted next. The earlier exemption
+  leaned on a production strip no build performed; the strip is now real and
+  is the second layer: the `TEST_LEVERS=n` build config (the production
+  preset) builds tapestryd, halcyond and lictor without the `test-mode` cargo
+  feature, a determinism verb from an ADMITTED caller answers E_OPNOTSUPP (a
+  refused caller gets E_PERM first, in every build), and build.sh and
+  `tools/check-production.sh` prove the strip from the built binaries'
+  content (BUILD-CONFIG-DESIGN.md 4.2). The build shape is not hidden: the
+  global-ctl read reports `test-mode on|off` only when the feature is
+  compiled in, and an ungated `release` answers E_OPNOTSUPP in a stripped
+  build. `release` (the word alone or `release <surface>`, never a prefix)
+  stays outside the gate: its F2 ownership gate already limits it to the
+  caller's own surfaces. Global-ctl READS stay ungated (the geometry query
+  every client boots on).
 
 Because this touches the compositor's trust boundary, the gate lands with a
 **focused audit pass** (unlike the rest of the OSD, which is pure aux).

@@ -195,6 +195,10 @@ static int THYLACINE_CreateWindow(_THIS, SDL_Window *window)
      * this surface is visible. Best-effort: a failed declaration is non-fatal
      * (the surface still works, just throttle-eligible). */
     (void)thyla_tap_intent(&wd->tap, 1);
+    /* TAPESTRY 18.4: FRAME is opt-in and the present pacing waits on it, so
+     * arm the clock. Best-effort like the intent: a refused arm degrades the
+     * pacing to its 50 ms timeout (~20 fps), never hangs it. */
+    (void)thyla_tap_frame(&wd->tap, 1);
     window->driverdata = wd;
     vd->window = window;
     THYLACINE_SetWindowTitle(_this, window);
@@ -283,9 +287,11 @@ static void THYLACINE_SetWindowSize(_THIS, SDL_Window *window)
         }
     }
     if (ok) {
-        /* Reopening creates a new surface with default metadata. Restore both
-         * the app title and dynamic intent before publishing new frames. */
+        /* Reopening creates a new surface with default metadata. Restore the
+         * app title, the dynamic intent and the FRAME arm before publishing
+         * new frames. */
         (void)thyla_tap_intent(&wd->tap, 1);
+        (void)thyla_tap_frame(&wd->tap, 1);
         THYLACINE_SetWindowTitle(_this, window);
         wd->frame_seq = 0;
         wd->presented_seq = 0;
@@ -364,7 +370,8 @@ static int THYLACINE_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
  * starve PumpEvents and self-deadlock into timeout-only pacing). ONE
  * timed wait, 50 ms wall-clock bound (the G-5 F1 lesson: never a
  * wake-count bound): a degraded/frozen frame clock (clock-rate ctl,
- * test-mode) or a HIDDEN pane (visible-only FRAME emission) degrades to
+ * test-mode), a HIDDEN pane (visible-only FRAME emission) or an unarmed
+ * surface (FRAME is opt-in, TAPESTRY 18.4 -- a refused arm) degrades to
  * ~20 fps timeout pacing -- background throttling for free -- and
  * teardown (the pump exits after the retire, no further signals) is
  * bounded by the same 50 ms. A spurious wake presents one tick early:

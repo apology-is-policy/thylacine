@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-11-14
+updated: 2026-11-16
 ---
 ## Route to the console renderer's place channel
 
@@ -49,9 +49,12 @@ session's by `tools/interactive/ls-halcyon-session-route.exp`, on an image
 that runs both the console renderer and the session compositor, so that the
 name is posted while the pane asks: the scenario runs `stat` in a pane and
 reads the exit status off the Instrument bar's log line, and a posted
-resident route stats where the posted `/srv/halcyon` does not. On any other
-image it SKIPs and names its bake; docs/agent/GATES.md lists the images a
-whole-fleet run needs. This is a login-policy
+resident route stats where the posted `/srv/halcyon` does not. On a session
+image whose console is aurora's nobody posts the name and the scenario runs
+reduced: the failing stat shows only that the session's view does not route
+the name (a routed name stats while its service is offline), and the pass
+line says so. On any other image it SKIPs and names its bake;
+docs/agent/GATES.md lists the images a whole-fleet run needs. This is a login-policy
 update the operator ratified on November 13
 (docs/SRV-SESSION-REGISTRY-DESIGN.md, the November 12 paragraphs).
 

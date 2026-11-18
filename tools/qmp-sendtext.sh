@@ -11,6 +11,7 @@
 #
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] "whoami\n"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -k "meta_l+left"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -c "alt+p" "typed after the chord"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "abs 16000 16000"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "btn left down|up"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "wheel up|down"
@@ -24,6 +25,8 @@
 # reverse (the G-6c Super-chord leg; qcodes pass through verbatim, e.g.
 # meta_l, shift, left/right/up/down, letters). A trailing @MS holds the
 # chord down for MS milliseconds first: -k "ctrl+alt+f10@6500".
+# -c CHORD types TEXT after one chord in the SAME QMP session, so nothing but
+# the pacing lies between them (two processes put a start-up between them).
 # -p sends ONE pointer op to the virtio tablet (G-7c): `abs X Y` moves
 # (QEMU's absolute axis range is 0..32767, scaled by the guest to the
 # display), `btn left|right|middle down|up` clicks, `wheel up|down`
@@ -36,19 +39,23 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 sock="${THYLACINE_QMP_SOCK:-$REPO_ROOT/build/qmp.sock}"
 mode="text"
+prechord=""
 
-while getopts "s:kph" opt; do
+while getopts "s:kphc:" opt; do
     case "$opt" in
         s) sock="$OPTARG" ;;
+        c) [[ -n "$OPTARG" ]] || { echo "qmp-sendtext: -c needs a chord" >&2; exit 2; }
+           prechord="$OPTARG" ;;
         k) mode="chord" ;;
         p) mode="pointer" ;;
-        *) echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p] TEXT|CHORD|PTR" >&2; exit 2 ;;
+        *) echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p|-c CHORD] TEXT|CHORD|PTR" >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
-[[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p] TEXT|CHORD|PTR" >&2; exit 2; }
+[[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p|-c CHORD] TEXT|CHORD|PTR" >&2; exit 2; }
+[[ -z "$prechord" || "$mode" == text ]] || { echo "qmp-sendtext: -c goes with text only" >&2; exit 2; }
 
-exec python3 - "$sock" "$mode" "$1" <<'PYEOF'
+exec python3 - "$sock" "$mode" "$1" "$prechord" <<'PYEOF'
 import json, os, socket, sys, time
 
 sock_path, mode, text = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -129,6 +136,46 @@ def send_events(events):
     cmd("input-send-event", events=events)
 
 
+def chord(codes, hold_ms=0):
+    # Whatever went down comes up, even when a later qcode is refused. A
+    # release that fails fails the helper, unless an earlier failure is
+    # already on its way out; with no session (the reconnect after a hold
+    # failed) there is nothing to release on, so the held keys are named.
+    pressed = []
+    connected = True
+    failure = None
+    try:
+        for q in codes:
+            key(q, True)
+            pressed.append(q)
+            time.sleep(0.03)
+        if hold_ms:
+            s.close()
+            connected = False
+            time.sleep(hold_ms / 1000.0)
+            connect()
+            connected = True
+    except BaseException as e:
+        failure = e
+        raise
+    finally:
+        released = None
+        if not connected:
+            if pressed:
+                print("qmp-sendtext: no QMP session to release " + " ".join(pressed) + " on",
+                      file=sys.stderr)
+        else:
+            for q in reversed(pressed):
+                try:
+                    key(q, False)
+                except Exception as e:
+                    if released is None:
+                        released = e
+                time.sleep(0.03)
+        if released is not None and failure is None:
+            raise released
+
+
 connect()
 if mode == "pointer":
     parts = text.split()
@@ -203,20 +250,19 @@ if mode == "chord":
     if not codes:
         print("qmp-sendtext: empty chord", file=sys.stderr)
         sys.exit(1)
-    for q in codes:
-        key(q, True)
-        time.sleep(0.03)
-    if hold_ms:
-        s.close()
-        time.sleep(hold_ms / 1000.0)
-        connect()
-    for q in reversed(codes):
-        key(q, False)
-        time.sleep(0.03)
+    chord(codes, hold_ms)
     print(f"qmp-sendtext: chorded {text!r}")
     sys.exit(0)
 text = text.replace("\\n", "\n")
 PACE_S = int(os.environ.get("THYLACINE_QMP_PACE_MS", "30")) / 1000.0
+prechord = sys.argv[4] if len(sys.argv) > 4 else ""
+if prechord:
+    codes = [c for c in prechord.split("+") if c]
+    if not codes:
+        print("qmp-sendtext: empty chord", file=sys.stderr)
+        sys.exit(1)
+    chord(codes)
+    time.sleep(PACE_S)
 for ch in text:
     q = QCODE.get(ch)
     shifted = q is None and ch in SHIFTED

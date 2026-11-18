@@ -62,6 +62,9 @@ bc_def compile PRIVATE_ASYNC_QUAL bool n "var:private_async_qual" \
 bc_def compile READINESS_QUAL bool n "env:THYLACINE_READINESS_QUALIFICATION" \
   "Native readiness qualification probe (development only)" \
   "Builds kaua-term-probe with its readiness-qualification Cargo feature, the fixture tools/interactive/readiness-qualification.exp and service-readiness-failure.exp boot (run them with THYLACINE_READINESS_QUALIFICATION=1 as well). The feature turns on libthyla-rs's poll-worker-test hooks, and Cargo unifies that across the workspace, so every binary in the image carries them: NOT a release default and in no preset."
+bc_def compile TEST_LEVERS bool y "env:THYLACINE_TEST_LEVERS" \
+  "Display-stack test levers (test-mode)" \
+  "The test-mode Cargo feature of tapestryd (the determinism verbs and the probe-screen pixel oracle), halcyond (the #wedge verb rule) and lictor (the broker's test requests). On in every preset but production: the gate scenarios drive these levers. Off (production) builds those three crates without it; build.sh then checks each binary by content and fails the build if the strip did not take (BUILD-CONFIG-DESIGN.md 4.2, vote 136)."
 
 # bake-content ----------------------------------------------------------------
 bc_def bake CHUNK_GOROOT bool y "env:THYLACINE_BAKE_GOROOT" \

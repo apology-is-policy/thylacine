@@ -428,10 +428,28 @@ The client's rules, each from a rule above it:
   ring per paste, since a shell sits at its prompt for days and cannot pump while a
   foreground command runs, and an accepted line ends the fetch before it runs. A tab or control character also refuses whole: the line
   echoes as it is and counts one column per character. Written and host-tested, the
-  fixture half in `ls-ut-paste`, the real session's half in AS-4f; neither yet booted.
+  fixture half in `ls-ut-paste`, the real session's half in AS-4f. Both passed in the
+  whole-fleet run of 2026-11-13 at 7da0341f4, on main (work/nov03-mm1/fleet4).
 - AS-4f: the rest of AS-4's list, in a real session: paste after edit, tab, focus and
   session change; several sessions; logout. `ls-halcyon-paste-flow`, with Nora and ut
-  over their private rings and a blocking client as the other path. Written, not yet
-  booted. One seat holds one live session, since a second `session on` answers EBUSY,
+  over their private rings and a blocking client as the other path. It passed in the
+  same run (265 s, interaction-qualification image with private rings). One seat holds one live session, since a second `session on` answers EBUSY,
   so several sessions means one after another. The unknown commit is already in
-  `ls-halcyon-clipboard-async`. Rendering and input latency under a paste is still owed.
+  `ls-halcyon-clipboard-async`. Rendering and input latency under a paste are to be recorded,
+  not judged (HALCYON-INTERACTION 12), by `ls-halcyon-paste-latency`: halcyond's test builds
+  say one line per typing burst (the first output after a key, a lower bound under a backlog;
+  the settle from the last key to the present after the last output; each tile frame's render
+  and present; the loop's longest busy stretch) and, while idle, why the loop woke; the probe reads
+  dispatches of each process and thread the session user may read over a silent window. It runs
+  on the paste image and on a control image without the interaction work, for a before and an
+  after, and fails only on a record that is missing or does not add up. Its runs found an idle
+  halcyond dispatched about 100-125 times a second over its two threads in both images: the UI
+  thread on tapestryd's frame ticks, which it drops, and the service worker on its control
+  channel, which the session loop pokes on every pass (OPEN-BUGS 2026-11-17T11:10Z). Recorded on
+  e6e723cf9 (work/nov03-mm1/pl4, one run each): typing first output p50 2.4-3.5 ms in both images;
+  the 24,399-byte Nora paste p50 3.2 ms, settle 3.4 ms; the 4,000-byte ut paste p50 10.2 ms, settle
+  84.5 ms, frames up to 37.0 ms; idle halcyond 107-141 dispatches a second, the same in both
+  images (ASYNC-SERVICE-STATUS AS-4 has every number). The service worker's half is fixed
+  (76bd5710b: the owner is woken only when a completion slot was freed): idle halcyond 60-75
+  dispatches a second after it (q-ow1), the rest the frame ticks and the seat. Vote 144 made FRAME opt-in per surface (d3e786300): idle
+  halcyond about 20 dispatches a second (q-fo1: +195..+202 per 10 s), the caret blink, its presents and the seat.

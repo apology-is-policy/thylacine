@@ -62,6 +62,19 @@ If SO_SNDBUF cannot be set, we say so and carry on at the default capacity.
 This is a harness-robustness measure, not a correctness gate: degrading to the
 old behaviour is strictly better than refusing to boot the VM.
 
+THE PATH APPEARS ONLY ONCE THE SOCKET LISTENS
+---------------------------------------------
+Waiters poll for the path and connect the moment it exists: lib.exp before it
+starts the relay, the preflight's capacity arm. A socket bound at the path and
+listened a moment later leaves a window in which that connect is REFUSED --
+and the relay reports a refused connect as `connect-refused`, the signature of
+a qemu that died at startup (one preflight died of it, 2026-11-17). So the
+socket is bound under a private name, listened, and only then renamed onto the
+path; the rename keeps the socket's vnode, so a connect by the published path
+reaches this listener. `--hold-before-listen` widens the bind-to-listen
+window on purpose: the preflight's control, which shows a connect at first
+sight succeeds however long that window lasts.
+
 USAGE
     serial-listen.py --sock PATH [--sndbuf N] [--fd N] -- CMD [ARGS...]
 `{SERIALFD}` in any argument is replaced by the listening fd number.
@@ -70,6 +83,7 @@ import argparse
 import os
 import socket
 import sys
+import time
 
 # macOS clamps SO_SNDBUF at 8 MiB; asking for more just gets 8 MiB. Linux
 # instead caps at net.core.wmem_max (commonly ~208 KiB) -- still ~26x the
@@ -92,6 +106,8 @@ def main() -> None:
     ap.add_argument("--sock", required=True, help="AF_UNIX path to bind")
     ap.add_argument("--sndbuf", type=int, default=DEFAULT_SNDBUF)
     ap.add_argument("--fd", type=int, default=DEFAULT_FD)
+    ap.add_argument("--hold-before-listen", type=float, default=0.0,
+                    help="seconds between bind and listen (the preflight's control)")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     args = ap.parse_args()
 
@@ -120,8 +136,21 @@ def main() -> None:
              f"continuing at the default capacity -- a host-side console "
              f"stall can still suspend the guest (#125)")
 
-    s.bind(args.sock)
+    # Published only once listening: see "THE PATH APPEARS ONLY ONCE THE
+    # SOCKET LISTENS" above.
+    private = f"{args.sock}.{os.getpid()}.bind"
+    if len(private.encode()) > 103:
+        sys.exit(f"serial-listen.py: {private} is past the 103-byte AF_UNIX "
+                 f"path limit; pass a shorter --sock")
+    try:
+        os.unlink(private)
+    except FileNotFoundError:
+        pass
+    s.bind(private)
+    if args.hold_before_listen > 0:
+        time.sleep(args.hold_before_listen)
     s.listen(1)
+    os.rename(private, args.sock)
 
     # dup2 onto a known fd. Guard first: silently closing whatever lives there
     # would be a hard bug to trace back to here.

@@ -1391,9 +1391,16 @@ DEADLINE arm judges both.
 Open after that review:
 
 - `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
-  every image carries the levers (the #880 strip-for-production class). Of the
+  every image but production carries the levers; the production build
+  (`TEST_LEVERS=n`, vote 136) compiles them out, and build.sh fails it if
+  `lictor: test levers compiled in` -- which a test-mode Lictor says after
+  `broker posted` -- is still in the binary. The lictor LIBRARY that corvus
+  and caps-probe link is covered too: under `n` the workspace build leaves the
+  lever crates out, and build.sh fails unless Cargo's resolver reports
+  `test-mode` on for no crate ([[sub-substrate-build]]). Of the
   armings a compositor can send, `TestArmLatch`, `TestArmChained` and
-  `TestArmRestore` need their word on the kernel's command line, read by Lictor. `ArmScanoutDisableRefusal`,
+  `TestArmRestore` need their word on the kernel's command line, read by Lictor.
+  `ArmScanoutDisableRefusal`,
   the compositor's self-test lever, is in every build and needs none; it is
   scoped instead: only a client's own disable spends it
   (`Gpu::set_scanout_client`), never a bind the broker issues for itself, so it

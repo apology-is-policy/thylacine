@@ -50,6 +50,8 @@ code:
   - usr/halcyond/src/inlineaccum.rs
   - usr/halcyond/Cargo.toml
   - usr/halcyond/src/viewtest.rs
+  - usr/halcyond/src/latency.rs
+  - tools/interactive/ls-halcyon-paste-latency.exp
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -58,8 +60,25 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-11-13
+updated: 2026-11-18
 ---
+## No tick re-runs a pass: the pre-block check (November 18, vote 144, round 48)
+
+FRAME is opt-in (TAPESTRY 18.4) and halcyond arms none, so nothing wakes it
+15-60 times a second any more. Two things that tick had been covering for
+now get a pass of their own, in both loops, just before the unified poll
+blocks. (1) A stranded event: every surface's `poll_event` pumps the one
+shared ring, so a later pump in the pass (the chrome, the bar, the rail, or
+the console poll at the top of the console loop) can file an event for a
+surface the pass already drained, and the ring fd no longer shows it --
+`EventRing::take_stranded` ([[sub-libtapestry]]) reports it. (2) An owed
+notice: a rail action or a menu choice can `notify` after the bar's
+`refresh` ran; `StatusBar::notice_owed` compares a sequence `notify` bumps
+with the value `refresh` last saw. The session loop `continue`s; the console
+loop polls with timeout 0. Both are gated on the bar being announced (before
+that `refresh` never runs, and the check would spin), and both clear on the
+pass they cause, so neither can spin. Found by round 48 (F1 P2, F2 P3).
+
 ## Modal status presentation
 
 `modeview` supplies five labels and opaque Nora-compatible palette roles for
@@ -191,7 +210,9 @@ retires scopes even when a later join carries the same generation.
 
 While the seat is away from normal the compositor answers nothing, so neither kind of
 deadline below runs out against it. `Interaction::age` gives an unreported flight its
-full time back while the Link reads the seat parked, and `paneplace`'s bring-up loop
+full time back while the Link reads the seat parked and once more at the first pass
+that reads it not parked, however long after the last parked pass that comes (the
+owner runs on the seat's replies, never on a clock of the seat's), and `paneplace`'s bring-up loop
 refreshes its 4 s and tells the thread waiting in `ServiceWorker::new` that it is
 alive. Both stop at `seat_control::PARKED_CEILING_MS`, so a session that cannot start
 still reaches login's console fallback. A stopping owner's flight keeps aging. No
@@ -479,10 +500,106 @@ LIB is pure logic over injected bytes -- zero syscalls, host-tested
 (`cargo test -p halcyond --lib --no-default-features`); the BIN
 (`required-features = ["guest"]`) owns the syscalls, the Surface, and the event
 loop. The `test-mode` feature (default on) gates the renderer's test levers
-(the `#wedge` internal verb -- THE GATE's wedged-owner proof). Each bin module
+(the `#wedge` internal verb -- THE GATE's wedged-owner proof). The production
+build (`TEST_LEVERS=n`, vote 136) compiles it out; a test-mode halcyond says
+`halcyond: test levers compiled in` at startup, ahead of the session branch so
+both renderer paths say it, and build.sh's verdict keys on that text in the
+binary ([[sub-substrate-build]]). Each bin module
 (`chromeset` / `menuset` / `statusset` / `session` / `main`) is the syscalling
 twin of a lib module and nothing else (the H-3b-4 split: both halves in the lib
 broke the host-test build).
+
+### The latency record (test builds)
+
+`test-mode` also feeds `latency.rs` (lib; compiled only for host tests and
+test-mode builds, `#[cfg(any(test, feature = "test-mode"))]`; host-tested with
+its own mutants) from the session loop, so a test build records rendering and
+input latency instead of a still image being called smooth (HALCYON-INTERACTION
+12; AS-4f). A BURST opens at the first key a tile's input queue accepts
+(`queue_key` returns whether it took the key; a refused key counts `dropped`; the
+menu's command text is not a key) and nothing else opens one, so the record adds
+no wake to an idle session. The burst ends once no key or answer has come for
+600 ms AND no tile that took one of its keys (`lat_took`) has presented new
+program output for 2 s, with no first unanswered key still owed and no taken key
+still in halcyond's down queue; 5 s after the last of those events whatever is
+owed or queued; or 30 s after it opened (`cut=1`, only when it had not already
+quieted). Per tile the first unanswered key is stamped (the record counts open
+stamps itself, so a tile that leaves mid-burst still counts as owed); the
+program's next output (`Ingested::Live`) marks it echoed and the tile's next
+successful present answers it: `first-output`, from the key entering the queue to
+that present. That output may answer an OLDER key, so under a backlog
+first-output is a lower bound, not input latency. `settle` is the burst's last key
+to the present after the last program output on a tile that took its keys: when
+the screen caught up with everything typed, backlog included, as long as the
+program never paused longer than 2 s mid-backlog -- a longer pause ends the burst,
+later output is outside the record, and settle is then a lower bound. Output on a
+tile that took no key neither extends a burst nor counts. Every tile render +
+present while a burst is open is a frame sample (chrome, status and rail presents
+are not); busy is the wait's return to the next wait; wakes count the wait's
+returns. `owed-tiles` counts open stamps and `queued-tiles` the tiles still
+holding a taken key; a key riding behind an answered one is not checked one by
+one. The line:
+`halcyond: latency: keys= dropped= answered= owed-tiles= queued-tiles= first-output-us p50= p99= max= settle-us= frames= frame-us p50= p99= max= busy-max-us= wakes= span-ms= cut= over=`.
+While a burst is open its end is folded into the loop's wait, the only change the
+record makes to the loop. The segment measured starts when halcyond queues the
+key: tapestryd's routing from the device is outside it, and an event can sit
+unread across the tail of one busy stretch and the head of the next (at most
+twice busy-max). A device-side stamp would need a timestamp in the tevent, whose
+`tick` is the display clock on a version-pinned wire (TAPESTRY 18.4).
+
+Two wake tallies say why halcyond's threads woke, counting only wakes that came
+anyway (neither adds a deadline). The session loop's (`IdleTally`, the UI thread,
+while no burst is open): iterations, how long each wait was armed for (`long` 1 s
+or more or unbounded -- the minute clock is always folded in, so a wait is never
+unbounded today -- `short` under 50 ms), poll returns by cause (timeout, the ring,
+an up-pipe, anything else), `bare` ring wakes after which no tile event was drained
+(the chrome, status and rail surfaces share the ring and are not counted by kind),
+the tile surface events drained (`events`, `kinds` naming the first four with
+counts) and tile presents: `halcyond: idle wakes: polls= ms= ... said=`, said after
+1000 polls (`said=polls`), at the first poll 5 s into a stretch (`said=time`), and
+when a burst ends the stretch (`said=burst`, said after that burst's own line, so its
+console write is not inside the burst it describes). The
+service worker's (`OwnerTally`, the place service's owner thread in
+`paneplace.rs`, always): waits armed zero (something runnable) / short / long,
+timeouts, and which entries were ready (control, seat, admission, listener, a
+connection): `halcyond: owner wakes: polls= ms= ...`, on the same cadence. The
+other idle half is outside halcyond: `kaua-term-probe --paste-latency wakes` reads
+`/proc/<pid>/sched` in one read (the kernel renders it afresh per read and commits
+whole rows only, so the probe drops a file whose rows do not match its `threads:`
+count, and a pid whose `name:` changed) around a silent window and says each
+process's and each waking thread's dispatches -- only for processes the session
+user may read (owner or CAP_HOSTOWNER: halcyond and the panes' programs, not
+tapestryd or the system services, which it counts as `skipped`).
+`ls-halcyon-paste-latency` runs both on the paste image and on a control image
+without the interaction work (checked against halcyond's own interaction line),
+says every number as an `LS-CI RECORD:` line in the transcript (lc_step reaches
+only the steps file), gives every wait one deadline fixed when it starts, and
+fails only on a record that is missing or does not add up. A command typed just
+before a judged burst has its own burst line seen through first, so the two cannot
+merge (they did under a 150 ms per-key stall: one 114-key burst). Its ut paste checks the
+content end to end: the probe's `mark` line is typed first, the 4,000-capital
+paste and forty keys follow in one burst, and Enter runs `mark`, which requires
+every typed key in order plus the whole paste and says after how many keys the
+paste landed. Its runs (2026-11-17: 8fe41cb57, 6a2dda6d6, 550564b07, e6e723cf9)
+measured typing at a first output p50 of 2.4-3.5 ms in both images, 10.2 ms under the
+4,000-byte ut paste (settle 84.5 ms), and an idle halcyond at 88-141 dispatches a
+second over its two threads in both images: the
+UI thread ~70 polls a second, ~60 of them a TEV_FRAME on a tile surface that it
+drops (tapestryd ticks every visible surface, at 15 Hz once the console is
+quiet), and the service worker ~46-57 a second, nearly all on its control channel
+plus the seat at ~8 a second (owner tallies, 550564b07; OPEN-BUGS
+2026-11-17T11:10Z). The control wakes were `take_completed`'s: the session loop
+calls it on every pass, and it woke the owner every time. It now wakes the owner
+only when it freed a completion slot (a dropped stale-route image frees one too),
+the one mailbox change it makes that the owner's admission reads; every other
+mailbox write already wakes the owner itself (routes, hosts, a changed budget).
+Measured after the change (q-ow1 on 8352efe6f): the owner's control wakes fell
+from 88-90% of its polls to 0-1%, and an idle halcyond from ~110-140 to 60-75
+dispatches a second; what remains is the UI thread's frame ticks and the seat's
+~8 a second. A typing outlier first seen after it does not follow it: ten
+interleaved rounds against its base (q-ow3) had typing samples past 15 ms in 0 of
+10 runs with it and 1 of 10 without, and the slow frames on both sides were slow
+presents -- time inside the synchronous write to tapestryd, not halcyond's.
 
 ### The console data flow
 

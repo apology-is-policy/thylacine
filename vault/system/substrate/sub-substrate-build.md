@@ -107,6 +107,57 @@ release default, and `build.sh` builds that kernel into
 ([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
 the export.
 
+The compile-group `TEST_LEVERS` bool (operator vote 136, #880), default on and
+off only in `configs/production.config`, has the environment shim
+`THYLACINE_TEST_LEVERS`. The display stack's test levers live behind the
+`test-mode` cargo feature of tapestryd, halcyond and lictor
+(`TEST_LEVER_BINS`), and that feature is a default one. With `TEST_LEVERS=n`
+the workspace `cargo build` leaves the three out (`--workspace --exclude
+tapestryd --exclude halcyond --exclude lictor`, derived from
+`TEST_LEVER_BINS`), and one more invocation builds them, `-p tapestryd -p
+halcyond -p lictor --no-default-features --features
+tapestryd/guest,halcyond/guest,lictor/backend` (plus
+`halcyond/interaction-qualification` when that is on; it moves out of the
+workspace invocation, where halcyond is no longer selected). Leaving them out
+of the workspace build is what keeps corvus and caps-probe clean: Cargo's
+resolver 2 unifies a shared dependency's features across one invocation, so
+building lictor, or tapestryd (whose `test-mode` turns lictor's on), with its
+defaults would link a test-mode lictor library into both, and no by-content
+check of their binaries could see it. So before building, `test_mode_packages`
+asks Cargo's own resolver (`cargo tree -e normal,build -f '{p}|{f}'` over each
+invocation's exact selection and features) which crates get `test-mode`: none
+in either invocation under `n`, and each lever crate in the default build
+under `y`, plus lictor again with lictor left out of the selection -- the
+positive controls: the first shows the check can fire, the second that it
+sees a `test-mode` reaching a crate only through another crate's features
+(tapestryd's turns lictor's on), which is the path to corvus and caps-probe.
+The parse strips the ` (*)` cargo appends to a repeated package's line before
+reading its features.
+`READINESS_QUAL=y` is refused with `TEST_LEVERS=n`, because the readiness
+probe puts libthyla-rs's test hooks in every binary. Then, in every build, a
+verdict by content (`test_levers_verdict`): each lever crate says `test levers
+compiled in` at startup from code under the feature, so build.sh greps the
+three binaries for that text and fails a stripped build that still carries
+it, and a default build that lacks it, because a missing marker would make
+the stripped build's absence prove nothing. It runs twice: on the binaries
+just built (each must exist), and in `build_ramfs` on the binaries actually
+staged (a missing one is skipped), so `build.sh ramfs` after a build of
+another config, or a host that skipped the Rust step, cannot stage an earlier
+build's levers into a `TEST_LEVERS=n` image. The ledger records which held,
+and `check-production.sh --all` fails unless the production build's ledger
+says `test levers: STRIPPED`, so a build that skipped the Rust step cannot
+pass having checked nothing. `test-build-config.sh` pins that only production
+sets n and that both values export. The Rust step is its own function,
+`build_userspace_rust`, called plainly so `set -e` still applies, and every
+cargo call in it also returns explicitly on failure. `tools/test-test-levers.py`
+(a host checker) drives it against a stub cargo that records each invocation
+and models resolver 2 for the lever crates: the exact build commands under y
+and n, the interaction-qualification placement, the readiness refusal before
+any cargo call, both controls, the content verdict both ways, the staged
+verdict's place in `build_ramfs`, and the resolver check against the REAL
+cargo on the real workspace. Its `--mutants` pass removes each check in turn
+and requires the matching case to go red.
+
 The compile-group `READINESS_QUAL` bool, default off and in no preset, has the
 environment shim `THYLACINE_READINESS_QUALIFICATION`; the Rust build maps it to
 `kaua-term-probe/readiness-qualification` and logs it. The feature turns on

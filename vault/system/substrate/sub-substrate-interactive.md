@@ -61,7 +61,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-11-12
+updated: 2026-11-16
 ---
 ## Purpose
 
@@ -258,6 +258,19 @@ unrun they rot — "the exit-record check exists precisely because
 `stdout-broken` was read as a diagnosis for three sessions of #78." It
 hard-fails; a broken relay would otherwise surface as a mysterious guest
 failure in every scenario.
+
+**The listener's path appears only once it listens.** Waiters poll for the
+path and connect the moment it exists — `lib.exp` before it starts the relay,
+the preflight's capacity arm — so a listener bound at the path and listened a
+moment later left a window in which that connect was refused, and the relay
+reports a refused connect as `connect-refused`, the signature of a qemu that
+died at startup. One preflight died of it (2026-11-17: `ConnectionRefusedError`
+in the capacity arm's 8 KiB leg). The wrapper now binds under a private name,
+listens, and only then renames onto the path; the rename keeps the socket, so a
+connect by the published path reaches the listener. The preflight's fifth arm
+holds bind and listen 0.5 s apart and demands that a connect at first sight
+succeed, and that first sight come after the hold: the old order is refused
+every time (shown both ways when the arm landed).
 
 **Evidence before the kill, and the `ps` state is the discriminator.**
 `lc_fail` records `vm-at-fail: pid N stat=<S>` *before* killing anything.
@@ -614,8 +627,10 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
      every image, until a halcyond pushes the bundle. One image therefore does
      not run the fleet: docs/agent/GATES.md lists the lever sets a whole-fleet
-     run bakes, and `ls-halcyon-session-route` runs on one of them only, the
-     image with both the console renderer and the session compositor.
+     run bakes, and `ls-halcyon-session-route` runs whole on one of them only,
+     the image with both the console renderer and the session compositor; on a
+     session image whose console is aurora's it runs reduced, and its pass line
+     says so.
 - **Two more (2026-11-12, the whole-fleet run before the async landing).**
 
   6. **A catch-all failure arm ends on the line's terminator.** An expect that
@@ -658,6 +673,23 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      line; `pts-probe` already did the same for a line joey prints late. Of
      the 121 scenarios that boot, no other has its first wait under the
      command budget.
+  9. **A transcript is looked at once and then waited on, never polled
+     between sleeps.** expect reads the serial only inside a wait, and
+     `log_file` holds only what a wait has read, so a loop that re-reads
+     the transcript file around `after` sees the same bytes every time: it
+     succeeds on its first look or never. `ls-gfx-jpeg`,
+     `ls-gfx-inline-view` and `ls-gfx-age` polled that way for a line that
+     can come after the scenario first looks (halcyond's posting and
+     injection lines, aurora's bring-up line). Their gates passed only
+     because each awaited line happened to be read before the loop started.
+     A scripted serial that prints the line 2.5 s late showed each old form
+     red and the new one green (work/nov03-mm1/fake-gfxpoll, 2026-11-12 and
+     2026-11-16). `lc_logged path re seconds what` (lib.exp) looks in what
+     has been read and otherwise waits for the line with an expect arm. An
+     extinction or EOF in that wait is its own failure. It returns the
+     `regexp -inline` list, or an empty list on a timeout. The four scenarios
+     use it, `ls-halcyon-session-route` included, which already waited after
+     its one look.
 - `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
   halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
   showed as a 60 s timeout that blamed the routing. It matches the refusal line
@@ -670,6 +702,43 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
 the fail-probe (the burned-retry decider), the #230 second-monitor per-slot
 isolation, and the #224 refinement of the in-tree refusal.
 
+
+## The compositor's console-owner gate witness
+
+`ls-gfx-panes` asserts tapestryd's determinism gate (operator vote 136, #880;
+[[sub-tapestryd]]) just before the battery's PASS line. The battery spawns
+itself as `tapestry-battery --not-console-owner`, because a process-group
+leader cannot `setsid` and the battery is one under ut's job control. The child
+probes the screen while it is still in the console-owning session it inherited,
+then calls `setsid` and writes the probe, `test-mode on` and `tick` again on the
+same conn. The probe must be admitted the first time and all three refused the
+second, and the ctl read must still say `test-mode off`. `tick` separates the
+gates: admitted with the mode off it answers E_INVAL, refused it answers E_PERM.
+The scenario waits for two lines from two processes: tapestryd's refusal line,
+which shows which gate fired, and the child's verdict line. They can arrive in
+either order, so one regex alternation collects both, because two separate
+arms could consume one of them unseen. Every alternative ends on fixed text or
+a line end: an open `[^\r\n]*` matches the moment its prefix arrives and keeps
+only the bytes then in the buffer, so the first version of the FAIL arm
+reported "tapestry-battery: FAIL co" (round 43 F1). The loop collects every
+refusal line's count until the verdict, and requires exactly 1, 2, 4, 8 (the
+child's refusals are the boot's first eight, and tapestryd says only those at a
+power-of-two count); it has an `eof` arm. Simulated with lines split across
+writes (work/nov03-mm1/sim43): the old FAIL arm lost the reason, the new one
+keeps it. The arm classifies each match on
+`expect_out(0,string)`, the whole match, never on a numbered group: expect 5.45
+leaves a group that took no part in a match at its previous value, so a test
+such as `expect_out(1,string) ne ""` stays true after any earlier regex set
+group 1, and the first version of this leg could therefore never see its
+verdict line (round 42, F1). That simulation fed each line in one write, so it
+could not see the open FAIL arm above; the real run (TM1, q-tm1) did.
+
+After `hold OK` the battery checks that determinism mode ends with the conn
+that turned it on: a second `/srv/tapestry` conn writes `test-mode on`, the ctl
+read must say so, the conn closes, and within 3 s the ctl read must say
+`test-mode off`. The scenario waits for `battery: test-mode ends with the conn
+that turned it on`; a battery FAIL in that window fails it with the guest's
+reason.
 
 ## Session media and backend verification
 

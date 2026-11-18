@@ -37,12 +37,20 @@
 #   hold       : TPRESENT_HOLD + release (G-6c) -- B stays blue on
 #                screen with magenta already presented; release flips
 #                it (two dumps bracket the release);
+#   tm-owner   : determinism mode ends with the conn that last turned it
+#                on (#880) -- a second conn freezes the clock and closes,
+#                and the ctl must read `test-mode off` within 3 s;
 #   close      : a compositor-initiated pane close delivers TEV_CLOSE
 #                (G-6b); the surface retires only when the client drops.
 #   singleslot : the #56 latch's real discriminator (the fullscreen-zoom
 #                bug): a SINGLE-SLOT partial presenter zooms letterboxed 2x
 #                (placement line + three pixels); the rotating control
 #                still latches at its second slot;
+#   gate       : the determinism verbs' console-owner gate (vote 136,
+#                #880) -- the battery's child leaves the console session
+#                and its determinism writes are refused, `released` meets
+#                the renderer gate, and tapestryd says the refusals only at
+#                a power-of-two count;
 # The coda proves teardown: the battery exits, its panes collapse, the
 # console returns to fullscreen direct scanout, and the -c console verify
 # passes again.
@@ -507,6 +515,27 @@ expect {
     timeout { lc_fail "battery never completed test-mode" }
 }
 
+# FRAME opt-in (TAPESTRY 18.4), still under the frozen clock. Each half ends
+# on a key typed here (a KEY never coalesces, so it queues behind every FRAME
+# the half's ticks gave A): disarmed -- with the armed tick's FRAME queued when
+# `frame off` lands -- A's stream up to the key holds no FRAME; re-armed, the
+# same read holds exactly the next tick; `frame maybe` is refused.
+foreach {half key} {off f on g} {
+    expect {
+        -ex "battery: frame-$half ready" {}
+        -ex "tapestry-battery: FAIL" { lc_fail_detail "the FRAME opt-in leg failed before frame-$half" }
+        timeout { lc_fail "battery never reached frame-$half ready" }
+    }
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $key} err]} {
+        lc_fail "qmp-sendtext (frame-$half) failed: $err"
+    }
+}
+expect {
+    -ex "battery: frame opt-in OK" { lc_pass "panes: FRAME reaches a surface only while armed; frame off drops the queued tick" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the FRAME opt-in leg failed" }
+    timeout { lc_fail "battery never completed the FRAME opt-in leg (a sentinel key that never reached A hangs it here)" }
+}
+
 # The cfg-3 apply-authority gate leg: the battery (NOT the console
 # renderer) must be REFUSED the authority verbs (mode, clock-rate) on the
 # very conn whose ctl read + determinism verbs just worked above.
@@ -541,6 +570,11 @@ expect {
     -ex "battery: hold OK" { lc_pass "panes: release composed the held present (B magenta)" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the hold coda failed" }
     timeout { lc_fail "battery never finished the hold leg" }
+}
+expect {
+    -ex "battery: test-mode ends with the conn that turned it on" { lc_pass "panes: determinism mode ends with the conn that turned it on" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the test-mode owner leg failed" }
+    timeout { lc_fail "battery never finished the test-mode owner leg" }
 }
 
 # Scenario 3 (G-6b): a compositor-initiated pane close delivers the
@@ -703,6 +737,40 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the workspace return/vanish leg failed" }
     timeout { lc_fail "the workspace return never reported" }
 }
+# Vote 136 (#880): the determinism gate's negative leg. The battery's child
+# leaves the console-owning session (setsid) and its probe-screen, test-mode on
+# and tick are refused, then tick on five fresh conns: this boot's first eight
+# refusals, of which tapestryd says only those at a power-of-two count, with the
+# total -- so the lines must carry 1, 2, 4 and 8. Two processes print here --
+# tapestryd's refusal lines name WHICH gate fired, the child's line is the
+# verdict -- so ONE regex alternation collects them (two arms could consume a
+# line unseen). Each alternative ends on fixed text or a line end: an open
+# `[^\r\n]*` would match the moment its prefix arrived and keep only the bytes
+# then in the buffer.
+set gate_counts {}
+set gate_ok 0
+while {!($gate_ok && [llength $gate_counts] >= 4)} {
+    expect {
+        -re {tapestryd: determinism verb refused: conn [0-9]+ \(principal [0-9]+\) is neither the console renderer nor the console owner \([0-9]+ refused so far\)|battery: console-owner gate OK|tapestry-battery: FAIL[^\r\n]*[\r\n]} {
+            # Classified on the WHOLE match: expect leaves a numbered group
+            # that took no part in this match at its previous value.
+            set m [string trim $expect_out(0,string)]
+            if {[regexp {^tapestryd: determinism verb refused:.*\(([0-9]+) refused so far\)$} $m -> k]} {
+                lappend gate_counts $k
+            } elseif {$m eq "battery: console-owner gate OK"} {
+                set gate_ok 1
+            } else {
+                lc_fail "the console-owner gate leg failed: $m"
+            }
+        }
+        timeout { lc_fail "the console-owner gate leg never reported (refusal counts said: '$gate_counts', verdict $gate_ok)" }
+        eof     { lc_fail "qemu exited during the console-owner gate leg (refusal counts said: '$gate_counts', verdict $gate_ok)" }
+    }
+}
+if {$gate_counts ne {1 2 4 8}} {
+    lc_fail "tapestryd said the refusals numbered '$gate_counts', want '1 2 4 8' (only at a power-of-two count; the child's are this boot's first)"
+}
+lc_pass "panes: the determinism verbs are refused outside the console-owning session (vote 136)"
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the declare control" }
@@ -733,5 +801,5 @@ lc_pass "panes: winsize restored fullscreen after the battery (#55 live across r
 scale_legs $boot_scale
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + singleslot + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + test-mode owner + close + singleslot + console-owner gate + collapse)"
 exit 0

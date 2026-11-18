@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**747 owned · 38 unowned · 785 files (95% owned) · ~12719 unswept lines.**
+**748 owned · 38 unowned · 786 files (95% owned) · ~12719 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **99 files, ~51156 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **100 files, ~51712 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -89,7 +89,7 @@ Excluded as harness and counted here rather than dropped: **99 files, ~51156 lin
 | usr/diorama | 2 | 0 | 0 |
 | usr/gallery | 2 | 0 | 0 |
 | usr/halcyon | 2 | 0 | 0 |
-| usr/halcyond | 44 | 0 | 0 |
+| usr/halcyond | 45 | 0 | 0 |
 | usr/haul | 6 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |

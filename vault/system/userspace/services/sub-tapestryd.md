@@ -12,8 +12,42 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-11-13
+updated: 2026-11-18
 ---
+## FRAME is opt-in per surface (November 18, vote 144)
+
+TAPESTRY 18.4 (vote 144): `Comp::frame_tick` pushes a FRAME only to a surface
+whose `frame_armed` is set, on top of the visibility filter it already had (a
+visible hosted surface that is not backgrounded and is resident, or a visible
+chrome surface). `frame on|off` on the surface's own ctl fid sets the flag,
+parsed beside `intent`; any other value is `E_INVAL`. `mint` starts it false,
+so every incarnation starts disarmed and a client re-arms after a re-create.
+`frame off` also drops the surface's one queued FRAME (`events.retain`), so
+after its Rwrite no tick reaches the surface but one a read had already
+carried. The arm adds a condition and never removes one: the d-1b dormancy
+of a backgrounded console leaf is unchanged. The rest of `frame_tick` -- the
+drag coalesce, the cursor sync, the C-3 repaint, deferred imports, storage
+sync -- runs every tick whether or not anything is armed, and the idle
+throttle reads neither the arm nor delivery (intent still sets the rate).
+
+Who arms: aurora, `SDL_thylacine` (both of its open paths), `tapestry-demo`
+(not under its `idle` lever) and the battery's A and B, whose waits count
+events. halcyond and its chrome do not (its loops gained a pre-block check
+for stranded events and owed notices -- [[sub-halcyond]]); gallery and
+cursor_demo are purely event-driven; warp-prove, `usr/halcyon`, joey,
+kaua-term and the scenario surface openers (ls-gpu-dead, warp-poison-retire)
+read no surface events. Before this an idle halcyond session
+took ~60 FRAMEs a second across its surfaces and dropped every one (AS-4f
+gate 2). Witnesses: the battery's frame opt-in leg in ls-gfx-panes (frozen
+clock; disarmed, A's stream up to a FOCUS caused after two ticks holds no
+FRAME; re-armed, the same read holds exactly the next tick; `frame maybe` is
+refused; a typed key bounds each read, and the armed tick's FRAME is queued
+when `frame off` lands, so the purge is tested too); ls-gfx-quake's SDL arm,
+judged twice -- the test build's `tapestryd: surface N frame on` line and the
+40 fps paced floor (unarmed, SDL paces on its 50 ms timeout); the graphical
+console gates for aurora's (unarmed, it would render output only when a key
+arrived). Round 48 (Opus 5.5, same-family): 0 P0, 0 P1, 1 P2, 4 P3.
+
 ## Cooperative hidden storage (October 4)
 
 TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and
@@ -1444,10 +1478,76 @@ arithmetic so `x + w > surface_w` cannot wrap. Validate-all-then-act is
 the same discipline as ptyfs's ctl grammar, for the same reason.
 
 **The global-ctl authority gate is default-deny**: `is_ungated_ctl` is a
-denylist of exactly the determinism verbs, so every *future* global verb
-is gated by construction. An allowlist would silently ungate a verb
-added without touching the gate line. That inversion is the design and
-must survive any edit.
+denylist of exactly `release` (its F2 arm already limits it to the
+caller's own surfaces), so every *future* global verb is gated by
+construction. An allowlist would silently ungate a verb added without
+touching the gate line. That inversion is the design and must survive
+any edit.
+
+**The determinism verbs have a gate of their own** (operator vote 136,
+#880; TAPESTRY.md 18.6). `test-mode on`, `test-mode off`, `tick` and
+`probe-screen` (`is_determinism_ctl`) admit a conn only if
+`peer_may_drive_determinism` holds: the live peer is the console
+renderer, or its session owns the console (`SRV_PEER_FLAG_CONSOLE_OWNER`)
+and its principal is a user principal. `test-mode on` stalls every
+surface's FRAME clock; `probe-screen` reads a texel of the composed
+screen (a GPU readback on a 3D screen) and says it on tapestryd's
+console, up to 64 per tick, returning nothing to the caller. So the
+person at the keyboard is the narrowest party that still includes the
+in-guest battery. Who that is depends on the image: on the shell (`ut`)
+image login makes the user's shell the console owner, and the battery
+runs from it; on the Halcyon session image no session owns the console
+during a graphical session (login grants ownership only to `ut`), so
+there only the renderer is admitted. The flag is keyed on the session,
+which is why the principal half exists: it refuses a SYSTEM or `none`
+process inside the console session. No user-reachable path puts one
+there today (spawning as `none` needs CAP_SET_IDENTITY, and spawn
+cannot stamp SYSTEM at all), so that half is reviewed, not witnessed:
+no runtime leg or mutant constructs it. The peer is read fresh per
+write, like `peer_is_renderer`, and the check runs before any verb arm,
+so a refused caller sees E_PERM in every build and the stripped build's
+E_OPNOTSUPP reaches only admitted callers. That does not hide the build
+shape, and is not meant to: the ctl read prints `test-mode on|off` only
+when the feature is compiled in, and `release` -- the only ungated
+write verb besides the reads, matched as the whole word or `release
+<surface>` (`is_release_ctl`), never as a prefix -- answers E_OPNOTSUPP
+in a stripped build. Every refusal counts (`Comp.determinism_refusals`,
+the whole boot), and tapestryd says one only when that count reaches a
+power of two -- `tapestryd: determinism verb refused: conn N (principal
+P) is neither the console renderer nor the console owner (K refused so
+far)` -- the rule its connect-refused path already follows. So a client
+that reconnects in a loop adds a line per doubling, never a flood, and
+cannot silence the log either: the next power of two always speaks, with
+the total. The witness is tapestry-battery's `--not-console-owner` child
+in `ls-gfx-panes`: the probe is admitted and `released` meets the
+renderer gate (E_PERM: only `release` and `release <surface>` are
+ungated), then the child calls `setsid`; the same conn's probe,
+`test-mode on` and `tick` are refused while the ctl read stays at
+`test-mode off`, and `tick` on five fresh conns is refused too. Those
+are the boot's first eight refusals, so the scenario requires the lines
+to carry exactly 1, 2, 4 and 8.
+
+**Determinism mode ends with the conn that turned it on.**
+`test-mode on` records its conn in `Comp.test_mode_conn`; when that conn
+retires, `retire_conn` runs `test_mode_end` (every hold released, the
+clock running again, the owner cleared) and says `tapestryd: test-mode
+off: conn N that turned it on closed`. Before this, a battery that died
+with the mode on left every surface frozen until an admitted conn said
+`test-mode off` -- and on the Halcyon image only the renderer is
+admitted, and it never does. A later `test-mode on` from another
+admitted conn moves the ownership to it, so it is the conn that LAST
+turned it on whose close ends it. The line is said during that conn's
+teardown, so it can interleave with a prompt login prints at the same
+moment; it appears only when a conn dies with the mode on, where it is
+the diagnostic. The witness is the battery's test-mode owner leg: a
+second conn turns the mode on and closes, and the ctl read must say
+`test-mode off` within 3 s.
+
+A build with the `test-mode` feature says `tapestryd: test levers
+compiled in` just after `serving`. build.sh's `TEST_LEVERS` verdict keys
+on that text in the binary, both as built and as staged into the ramfs:
+present in every image but production, absent from the production
+build, which compiles the feature out ([[sub-substrate-build]]).
 
 ## Error paths
 
@@ -1580,17 +1680,17 @@ construction: one IRQ wait per GPU command.
   bound enforced 360 lines earlier, which is how the ambiguity arose;
   `tools/check-invariants.py` now fails the build if that registry drifts
   again.)
-- **The fenced lane's test hold ships in production.** The crate's
-  default features include `test-mode`, no build passes
-  `--no-default-features`, and `/srv/warp`'s `ctl` is mode 0666 — so the
-  verb that stalls a context's fence completions is reachable by any
-  client. The design answer was not to gate the caller but to make the
+- **The fenced lane's test hold is in every image but production.** The
+  crate's default features include `test-mode`; only the production
+  build (`TEST_LEVERS=n`, vote 136) passes `--no-default-features`. In
+  the images that keep it, `/srv/warp`'s `ctl` is mode 0666, so the verb
+  that stalls a context's fence completions is reachable by any client.
+  The design answer there was not to gate the caller but to make the
   power proportionate: a client may hold only **its own** context's
   fences, which it could already achieve by simply not reading them. An
   earlier revision held globally, which was an unprivileged box-wide
-  denial of service. Worth knowing that identity deliberately cannot
-  separate the prover from an attacker here — the in-guest test battery
-  is an ordinary unprivileged client *by design*.
+  denial of service. Until vote 136 no build stripped the feature, so
+  this hold shipped in production too.
 - The abandonment bound is 30 s of wall clock, which means a genuinely
   hung host renderer strands a context's backings for that long before
   anything is reclaimed, and leaks them permanently if the device never

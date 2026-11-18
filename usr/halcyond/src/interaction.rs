@@ -50,6 +50,7 @@ pub struct Interaction {
     normal: Option<u64>,
     flight: Option<Flight>,
     closed: bool,
+    parked: bool,
 }
 const _: () = assert!(core::mem::size_of::<Interaction>() <= 18 * 1024);
 
@@ -61,6 +62,7 @@ impl Interaction {
             normal: None,
             flight: None,
             closed: false,
+            parked: false,
         })
     }
     fn idle(&self) -> Result<(), Failure> {
@@ -371,9 +373,12 @@ impl Interaction {
         self.broker.cancel_pending(target)
     }
     /// While the seat is away from normal the compositor answers nothing, so a
-    /// flight cannot be late. It gets its full time back when the seat returns.
+    /// flight cannot be late. It gets its full time back from the first pass
+    /// that sees the seat return, however long after the last parked pass.
     pub fn age(&mut self, now: u64, parked: bool) -> Option<Completion> {
-        if parked {
+        let returned = self.parked && !parked;
+        self.parked = parked;
+        if parked || returned {
             if let Some(f) = self.flight.as_mut().filter(|f| !f.reported) {
                 f.started = now;
             }
@@ -786,12 +791,16 @@ mod tests {
             assert!(!i.drain_required());
             assert_eq!(i.age(17 + 3 * ADMISSION_MS, true), None);
             assert_eq!(i.deadline(), Some(17 + 4 * ADMISSION_MS));
+            // The first pass back at normal comes just before that bound: the
+            // flight's time starts again there, not at the last parked pass.
             assert_eq!(i.age(16 + 4 * ADMISSION_MS, false), None);
+            assert_eq!(i.deadline(), Some(16 + 5 * ADMISSION_MS));
+            assert_eq!(i.age(15 + 5 * ADMISSION_MS, false), None);
             // Back at normal, the ordinary bound holds again.
-            assert_eq!(failure(i.age(17 + 4 * ADMISSION_MS, false)), Some(Failure::Timeout));
+            assert_eq!(failure(i.age(16 + 5 * ADMISSION_MS, false)), Some(Failure::Timeout));
             assert!(i.drain_required());
             // A parked seat cannot undo a drain already owed.
-            assert_eq!(i.age(18 + 4 * ADMISSION_MS, true), None);
+            assert_eq!(i.age(17 + 5 * ADMISSION_MS, true), None);
             assert!(i.drain_required());
             assert_eq!(i.deadline(), None);
         }

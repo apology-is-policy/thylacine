@@ -29,6 +29,8 @@ pub mod indicator;
 pub mod inlineaccum;
 pub mod inlinecache;
 pub mod input;
+#[cfg(any(test, feature = "test-mode"))]
+pub mod latency;
 pub mod layout;
 pub mod menu;
 pub mod modeview;

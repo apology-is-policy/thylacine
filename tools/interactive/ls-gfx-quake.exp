@@ -16,7 +16,9 @@
 #                  (~57-60) and is STABLE -- the pre-#51 122-600 spread was
 #                  HVF vCPU variance on an uncapped spin. 969 paced frames
 #                  ~= 17 s, inside the 120 s budget. (SDL_THYLACINE_NOPACE
-#                  opts a benchmark out.)
+#                  opts a benchmark out.) The gate asserts a 40 fps floor:
+#                  FRAME is opt-in (TAPESTRY 18.4), and a surface SDL never
+#                  armed paces on its 50 ms timeout (<= 20 fps).
 #   render leg   : a screendump carries Quake's textured-world color
 #                  richness (not a flat/black surface) -- the pixels
 #                  reached the scanout. (The fps line is the DETERMINISTIC
@@ -56,6 +58,10 @@ proc gfx_dump_or_fail {out} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
+# The session transcript from here (the ls-gfx-age idiom), for lc_logged.
+set transcript /tmp/ls-gfx-quake-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
 lc_send "tyr-quake -window +timedemo demo1"
 # N-2a-3: sound is ON. "Sound Initialized" prints in Host_Init BEFORE the
 # "Quake Initialized" banner, so it is expected FIRST (a later expect would
@@ -74,12 +80,30 @@ lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
 set timeout 120
 expect {
     -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
-        lc_pass "timedemo: $expect_out(1,string) frames @ $expect_out(3,string) fps (SDL software Quake, present-to-scanout)"
+        set nframes $expect_out(1,string)
+        set fps $expect_out(3,string)
+        # The paced floor (TAPESTRY 18.4): FRAME is opt-in, and SDL's present
+        # pacing waits on it with a 50 ms bound. Armed, the timedemo reads
+        # ~clock_hz (57-60); a surface that never armed paces on the timeout
+        # instead -- <= 20 fps -- and would still finish inside 120 s, so only
+        # this floor can see it.
+        set paced [expr {$fps >= 40.0}]
+        lc_step "timedemo: $nframes frames @ $fps fps (SDL software Quake, present-to-scanout)"
     }
     "user fault" { lc_fail "tyr-quake segv during the timedemo" }
     "Sys_Error"  { lc_fail "tyr-quake Sys_Error during the timedemo" }
     timeout      { lc_fail "no timedemo fps line within 120s" }
 }
+# The SDL arm (TAPESTRY 18.4), both halves judged before either fails, so a
+# run that breaks the arm shows what each half saw. Deterministic: a test
+# build's tapestryd says each `frame` verb, and SDL's window open must have
+# said `frame on` (on either side of the lines matched above, hence the
+# transcript). Behavioural: the paced floor above.
+set armed [expr {[llength [lc_logged $transcript {tapestryd: surface [0-9]+ frame on} 5 "SDL's frame arm"]] > 0}]
+if {!$armed || !$paced} {
+    lc_fail "SDL's FRAME arm: said 'frame on' = $armed, paced >= 40 fps = $paced ($fps fps)"
+}
+lc_pass "timedemo paced at $fps fps on an armed surface"
 
 # The render leg: Quake's world is on the scanout. Two dumps a beat apart
 # -- the color-richness floor is the HARD gate (a flat/black surface would

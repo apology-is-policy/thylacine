@@ -33,14 +33,6 @@ proc dump {out} {
     if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
     return ""
 }
-# Read the whole-session transcript (order-independent grep at a checkpoint).
-proc tbody {} {
-    global transcript
-    log_file
-    set f [open $transcript r]; set body [read $f]; close $f
-    log_file -a $transcript
-    return $body
-}
 
 set transcript /tmp/ls-gfx-jpeg-[pid].log
 catch {file delete -force $transcript}
@@ -66,12 +58,9 @@ expect {
 lc_login michael correct-horse-battery-staple-v1
 
 # The place channel must be posted before view can hand off a raster.
-set posted 0
-for {set i 0} {$i < 16} {incr i} {
-    if {[string first "halcyond: /srv/halcyon posted" [tbody]] >= 0} { set posted 1; break }
-    after 500
+if {[llength [lc_logged $transcript {halcyond: /srv/halcyon posted} 8 "the place channel's posting"]] == 0} {
+    lc_fail "halcyond never posted /srv/halcyon -- the I-47 channel is down"
 }
-if {!$posted} { lc_fail "halcyond never posted /srv/halcyon -- the I-47 channel is down" }
 lc_step "jpeg: /srv/halcyon posted"
 
 # THE INLINE LEG. view decodes /test.jpg (zune-jpeg) and hands the raster to
@@ -81,12 +70,9 @@ lc_run_expect_hardfail "view /test.jpg" "placed inline (640x400)" "not displayed
 
 # The injection witness: halcyond accumulated + validated + injected the raster
 # the JPEG decode produced.
-set injected 0
-for {set i 0} {$i < 20} {incr i} {
-    if {[string first "halcyond: inline image placed (640x400" [tbody]] >= 0} { set injected 1; break }
-    after 300
+if {[llength [lc_logged $transcript {halcyond: inline image placed \(640x400} 6 "halcyond's injection line"]] == 0} {
+    lc_fail "halcyond never logged the 640x400 injection -- view reported success but the JPEG raster did not complete on the reader"
 }
-if {!$injected} { lc_fail "halcyond never logged the 640x400 injection -- view reported success but the JPEG raster did not complete on the reader" }
 lc_pass "jpeg inline: view decoded /test.jpg + halcyond injected the 640x400 raster (zune-jpeg pipeline end to end)"
 
 # THE FULLSCREEN LEG. gallery decodes the same JPEG and presents it to a

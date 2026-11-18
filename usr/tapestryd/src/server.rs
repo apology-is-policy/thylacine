@@ -107,7 +107,7 @@ use libthyla_rs::{
     t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TDmaSeg, TSrvPeerInfo,
     T_DMA_MAP_PA_SCATTERED, T_GID_SYSTEM, T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE,
     T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
-    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    T_SRV_PEER_FLAG_CONSOLE_OWNER, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 use tapestryd::skein::{self, Seg};
 use tapestryd::motion::AbsBase;
@@ -1133,6 +1133,9 @@ struct Surface {
     /// reference/139 "Frame intent": whether the idle throttle may drop this
     /// surface's rate. Default Static; set via the `intent` ctl verb.
     intent: FrameIntent,
+    /// TAPESTRY 18.4: FRAME reaches this surface only while armed (`frame
+    /// on|off`). Default off -- an idle client is never woken by the clock.
+    frame_armed: bool,
 }
 
 /// The deferred flush a held present leaves behind. The pixel work
@@ -2101,6 +2104,17 @@ pub struct Comp {
     /// `tick` ctl writes) and TPRESENT_HOLD is accepted.
     #[cfg(feature = "test-mode")]
     test_mode: bool,
+    /// The conn that turned determinism mode on. The mode ends with it:
+    /// retire_conn runs `test-mode off` for it, so a battery that dies with
+    /// the clock frozen does not leave every surface frozen for whoever
+    /// comes next (vote 136 narrowed who may unfreeze).
+    #[cfg(feature = "test-mode")]
+    test_mode_conn: Option<u64>,
+    /// Determinism-verb refusals so far, every conn: one is said on the
+    /// console only when this reaches a power of two, with the total -- the
+    /// connect-refused rule -- so no client can flood the console or silence
+    /// it.
+    determinism_refusals: u64,
     /// Warp-2c: the GPU-seam context slots + the monotonic public-id
     /// sequences (the pane discipline -- tree names are never reused).
     warp_ctxs: [Option<WarpCtx>; MAX_WARP_CTXS],
@@ -2886,6 +2900,9 @@ impl Comp {
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
+            #[cfg(feature = "test-mode")]
+            test_mode_conn: None,
+            determinism_refusals: 0,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
             warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
@@ -3011,6 +3028,7 @@ impl Comp {
             is_rail: false,
             shown_slot: None,
             intent: FrameIntent::Static,
+            frame_armed: false,
             comp_attached: false,
             gpu_said: false,
             held: None,
@@ -9086,6 +9104,17 @@ impl Comp {
         self.cost_add(Cost::Flush, t0);
     }
 
+    /// `test-mode off`: no stuck regions -- every hold is flushed -- and the
+    /// FRAME clock runs again.
+    #[cfg(feature = "test-mode")]
+    fn test_mode_end(&mut self) {
+        for n in 0..MAX_SURFACES {
+            self.release_held(n);
+        }
+        self.test_mode = false;
+        self.test_mode_conn = None;
+    }
+
     /// Flush surface `n`'s held region (F13 release; also the implicit
     /// release a non-HOLD present performs). A hold recorded under a
     /// scanout mode that has since changed is DROPPED -- the structural
@@ -9730,6 +9759,11 @@ impl Comp {
     fn retire_conn(&mut self, conn_id: u64) {
         // Before any surface/GPU teardown that might park during SAK.
         self.retire_seat_declaration(conn_id);
+        #[cfg(feature = "test-mode")]
+        if self.test_mode && self.test_mode_conn == Some(conn_id) {
+            say!("tapestryd: test-mode off: conn {} that turned it on closed", conn_id);
+            self.test_mode_end();
+        }
         self.ordered_remove(conn_id);
         let seat = self.session_declared(conn_id);
         self.teardown_conn = Some(conn_id);
@@ -10152,10 +10186,12 @@ impl Comp {
         })
     }
 
-    /// Emit the FRAME tick to every VISIBLE hosted surface (G-6: hidden
-    /// surfaces -- tab-background, unhosted -- get no pacing signal; a
-    /// paced client naturally suspends while hidden). Wedged surfaces
-    /// retire inline.
+    /// Emit the FRAME tick to every ARMED, VISIBLE hosted or chrome surface
+    /// (TAPESTRY 18.4: delivery is opt-in, `frame on`; G-6: hidden surfaces
+    /// -- tab-background, unhosted -- get no pacing signal, so a paced
+    /// client naturally suspends while hidden). The rest of the tick -- the
+    /// compositor's own work -- runs whether or not any surface is armed.
+    /// Wedged surfaces retire inline.
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
@@ -10179,15 +10215,24 @@ impl Comp {
         self.storage_sync();
         // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
         // FRAME -- that is exactly what makes the console renderer's FRAME-driven
-        // loop go dormant while the session owns the display.
+        // loop go dormant while the session owns the display. The arm is one
+        // more condition on top of visibility, never a substitute for it.
         let mut vis: Vec<usize> = self
             .layout
             .visible_hosted()
             .iter()
-            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded && s.storage.resident()))
+            .filter(|v| {
+                self.surf(v.1)
+                    .map_or(false, |s| s.frame_armed && !s.backgrounded && s.storage.resident())
+            })
             .map(|v| v.1)
             .collect();
-        vis.extend(self.visible_chrome().iter().map(|v| v.0));
+        vis.extend(
+            self.visible_chrome()
+                .iter()
+                .filter(|v| self.surf(v.0).map_or(false, |s| s.frame_armed))
+                .map(|v| v.0),
+        );
         for n in vis {
             let ev = Tevent {
                 kind: TEV_FRAME,
@@ -19839,15 +19884,35 @@ impl Conn {
         info.alive == 1 && (info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
     }
 
-    /// The ONLY intentionally-ungated global-ctl verbs (SA-1): the section
-    /// 18.6 determinism surface, which a NON-renderer (the in-guest
-    /// battery) must drive in test builds and which is #880-feature-
-    /// stripped to E_OPNOTSUPP in production. The gate is a DENYLIST of
-    /// exactly this set, not an allowlist of the known authority prefixes
-    /// -- so every FUTURE global verb (gaps/chord/a typo) is gated BY
-    /// CONSTRUCTION, realizing the scripture's "a new global verb defaults
-    /// to GATED" (an allowlist would silently ungate a verb added without
-    /// touching the gate line).
+    /// Vote 136 (#880; TAPESTRY.md 18.6): may this conn's LIVE peer drive
+    /// the determinism verbs? `test-mode on` stalls every surface's clock
+    /// and `probe-screen` reads a composed-screen texel (a GPU readback) and
+    /// says it on the console, so only the console renderer or the person
+    /// at the keyboard may: a peer whose session
+    /// owns the console AND whose principal is a user principal. The
+    /// console-owner axis is keyed on the SESSION, so the principal half is
+    /// what refuses a SYSTEM or `none` process inside the console session.
+    /// Read fresh per write via t_srv_peer, like peer_is_renderer;
+    /// fail-closed on any error.
+    fn peer_may_drive_determinism(&self) -> bool {
+        let mut info = TSrvPeerInfo::default();
+        if unsafe { t_srv_peer(self.handle, &mut info) } != 0 {
+            return false;
+        }
+        info.alive == 1
+            && ((info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
+                || ((info.flags & T_SRV_PEER_FLAG_CONSOLE_OWNER) != 0
+                    && principal_is_session(info.principal_id)))
+    }
+
+    /// The section 18.6 determinism verbs: judged by
+    /// peer_may_drive_determinism, not by the renderer gate, because the
+    /// in-guest battery (the logged-in user's program, not the renderer)
+    /// drives them.
+    fn is_determinism_ctl(s: &str) -> bool {
+        s == "test-mode on" || s == "test-mode off" || s == "tick" || s.starts_with("probe-screen ")
+    }
+
     /// The pane-tree actor this conn is, for this write (per write:
     /// revocation-correct for the renderer axis, like the global-ctl gate;
     /// the principal axis is immutable so its cache is sound).
@@ -19887,12 +19952,21 @@ impl Conn {
         Ok(())
     }
 
+    /// The ONLY intentionally-ungated global-ctl verb (SA-1): `release`,
+    /// whose F2 arm already limits it to the caller's own surfaces. The
+    /// gate is a DENYLIST of exactly this set, not an allowlist of the
+    /// known authority prefixes -- so every FUTURE global verb (gaps/chord/
+    /// a typo) is gated BY CONSTRUCTION, realizing the scripture's "a new
+    /// global verb defaults to GATED" (an allowlist would silently ungate a
+    /// verb added without touching the gate line).
     fn is_ungated_ctl(s: &str) -> bool {
-        s == "test-mode on"
-            || s == "test-mode off"
-            || s == "tick"
-            || s.starts_with("release")
-            || s.starts_with("probe-screen ")
+        Self::is_release_ctl(s)
+    }
+
+    /// `release` or `release <surface>` -- a whole word, so a future verb
+    /// that merely begins with "release" is not exempted with it.
+    fn is_release_ctl(s: &str) -> bool {
+        s == "release" || s.starts_with("release ")
     }
 
     /// The leaf id of a WELL-FORMED tile-status verb (`tag <id> status
@@ -20090,9 +20164,10 @@ impl Conn {
         // global verb -- mode, clock-rate, and every future global
         // mutation -- admits only a conn whose LIVE peer holds the
         // console-renderer role. Checked per write (revocation-correct).
-        // Default-DENY: only the determinism verbs are exempt (see
-        // is_ungated_ctl); ctl READS stay ungated (the geometry query,
-        // a separate read path).
+        // Default-DENY: only `release` is exempt (see is_ungated_ctl), and
+        // the determinism verbs meet peer_may_drive_determinism instead
+        // (vote 136); ctl READS stay ungated (the geometry query, a separate
+        // read path).
         // H-4d: the menu verbs (`menu place` / `menu dismiss`) are ALSO the
         // declared session compositor's -- the arms below still require the
         // menu surface to be the caller's own process's.
@@ -20137,7 +20212,23 @@ impl Conn {
         let session_motion_verb = s.starts_with("motion ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
-        if !Self::is_ungated_ctl(s)
+        // Vote 136: the determinism verbs meet their own gate, judged before
+        // any arm runs -- so a refused caller sees E_PERM in every build,
+        // never the stripped build's E_OPNOTSUPP.
+        if Self::is_determinism_ctl(s) {
+            if !self.peer_may_drive_determinism() {
+                comp.determinism_refusals = comp.determinism_refusals.saturating_add(1);
+                if comp.determinism_refusals.is_power_of_two() {
+                    say!(
+                        "tapestryd: determinism verb refused: conn {} (principal {}) is neither the console renderer nor the console owner ({} refused so far)",
+                        self.conn_id,
+                        self.peer_principal,
+                        comp.determinism_refusals
+                    );
+                }
+                return Err(p9::E_PERM);
+            }
+        } else if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
@@ -20386,14 +20477,11 @@ impl Conn {
         {
             if s == "test-mode on" {
                 comp.test_mode = true;
+                comp.test_mode_conn = Some(self.conn_id);
                 return Ok(());
             }
             if s == "test-mode off" {
-                // No stuck regions: leaving the mode flushes every hold.
-                for n in 0..MAX_SURFACES {
-                    comp.release_held(n);
-                }
-                comp.test_mode = false;
+                comp.test_mode_end();
                 return Ok(());
             }
             if s == "tick" {
@@ -20405,11 +20493,11 @@ impl Conn {
             }
             // Warp-C C-3: the composed screen's PIXEL ORACLE -- read one
             // texel of the screen back and say it. Test-mode only (a
-            // client-triggered sync round trip; #880 strip class), ungated
-            // like the other determinism verbs (the in-guest battery is not
-            // the renderer), rate-limited per tick. Not gated on
-            // `test_mode` being ON: the battery's pixel stages run before it
-            // enters determinism mode.
+            // client-triggered sync round trip; #880 strip class), behind
+            // the determinism gate above (vote 136: renderer or console
+            // owner), rate-limited per tick. Not gated on `test_mode` being
+            // ON: the battery's pixel stages run before it enters
+            // determinism mode.
             if let Some(rest) = s.strip_prefix("probe-screen ") {
                 let mut it = rest.split_ascii_whitespace();
                 let x: u32 = it
@@ -20436,8 +20524,8 @@ impl Conn {
             // opened by the commit that claimed to close it. They exist
             // in exactly one place now: the W_CTL arm, scoped to the
             // caller's own ctx -- which a tapestry client does not have.
-            if let Some(rest) = s.strip_prefix("release") {
-                let rest = rest.trim();
+            if Self::is_release_ctl(s) {
+                let rest = s["release".len()..].trim();
                 if rest.is_empty() {
                     for n in 0..MAX_SURFACES {
                         if comp.surf(n).map_or(false, |s| s.owner_conn == self.conn_id) {
@@ -20457,7 +20545,7 @@ impl Conn {
         #[cfg(not(feature = "test-mode"))]
         if s.starts_with("test-mode")
             || s == "tick"
-            || s.starts_with("release")
+            || Self::is_release_ctl(s)
             || s.starts_with("probe-screen ")
         {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
@@ -20639,6 +20727,27 @@ impl Conn {
             let intent = FrameIntent::parse(rest.trim()).ok_or(p9::E_INVAL)?;
             if let Some(surf) = comp.surf_mut(n) {
                 surf.intent = intent;
+            }
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("frame ") {
+            // TAPESTRY 18.4: arm or disarm FRAME delivery to this surface.
+            // Disarming also drops the queued FRAME, so no tick reaches the
+            // surface after this Rwrite but one a read already carried.
+            let armed = match rest.trim() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(p9::E_INVAL),
+            };
+            if let Some(surf) = comp.surf_mut(n) {
+                surf.frame_armed = armed;
+                if !armed {
+                    surf.events.retain(|e| e.kind != TEV_FRAME);
+                }
+                // Test builds: a gate can see a pacer arm (SDL's would
+                // otherwise show only as a slower present rate).
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: surface {} frame {}", n, if armed { "on" } else { "off" });
             }
             return Ok(());
         }

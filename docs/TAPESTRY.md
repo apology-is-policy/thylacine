@@ -838,6 +838,34 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   hardware backends slots in behind the same event. A client that only
   recycles on present-CQEs never needs FRAME (the game loop); a client that
   paces (video) arms it.
+- **FRAME is opt-in per surface** (vote 144, 2026-11-17). A surface receives
+  FRAME only while it is ARMED: `frame on` on its `ctl` fid arms it, `frame
+  off` disarms it, any other value is `E_INVAL`, and a new surface starts
+  disarmed. The arm belongs to the surface, not the connection: a client
+  arms each surface that paces, and a surface it re-creates (an SDL resize
+  re-open) starts disarmed again. The arm ADDS a condition and never removes
+  one -- an armed surface still gets a tick only while it is visible (hosted,
+  not backgrounded, resident; or visible chrome), so a backgrounded console
+  leaf stays dormant. The first tick after `frame on` is the first one
+  delivered; `frame off` also drops the one FRAME the surface may have
+  queued, so once its Rwrite returns no tick reaches the surface except one
+  a read had already carried. aurora, the shell image's console renderer
+  (FRAME is its cursor blink and the heartbeat its drain rides),
+  `SDL_thylacine` (present pacing) and `tapestry-demo` arm; halcyond -- the
+  console renderer of the Halcyon image, and the session compositor -- and
+  its chrome do not. An idle client that never arms is never woken by the
+  clock, so an event wait is bounded only by events: a client that wants its
+  wait bounded arms FRAME or keeps its own timer. A client with several
+  surfaces on one ring must also not block on an event its own poll already
+  reaped for another surface (`EventRing::take_stranded`): no tick comes to
+  re-run its pass. The clock itself keeps running for the compositor's own
+  per-tick work (the drag coalesce, the cursor, deferred repaints, storage)
+  whether or not any surface is armed. Heritage: Plan 9's draw has no
+  compositor clock at all -- a client draws when it has something; Wayland's
+  `wl_surface.frame`, X11 Present's notify, CADisplayLink and Choreographer
+  are each requested by the client. The push-to-every-visible-surface it
+  replaces cost an idle halcyond session ~60 FRAMEs a second across its
+  surfaces, every one dropped (AS-4f gate 2: 863 of 867 events in 14.3 s).
 - **FRAME intent** (the declared throttle axis): a surface declares STATIC
   (default) or DYNAMIC via `intent <static|dynamic>` on its `ctl` fid. While a
   DYNAMIC surface is VISIBLE the compositor pins the synthesized clock to the
@@ -846,7 +874,10 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   throttle's present floor with a held key — the ~500 ms `core=dynamic` stutter).
   Visible-gated: a hidden DYNAMIC surface throttles like any other.
   `SDL_thylacine` declares DYNAMIC; console and chrome stay STATIC. See
-  reference/139 "Frame intent".
+  reference/139 "Frame intent". Intent and the arm are separate axes:
+  intent sets the clock's RATE while the surface is visible, the arm sets
+  DELIVERY. A DYNAMIC surface that never arms still pins the rate; an armed
+  STATIC surface still throttles.
 - The Super/Hyper compositor-control layer (§14) is intercepted ABOVE this
   stream: reserved chords never reach a surface's events.
 
@@ -892,8 +923,17 @@ records it.
 
 ### 18.6 Determinism mode (the §16 wire, made concrete)
 
-`test-mode on` (global ctl; **dev/test builds only** — the #880
-strip-for-production class, enforced at build time, not runtime):
+`test-mode on` (global ctl; **gated at runtime in every image AND stripped
+from production builds** -- operator vote 136, 2026-11-17, #880: a conn is
+admitted only if its live peer is the console renderer, or is in the session
+that owns the console with a user principal -- AURORA-CONFIG.md 3.3's cfg-3
+bullet has the rule and who it admits on each image; the `TEST_LEVERS=n`
+production build compiles the verbs out, so an admitted caller gets
+E_OPNOTSUPP, proven by content in build.sh and `tools/check-production.sh`;
+the mode ends when the conn that last turned it on closes). The same gate covers
+`tick` and the `probe-screen` pixel oracle, which reads a texel of the
+composed screen and says it on tapestryd's console (it returns nothing to the
+caller):
 
 - freezes the FRAME clock (ticks only on `tick` ctl writes — the test drives
   time), suppresses cursor blink + animation timers tapestryd owns, and
@@ -1112,9 +1152,11 @@ surface clients don't) + renderer-role protection + the D5 read ACL are
 the Halcyon-era multi-untrusted-client fix (task #42) -- **REALIZED at H-4 (the D decision, ratified 2026-09-02): the WM-control capability is the `Session(principal)` actor tapestryd derives from the kernel-stamped `srv_peer_info.principal_id` (no new grant); a session-side layout tool, run as the user, drives layout, and placement is a one-shot `claim` token (HALCYON.md 13.6/13.7).** A partial
 owner-scope now would break the global-WM model (the no-overfit trap).
 The global `clock-rate` ctl is the same same-session-trust family;
-`test-mode`/`tick`/`release`/HOLD are dev-build-only (the `test-mode`
-cargo feature, stripped to `E_OPNOTSUPP` for production — the #880
-class), with `release` additionally F2-owner-gated. Gate:
+`test-mode`/`tick`/`release`/HOLD live behind the `test-mode` cargo
+feature, stripped to `E_OPNOTSUPP` by the production build (`TEST_LEVERS=n`
+-- the #880 class, realized by vote 136), and `test-mode`/`tick`/`probe-screen`
+are also gated at runtime on the renderer-or-console-owner axis (18.6), with
+`release` F2-owner-gated. Gate:
 `ls-gfx-panes.exp` + `/bin/tapestry-battery` (structure + exact pixels
 via `screendump -P`/`ppm-sample` + QMP focus legs + the collapse coda);
 ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
@@ -1218,9 +1260,10 @@ lives in the client's registered buffer, so a separate slice reference
 would be redundant indirection — the inline array preserves the
 registered-buffer intent with zero extra machinery. (g) **Determinism
 mode** (§18.6 + F13 + F15) behind the `test-mode` cargo feature
-(default-on for the dev tree; production builds strip it —
-`--no-default-features` — and every verb answers E_OPNOTSUPP, the #880
-class): `test-mode on` freezes the FRAME clock (the serve loop stops
+(default-on for the dev tree; the production build strips it --
+`TEST_LEVERS=n` builds the crate `--no-default-features` -- and every verb
+answers E_OPNOTSUPP to a caller the gate admits, the #880 class; the gate
+runs in every image, on the renderer-or-console-owner axis of 18.6, vote 136): `test-mode on` freezes the FRAME clock (the serve loop stops
 wall-clock ticks — queued FRAME events drain normally, which IS the
 F15 transition discipline for a synchronous single-threaded engine;
 the anchor re-seats on unfreeze so no backlog fires), `tick` drives

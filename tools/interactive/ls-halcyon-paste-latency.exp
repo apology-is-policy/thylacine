@@ -1,0 +1,374 @@
+#!/usr/bin/expect -f
+# Rendering and input latency under a paste, and the session's idle wakeups, recorded
+# rather than judged from a still image (ASYNC-SERVICE-LIFECYCLE AS-4f; HALCYON-INTERACTION
+# 12: "record render latency and idle wakeups before/after").
+#
+# Images and boots, the paste image and its control without the interaction work:
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_HALCYON_SESSION=1 \
+#     THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y
+#   THYLACINE_INTERACTION_QUALIFICATION=1 THYLACINE_BUILD_DIR=build/kernel-private-async-qual \
+#     tools/test-interactive.sh ls-halcyon-paste-latency
+#   THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci
+#   tools/test-interactive.sh ls-halcyon-paste-latency
+#
+# halcyond's test builds say one line per typing burst (usr/halcyond/src/latency.rs): the
+# first output after a tile's first unanswered key (a lower bound under a backlog), the
+# settle from the last key to the present after the last output on a tile that took the
+# keys, render + present per tile frame, the loop's longest busy stretch and its wakes;
+# and why each thread woke: the session loop while no burst is open ("idle wakes", every
+# 1000 polls or at the first poll 5 s into a stretch, and when a burst ends the stretch)
+# and the service worker ("owner wakes", the same cadence). The probe's `wakes` verb says
+# the dispatches of each process and thread the session user may read over a silent
+# window (the rest, tapestryd among them, it counts as skipped). Every number goes into
+# the transcript as an `LS-CI RECORD:` line. What fails the run is a record that is
+# missing or does not add up: no line for a burst, a key count that is not the keys
+# typed, a key halcyond's queue refused, a tile still owed an answer or still holding a
+# typed key, no output after the last key, a burst cut at its span, samples past the cap,
+# halcyond's counters unreadable, fewer than two idle tallies said on the loop's own
+# count or clock, an image that is not the one the run was told it is, a paste into Nora
+# that failed or landed after its burst, and (ut) a line that is not every typed key plus
+# the whole paste. Keys lost below halcyond's queue are caught on ut's paste line only
+# (the ut typing line is cleared, never run); a key that rides behind an answered one is
+# not checked one by one, and settle covers the backlog it makes.
+# Both images run the baselines (an idle shell, typing into ut, typing into Nora, Nora
+# idle beside a shell). The paste image adds a 24,399-byte paste into Nora (400 lines of
+# 60) and a 4,000-byte one into ut, each with forty keys typed straight after it in one
+# burst. ut's line is typed first; Enter runs it after the burst, and the probe's `mark`
+# checks it holds every typed key and the whole paste, and says where the paste fell.
+# Every wait has one deadline, fixed when it starts: a periodic line never re-arms it.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set paste_image [expr {[info exists ::env(THYLACINE_INTERACTION_QUALIFICATION)] && $::env(THYLACINE_INTERACTION_QUALIFICATION) eq "1"}]
+# Forty keys with a rune each and no shift: a burst's key count is exactly this.
+set T40 "abcdefghijklmnopqrstuvwxyzabcdefghijklmn"
+
+# A line of the record: into the transcript, where the gate and a reader find it.
+proc record {msg} {
+    lc_step $msg
+    send_user "\nLS-CI RECORD: $msg\n"
+}
+# A thread's wake tally. The session loop's lines said on its own poll count or clock
+# are counted; one said because a burst ended its stretch proves nothing about either.
+set idle_timed 0
+proc idle {line} {
+    record "IDLE $line"
+    if {[regexp {^halcyond: idle wakes: .* said=(?:time|polls)$} $line]} { incr ::idle_timed }
+}
+# The key count of a burst line, or -1.
+proc burst_keys {m} {
+    if {[regexp {^halcyond: latency: keys=([0-9]+) } $m -> k]} { return $k }
+    return -1
+}
+# The seconds left before `until`; past it the wait has failed with `what`.
+proc left {until what} {
+    set n [expr {$until - [clock seconds]}]
+    if {$n <= 0} { lc_fail $what }
+    return $n
+}
+# A pause that reads nothing: every line it lets pass stays for the next wait.
+proc settle {seconds} {
+    lc_within $seconds {
+        -re {EXTINCTION:} { lc_extinction_fail "paste latency" }
+        timeout {}
+        eof { lc_fail "EOF in the paste latency run" }
+    }
+}
+proc key {c} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $c} e]} { lc_fail $e }
+    settle 1
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+# A chord and then text in ONE QMP session, so they fall in one burst.
+proc chord_type {c text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -c $c $text} e]} { lc_fail $e }
+}
+# The probe's verdict on `leg`. With `typed` set, the burst that typed the command (at
+# least `typed` keys) is recorded too, waited for after the verdict if it had not ended
+# by then, so the next burst cannot merge with it.
+proc verdict {leg {typed 0}} {
+    global lc_cmd_timeout
+    set until [expr {[clock seconds] + $lc_cmd_timeout}]
+    set lat [expr {$typed ? {halcyond: latency: [^\r\n]*over=[0-9]+|} : {}}]
+    set seen 0
+    while 1 {
+        set m ""
+        lc_within [left $until "$leg: no verdict"] {
+            -re "(${lat}paste-latency: $leg PASS|paste-latency: $leg: \[^\r\n\]+|paste-latency: FAIL $leg -- \[^\r\n\]+|halcyond: (?:idle|owner) wakes: polls=\[^\r\n\]+)\[\r\n\]" {
+                set m $expect_out(1,string)
+            }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail "$leg: no verdict" }
+            eof { lc_fail "EOF at $leg" }
+        }
+        if {[string match "halcyond: latency: *" $m]} {
+            if {[burst_keys $m] >= $typed} {
+                record "LATENCY $leg: $m"
+                set seen 1
+            } else {
+                lc_step "$leg: an earlier burst passed over: $m"
+            }
+            continue
+        }
+        if {[string match "halcyond: *" $m]} { idle $m; continue }
+        if {$m eq "paste-latency: $leg PASS"} {
+            lc_step "$leg passed"
+            if {$typed && !$seen} { drain_burst $leg $typed }
+            return
+        }
+        if {[string match "paste-latency: $leg: *" $m]} { record [string range $m 15 end]; continue }
+        lc_fail "$leg: [string range $m [string length "paste-latency: FAIL $leg -- "] end]"
+    }
+}
+# The burst line of `leg`'s command (at least `typed` keys), recorded, not judged.
+proc drain_burst {leg typed} {
+    global lc_cmd_timeout
+    set until [expr {[clock seconds] + $lc_cmd_timeout}]
+    set passed {}
+    while 1 {
+        set why "$leg: no latency line for the command's burst -- wanted $typed keys or more, passed over: [expr {[llength $passed] ? [join $passed ,] : {none}}]"
+        set m ""
+        lc_within [left $until $why] {
+            -re {(halcyond: latency: [^\r\n]*over=[0-9]+|halcyond: (?:idle|owner) wakes: polls=[^\r\n]+)[\r\n]} {
+                set m $expect_out(1,string)
+            }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail $why }
+            eof { lc_fail "EOF at $leg" }
+        }
+        if {![string match "halcyond: latency: *" $m]} { idle $m; continue }
+        if {[burst_keys $m] < $typed} {
+            lappend passed [burst_keys $m]
+            lc_step "$leg: an earlier burst passed over: $m"
+            continue
+        }
+        record "LATENCY $leg: $m"
+        return
+    }
+}
+# The next burst line with `want` keys; a line with another count is an earlier burst
+# (a command typed, a chord) and is logged and passed over. With `pasted` set, Nora's
+# paste must land BEFORE the line: one that lands after it was not under the burst. One
+# alternation, so whichever line came first is the one taken.
+proc burst {leg want {pasted 0}} {
+    global lc_cmd_timeout
+    set landed 0
+    set until [expr {[clock seconds] + $lc_cmd_timeout}]
+    set passed {}
+    while 1 {
+        set none "$leg: no latency line with $want keys or no paste (only halcyond's test-mode builds say a line) -- passed over: [expr {[llength $passed] ? [join $passed ,] : {none}}]"
+        set m ""
+        lc_within [left $until $none] {
+            -re {(halcyond: latency: [^\r\n]*over=[0-9]+|halcyond: (?:idle|owner) wakes: polls=[^\r\n]+|nora: clipboard pasted|nora: clipboard paste not applied|nora: clipboard paste failed: [^\r\n]+)[\r\n]} {
+                set m $expect_out(1,string)
+            }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail $none }
+            eof { lc_fail "EOF at $leg" }
+        }
+        switch -glob -- $m {
+            "halcyond: idle wakes:*" - "halcyond: owner wakes:*" { idle $m; continue }
+            "nora: clipboard pasted" { set landed 1; continue }
+            "nora: clipboard paste not applied" { lc_fail "$leg: the paste came back and was not applied" }
+            "nora: clipboard paste failed:*" { lc_fail "$leg: [string range $m 6 end]" }
+        }
+        if {![regexp {keys=([0-9]+) dropped=([0-9]+) answered=([0-9]+) owed-tiles=([0-9]+) queued-tiles=([0-9]+) first-output-us p50=(\S+) p99=(\S+) max=(\S+) settle-us=(\S+) frames=([0-9]+) frame-us p50=(\S+) p99=(\S+) max=(\S+) busy-max-us=([0-9]+) wakes=([0-9]+) span-ms=([0-9]+) cut=([0-9]+) over=([0-9]+)$} \
+                $m -> keys dropped answered owed queued fp50 fp99 fmax settle frames rp50 rp99 rmax busy wakes span cut over]} {
+            lc_fail "$leg: a latency line that does not parse: $m"
+        }
+        if {$keys != $want} {
+            lappend passed $keys
+            lc_step "$leg: an earlier burst passed over: $m"
+            continue
+        }
+        record "LATENCY $leg: $m"
+        if {$pasted && !$landed} { lc_fail "$leg: the paste had not landed when its burst ended: $m" }
+        if {$dropped != 0} { lc_fail "$leg: $dropped key(s) dropped: $m" }
+        if {$owed != 0} { lc_fail "$leg: $owed tile(s) still owed an answer: $m" }
+        if {$queued != 0} { lc_fail "$leg: $queued tile(s) still held a typed key in halcyond's queue: $m" }
+        if {$answered < 1 || $frames < 1} { lc_fail "$leg: a burst with no answer or no frame: $m" }
+        if {$settle eq "-"} { lc_fail "$leg: no output after the last key: $m" }
+        if {$cut != 0} { lc_fail "$leg: the burst never quieted and was cut: $m" }
+        if {$over != 0} { lc_fail "$leg: $over sample(s) past the cap: $m" }
+        if {$pasted} { record "$leg: the paste into Nora landed inside the burst" }
+        return
+    }
+}
+# One idle window from the probe; every process line goes into the log.
+proc wakes {leg secs} {
+    type "kaua-term-probe --paste-latency wakes $secs $leg\n"
+    set halcyond 0
+    set until [expr {[clock seconds] + $secs + 60}]
+    while 1 {
+        set m ""
+        lc_within [left $until "$leg: no verdict"] {
+            -re "(paste-latency: (?:wakes|thread) $leg \[^\r\n\]+|halcyond: (?:idle|owner) wakes: polls=\[^\r\n\]+|paste-latency: $leg PASS|paste-latency: FAIL $leg -- \[^\r\n\]+)\[\r\n\]" {
+                set m $expect_out(1,string)
+            }
+            -re {EXTINCTION:} { lc_extinction_fail $leg }
+            timeout { lc_fail "$leg: no verdict" }
+            eof { lc_fail "EOF at $leg" }
+        }
+        if {$m eq "paste-latency: $leg PASS"} { break }
+        if {[string match "halcyond: *" $m]} { idle $m; continue }
+        if {[string match "paste-latency: FAIL *" $m]} {
+            lc_fail "$leg: [string range $m [string length "paste-latency: FAIL $leg -- "] end]"
+        }
+        record "WAKES $m"
+        if {[string match "paste-latency: wakes $leg halcyond pid=*" $m]} { set halcyond 1 }
+    }
+    if {!$halcyond} { lc_fail "$leg: halcyond's counters were not readable" }
+}
+proc new_shell {c why} {
+    global lc_cmd_timeout
+    key $c
+    lc_within $lc_cmd_timeout {
+        -re {halcyond: session tile leaf=[0-9]+ spawned pid=[0-9]+[^\r\n]*/bin/ut} { lc_step "a new shell: $why" }
+        -re {tapestryd: chord new-tile refused[^\r\n]*[\r\n]} { lc_fail "the new tile was refused: $why" }
+        -re {EXTINCTION:} { lc_extinction_fail $why }
+        timeout { lc_fail "no new shell: $why" }
+        eof { lc_fail "EOF waiting for a new shell: $why" }
+    }
+    settle 3
+}
+proc nora {name} {
+    global lc_cmd_timeout
+    type "nora ~/$name\n"
+    lc_within $lc_cmd_timeout {
+        -re {halcyond: session tile leaf=[0-9]+ screenmode -> AltScreen} { lc_step "Nora holds its tile: $name" }
+        -re {(nora: EXIT path=[a-z]+[^\r\n]*)[\r\n]} { lc_fail "Nora left before it held its tile: $name ($expect_out(1,string))" }
+        -re {EXTINCTION:} { lc_extinction_fail "opening $name" }
+        timeout { lc_fail "Nora never took its tile: $name" }
+        eof { lc_fail "EOF opening $name" }
+    }
+    settle 2
+}
+proc leave {} {
+    global lc_cmd_timeout
+    key "esc"
+    type ":wq\n"
+    lc_within $lc_cmd_timeout {
+        -ex "nora: EXIT path=quit code=0" { lc_step "Nora left" }
+        -re {(nora: EXIT path=[a-z]+[^\r\n]*)[\r\n]} { lc_fail "Nora left another way: $expect_out(1,string)" }
+        -re {EXTINCTION:} { lc_extinction_fail "leaving Nora" }
+        timeout { lc_fail "Nora did not leave" }
+        eof { lc_fail "EOF leaving Nora" }
+    }
+    settle 2
+}
+proc login_to_session {user password} {
+    global lc_boot_timeout
+    lc_within $lc_boot_timeout {
+        -ex "Thylacine login: " {}
+        -re {EXTINCTION:} { lc_extinction_fail "login prompt" }
+        timeout { lc_fail "no login prompt for $user" }
+        eof { lc_fail "EOF before login" }
+    }
+    lc_raw_send "$user\r" "login user"
+    lc_within 60 {
+        -ex "password: " {}
+        -re {EXTINCTION:} { lc_extinction_fail "password prompt" }
+        timeout { lc_fail "no password prompt for $user" }
+        eof { lc_fail "EOF before password" }
+    }
+    lc_raw_send "$password\r" "login password"
+    # The session's start, in whatever order login and halcyond print: one alternation.
+    # halcyond's interaction-qualification line names the image this run is on.
+    global iq_said
+    set iq_said 0
+    set ready 0
+    set until [expr {[clock seconds] + 60}]
+    while {!$ready} {
+        set m ""
+        lc_within [left $until "the session did not become ready for $user"] {
+            -re {(login: session compositor \(halcyond\) spawned|halcyond: interaction qualification enabled|halcyond: status bar [^\r\n]*running false panes 2|Thylacine textual shell)} {
+                set m $expect_out(1,string)
+            }
+            -re {EXTINCTION:} { lc_extinction_fail "session start" }
+            timeout { lc_fail "the session did not become ready for $user" }
+            eof { lc_fail "EOF at session start" }
+        }
+        switch -glob -- $m {
+            "Thylacine textual shell" {
+                puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. See this scenario's header for the bake"
+                lc_quit
+                exit 77
+            }
+            "halcyond: interaction qualification enabled" { set iq_said 1 }
+            "halcyond: status bar*" { set ready 1 }
+        }
+    }
+    settle 3
+}
+
+lc_boot
+login_to_session michael correct-horse-battery-staple-v1
+if {$paste_image && !$iq_said} { lc_fail "told this is the paste image, but halcyond never said interaction qualification" }
+if {!$paste_image && $iq_said} { lc_fail "told this is the control image, but halcyond has interaction qualification" }
+record "image: [expr {$paste_image ? {paste (interaction qualification, private rings)} : {control (no interaction work)}}]"
+
+# An idle shell: only the probe's own window, nothing typed during it.
+wakes idle-shell 10
+settle 2
+
+# Typing into ut, a line never run.
+type $T40
+burst ut-typing 40
+key "ctrl+u"
+settle 2
+
+# Typing into Nora, in Insert mode.
+nora lat-a.txt
+key "i"
+settle 2
+type $T40
+burst nora-typing 40
+leave
+
+# Nora idle beside a shell, its private client open (in the paste image).
+nora lat-b.txt
+new_shell "meta_l+h" "beside the editor"
+wakes idle-nora 10
+settle 2
+
+if {$paste_image} {
+    # 400 lines of 60 bytes; Space p, then Insert and forty keys, one burst of 43 keys.
+    type "kaua-term-probe --paste-latency fill 400 60 fill-nora\n"
+    verdict fill-nora
+    key "meta_l+left"
+    settle 2
+    type " pi$T40"
+    burst nora-paste 43 1
+    leave
+    # 4,000 capitals into ut, Alt-P and forty keys in one QMP session: 41 keys. The
+    # probe's `mark` line is typed first (its own burst), so Enter runs it whichever
+    # order the paste and the keys landed in, and `mark` checks the line holds them all.
+    set cmd "kaua-term-probe --paste-latency fill-pad 4000 fill-ut\n"
+    type $cmd
+    verdict fill-ut [string length $cmd]
+    set prefix "kaua-term-probe --paste-latency mark ut-landed 4000 40 "
+    type $prefix
+    burst ut-line [string length $prefix]
+    chord_type "alt+p" $T40
+    burst ut-paste 41
+    key "ret"
+    verdict ut-landed
+    settle 2
+    if {$idle_timed < 2} { lc_fail "the session loop's idle tally said $idle_timed line(s) on its own count or clock, fewer than two" }
+    lc_pass "paste latency: baselines and both pastes recorded (paste image)"
+} else {
+    key "meta_l+left"
+    settle 2
+    leave
+    if {$idle_timed < 2} { lc_fail "the session loop's idle tally said $idle_timed line(s) on its own count or clock, fewer than two" }
+    lc_pass "paste latency: baselines recorded (control image)"
+}
+lc_quit
+exit 0

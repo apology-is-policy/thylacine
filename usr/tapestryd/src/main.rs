@@ -553,6 +553,10 @@ impl Driver for Tapestryd {
             self.comp.gpu.width,
             self.comp.gpu.height
         );
+        // build.sh's TEST_LEVERS verdict greps the built binary for this
+        // line's text: present here, absent from a production build.
+        #[cfg(feature = "test-mode")]
+        say!("tapestryd: test levers compiled in (the test-mode feature; never in a production build)");
         let mut conns: Vec<Conn> = Vec::new();
         // Connections refused because the pool was full, and whether the warp
         // listener's budget being spent has been said since it last had room.

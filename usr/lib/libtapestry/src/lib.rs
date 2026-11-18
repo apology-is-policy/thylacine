@@ -945,6 +945,13 @@ impl Surface {
         })
     }
 
+    /// TAPESTRY 18.4: arm (`true`) or disarm FRAME delivery to this surface.
+    /// A surface starts disarmed and gets no clock until a pacing client
+    /// arms it; a re-created surface must arm again.
+    pub fn frame(&self, on: bool) -> Result<(), TapError> {
+        self.surface_ctl(if on { "frame on" } else { "frame off" })
+    }
+
     /// cfg-3: write one global-ctl command on THIS connection. The
     /// apply-authority gate checks the CONN's kernel-stamped peer, so an
     /// authority verb (`mode ...`) must ride the caller's own conn --
@@ -1405,8 +1412,9 @@ impl EventRing {
     }
 
     /// Block until at least one event has completed for SOME surface on the
-    /// ring, then reap everything posted (into the surfaces' queues). The
-    /// wait is bounded by the compositor's FRAME ticks to any visible surface.
+    /// ring, then reap everything posted (into the surfaces' queues). Only
+    /// events bound the wait: FRAME ticks count only while some surface on
+    /// the ring is armed (`Surface::frame`) and visible.
     pub fn wait(&self) -> Result<(), TapError> {
         self.core.borrow_mut().pump(true)
     }
@@ -1430,6 +1438,16 @@ impl EventRing {
     /// for an unrelated wake.
     pub fn layout_hint(&self) -> bool {
         self.core.borrow().layout_hint
+    }
+
+    /// Whether an event reached a surface after its owner drained it, since
+    /// the last call (clearing the marks). Any surface's poll reaps the whole
+    /// ring, so a later pump can file an event for a surface the pass has
+    /// already serviced, and the ring fd no longer shows it. A multi-surface
+    /// client asks this before it blocks: FRAME is opt-in (TAPESTRY 18.4), so
+    /// no tick comes to re-run the pass for it.
+    pub fn take_stranded(&self) -> bool {
+        ring::take_stranded(&mut self.core.borrow_mut().slots)
     }
 }
 

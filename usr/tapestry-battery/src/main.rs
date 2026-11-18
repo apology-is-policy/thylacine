@@ -69,10 +69,11 @@ use alloc::string::String;
 
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    t_close, t_open, t_read, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_read, t_setsid, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
-    Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
+    Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_FRAME, TEV_KEY,
+    TEV_PTR_REL,
 };
 
 macro_rules! say {
@@ -91,6 +92,7 @@ const MAGENTA: u32 = 0xFFFF_00FF;
 
 /// Give up a focus-leg wait after this many non-matching events (~20 s of
 /// FRAME ticks): the host harness failed; exit loudly instead of hanging.
+/// FRAME is opt-in (TAPESTRY 18.4), so A and B arm it for exactly this.
 const LEG_EVENT_BUDGET: u32 = 1200;
 
 /// The static-screen window a pixel stage holds for the host dump.
@@ -401,7 +403,7 @@ fn wait_key(surf: &mut Surface, tag: &str) -> bool {
 
 /// Wait for a TEV_PTR_REL on `surf`; returns the decoded signed deltas.
 /// Non-REL events (FRAME ticks, MOVE noise from the motion itself) count
-/// down the budget -- the 60 Hz FRAME stream bounds the wait.
+/// down the budget -- the 60 Hz FRAME stream A arms bounds the wait.
 fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
     let mut budget = LEG_EVENT_BUDGET;
     loop {
@@ -423,6 +425,105 @@ fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
                 return None;
             }
         }
+    }
+}
+
+/// Read `surf`'s stream up to the next pressed KEY, counting the FRAMEs
+/// before it stamped after `after`. None = the stream ended or the budget ran
+/// out (with the clock frozen the budget barely moves: the harness's own wait
+/// for the leg's OK line is what bounds a key that never comes).
+fn frames_before_key(surf: &mut Surface, after: u64, tag: &str) -> Option<(u32, u64)> {
+    let mut budget = LEG_EVENT_BUDGET;
+    let (mut n, mut last) = (0u32, 0u64);
+    loop {
+        match surf.wait_event() {
+            Ok(ev) => {
+                if ev.kind == TEV_FRAME && ev.tick > after {
+                    n += 1;
+                    last = ev.tick;
+                }
+                if ev.kind == TEV_KEY && ev.value != 0 {
+                    return Some((n, last));
+                }
+                budget -= 1;
+                if budget == 0 {
+                    say!("tapestry-battery: FAIL {} key never arrived", tag);
+                    return None;
+                }
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
+                return None;
+            }
+        }
+    }
+}
+
+/// TAPESTRY 18.4, FRAME opt-in, with the clock frozen (`tick` is the only
+/// tick source, so delivery is exact). Each read is bounded by a key the
+/// harness types on the focused A after the leg's ticks: a KEY is never
+/// coalesced, so it queues behind every FRAME those ticks gave A.
+/// Off: A is armed and its read idle (nothing has pumped A's ring since its
+/// last wait), so the armed tick's FRAME waits in A's queue on the server;
+/// `frame off` must drop it, and the two ticks after must give nothing -- A's
+/// stream up to the key holds no FRAME past t0. On: re-armed, the SAME read
+/// must hold exactly the next tick, the positive control one variable away.
+/// `frame maybe` must be refused.
+fn frame_optin_leg(root: i64, a: &mut Surface) -> bool {
+    let tick = || ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ");
+    if a.surface_ctl("frame maybe").is_ok() {
+        say!("tapestry-battery: FAIL frame accepted a value that is not on|off");
+        return false;
+    }
+    let t0 = match tick() {
+        Some(t) => t,
+        None => {
+            say!("tapestry-battery: FAIL frame leg tick read");
+            return false;
+        }
+    };
+    if !write_file(root, "ctl", "tick") {
+        say!("tapestry-battery: FAIL frame leg tick write");
+        return false;
+    }
+    if a.frame(false).is_err() {
+        say!("tapestry-battery: FAIL A frame off");
+        return false;
+    }
+    if !write_file(root, "ctl", "tick") || !write_file(root, "ctl", "tick") {
+        say!("tapestry-battery: FAIL frame leg tick write");
+        return false;
+    }
+    say!("battery: frame-off ready");
+    match frames_before_key(a, t0, "frame off") {
+        Some((0, _)) => {}
+        Some((n, last)) => {
+            say!("tapestry-battery: FAIL disarmed A got {} FRAME(s), last tick {} (t0 {})", n, last, t0);
+            return false;
+        }
+        None => return false,
+    }
+    if a.frame(true).is_err() {
+        say!("tapestry-battery: FAIL A frame on again");
+        return false;
+    }
+    if !write_file(root, "ctl", "tick") {
+        say!("tapestry-battery: FAIL frame leg tick write");
+        return false;
+    }
+    say!("battery: frame-on ready");
+    match frames_before_key(a, t0 + 3, "frame on") {
+        Some((1, last)) if last == t0 + 4 => true,
+        Some((n, last)) => {
+            say!(
+                "tapestry-battery: FAIL armed A got {} FRAME(s), last tick {} (want 1 at {})",
+                n,
+                last,
+                t0 + 4
+            );
+            false
+        }
+        None => false,
     }
 }
 
@@ -517,6 +618,88 @@ fn rel_watch() -> i64 {
     0
 }
 
+/// Vote 136 (#880): the determinism gate's negative leg. It runs as the
+/// battery's CHILD, because a process-group leader cannot setsid and the
+/// battery is one under ut's job control. One conn, one variable: the probe
+/// is admitted while this process is in the console-owning session it
+/// inherited, then setsid moves it to a session of its own and the same
+/// conn's writes are refused (tapestryd reads the peer fresh per write).
+/// `tick` tells the gates apart: admitted with the mode off it answers
+/// E_INVAL, refused it answers E_PERM. The scenario counts tapestryd's
+/// refusal lines: this boot's first eight refusals are this child's, and
+/// tapestryd says only those at a power-of-two count (1, 2, 4, 8).
+fn not_console_owner(root: i64) -> i64 {
+    let probe = "probe-screen 0 0";
+    let rc = raw_ctl(root, probe);
+    if rc != probe.len() as i64 {
+        say!(
+            "tapestry-battery: FAIL console-owner gate: '{}' in the console session rc {} want {}",
+            probe,
+            rc,
+            probe.len()
+        );
+        return 1;
+    }
+    // Only `release` and `release <surface>` are ungated: a longer word that
+    // starts with it meets the renderer gate like any other verb.
+    let rc = raw_ctl(root, "released");
+    if rc != -1 {
+        say!("tapestry-battery: FAIL release word: 'released' rc {} want -1 (E_PERM)", rc);
+        return 1;
+    }
+    let sid = unsafe { t_setsid() };
+    if sid <= 0 {
+        say!("tapestry-battery: FAIL console-owner gate: setsid rc {}", sid);
+        return 1;
+    }
+    for cmd in [probe, "test-mode on", "tick"] {
+        let rc = raw_ctl(root, cmd);
+        if rc != -1 {
+            say!(
+                "tapestry-battery: FAIL console-owner gate: '{}' outside the console session rc {} want -1 (E_PERM)",
+                cmd,
+                rc
+            );
+            return 1;
+        }
+    }
+    // A refusal that had applied the write would read `test-mode on`.
+    if !read_file(root, "ctl")
+        .unwrap_or_default()
+        .contains("test-mode off")
+    {
+        say!("tapestry-battery: FAIL console-owner gate: the refused `test-mode on` applied (ctl does not read test-mode off)");
+        return 1;
+    }
+    // A client that reconnects to repeat a refused verb: five more conns,
+    // one refused `tick` each, bring the refusals to eight.
+    for _ in 0..5 {
+        let c = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
+        if c < 0 {
+            say!("tapestry-battery: FAIL console-owner gate: reconnect rc {}", c);
+            return 1;
+        }
+        let rc = raw_ctl(c, "tick");
+        unsafe { t_close(c); }
+        if rc != -1 {
+            say!("tapestry-battery: FAIL console-owner gate: 'tick' on a fresh conn rc {} want -1 (E_PERM)", rc);
+            return 1;
+        }
+    }
+    say!(
+        "battery: console-owner gate OK: probe admitted in the console session; probe, test-mode on and tick refused in session {}, and tick on five fresh conns",
+        sid
+    );
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // The driver session (layout ops are compositor-global; surfaces stay
@@ -552,6 +735,11 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_close(root); }
         return verdict;
     }
+    if libthyla_rs::env::args().any(|arg| arg == b"--not-console-owner") {
+        let verdict = not_console_owner(root);
+        unsafe { t_close(root); }
+        return verdict;
+    }
     let ctl = match read_file(root, "ctl") {
         Some(s) => s,
         None => {
@@ -584,6 +772,10 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
+    if a.frame(true).is_err() {
+        say!("tapestry-battery: FAIL A frame on");
+        return 1;
+    }
     fill(&mut a, RED);
     if a.present(None).is_err() {
         say!("tapestry-battery: FAIL A present");
@@ -626,6 +818,10 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
+    if b.frame(true).is_err() {
+        say!("tapestry-battery: FAIL B frame on");
+        return 1;
+    }
     fill(&mut b, BLUE);
     if b.present(None).is_err() {
         say!("tapestry-battery: FAIL B present");
@@ -848,8 +1044,9 @@ pub extern "C" fn rs_main() -> i64 {
     // discriminating pair: the write is REFUSED (rc -1) AND the pane's
     // `status` file -- an ungated read -- still says `resting` afterwards
     // (a refusal that had applied the write would read `err`). The
-    // positive control one variable away is this same conn's ungated
-    // verbs (probe-screen above, test-mode below), which succeed. The
+    // positive control one variable away is this same conn's determinism
+    // verbs (probe-screen above, test-mode below), which succeed: the
+    // battery runs in the console-owning session (vote 136). The
     // positive twin of the write is halcyond's (ls-halcyon).
     {
         let path = alloc::format!("pane/{}/status", pa.id);
@@ -1648,6 +1845,10 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     say!("battery: test-mode OK");
+    if !frame_optin_leg(root, &mut a) {
+        return 1;
+    }
+    say!("battery: frame opt-in OK");
 
     // cfg-3: the apply-authority gate (AURORA-CONFIG.md section 3.3). The
     // battery is NOT the console renderer, so the AUTHORITY verbs must
@@ -1737,6 +1938,55 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
     say!("battery: hold OK");
+
+    // Determinism mode ends with the conn that turned it on: a second conn
+    // freezes the clock and closes, and the mode must be off again once
+    // tapestryd retires that conn -- else a battery that dies frozen leaves
+    // every surface frozen for whoever comes next.
+    {
+        let r2 = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
+        if r2 < 0 {
+            say!("tapestry-battery: FAIL test-mode owner: second conn rc {}", r2);
+            return 1;
+        }
+        if !write_file(r2, "ctl", "test-mode on") {
+            unsafe { t_close(r2) };
+            say!("tapestry-battery: FAIL test-mode owner: test-mode on from the second conn");
+            return 1;
+        }
+        if !read_file(root, "ctl")
+            .unwrap_or_default()
+            .contains("test-mode on")
+        {
+            unsafe { t_close(r2) };
+            say!("tapestry-battery: FAIL test-mode owner: the second conn's test-mode on not reported");
+            return 1;
+        }
+        unsafe { t_close(r2) };
+        let mut off = false;
+        for _ in 0..30 {
+            nap(100);
+            if read_file(root, "ctl")
+                .unwrap_or_default()
+                .contains("test-mode off")
+            {
+                off = true;
+                break;
+            }
+        }
+        if !off {
+            say!("tapestry-battery: FAIL test-mode owner: the mode outlived the conn that turned it on");
+            return 1;
+        }
+        say!("battery: test-mode ends with the conn that turned it on");
+    }
 
     // Scenario 3 (G-6b): the compositor-initiated pane close. Closing
     // B's pane strands the surface and queues the TEV_CLOSE exit
@@ -2308,6 +2558,30 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         say!("battery: workspace 1 returned with its tile; the empty workspace vanished");
+    }
+
+    // Vote 136 (#880): every determinism verb above was admitted because this
+    // process runs in the console-owning session; the child proves the other
+    // half -- the same verbs refused once it has left that session.
+    match libthyla_rs::process::Command::new("/bin/tapestry-battery")
+        .arg("--not-console-owner")
+        .spawn()
+    {
+        Ok(mut child) => match child.wait() {
+            Ok(st) if st.success() => {}
+            Ok(st) => {
+                say!("tapestry-battery: FAIL console-owner gate: the child exited {}", st.raw());
+                return 1;
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL console-owner gate: wait {:?}", e);
+                return 1;
+            }
+        },
+        Err(e) => {
+            say!("tapestry-battery: FAIL console-owner gate: spawn {:?}", e);
+            return 1;
+        }
     }
 
     unsafe { t_close(root) };

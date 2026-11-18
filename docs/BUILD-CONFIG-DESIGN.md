@@ -140,7 +140,7 @@ config-file comments are generated from, and any future full TUI would reuse —
 it once, in the schema.
 
 - **compile-shape** — `BUILD_TYPE`, `TESTS`, `BOOT_PROBES`, `DEV_ACCOUNTS`,
-  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`, `READINESS_QUAL`. KASLR (I-16) and the hardening
+  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`, `READINESS_QUAL`, `TEST_LEVERS`. KASLR (I-16) and the hardening
   flags are not symbols: every image has both. `HARDENING_FULL` and `KASLR` were
   symbols nothing applied, retired 2026-10-27 by operator vote; a profile that
   still names one loads with an unknown-symbol warning and the line is ignored.
@@ -163,6 +163,42 @@ it once, in the schema.
 
 One symbol per independent decision — the orthogonalization that dissolves the
 bundles.
+
+**`TEST_LEVERS` (added 2026-11-17, operator vote 136, #880)** decides whether
+the display stack's test levers are compiled in: the `test-mode` cargo feature
+of tapestryd (the determinism verbs and the `probe-screen` pixel oracle),
+halcyond (the `#wedge` verb rule) and lictor (the broker's test requests).
+`y` is the default and every preset but production keeps it, because the gate
+scenarios drive those levers. `n` -- `configs/production.config` -- makes
+build.sh leave those three crates out of the workspace build
+(`--workspace --exclude ...`) and build them in one more invocation,
+`--no-default-features` with only their non-test features. Leaving them out
+of the workspace build matters for the crates that stay: Cargo's resolver 2
+unifies a shared dependency's features across one invocation, so building
+lictor (or tapestryd, whose `test-mode` turns lictor's on) with its defaults
+would hand corvus and caps-probe, which link lictor's library, a test-mode
+lictor. build.sh therefore asks Cargo's own resolver (`cargo tree -e
+normal,build`, over each invocation's exact selection and features) which
+crates get `test-mode`: none in either invocation under `n`; under `y`, every
+lever crate, and lictor again with lictor left out of the selection -- the
+positive controls, the second showing the check sees a `test-mode` that
+reaches a crate only through another crate's features. `READINESS_QUAL=y`
+is refused with `TEST_LEVERS=n`: the readiness probe puts libthyla-rs's test
+hooks in every binary, the opposite of what `n` promises. Before this symbol
+the levers were documented as "stripped for production" while every build,
+production included, compiled them in. The strip is also proven BY CONTENT:
+each lever crate announces `test levers compiled in` at startup from code
+under the feature, so a stripped binary must not contain that string, and a
+default one must (the positive control). build.sh checks it twice -- on the
+binaries it just built, and in `build_ramfs` on the binaries it stages, so
+`build.sh ramfs` or a host that skipped the Rust build cannot stage an
+earlier build's levers into a `TEST_LEVERS=n` image -- and
+`tools/check-production.sh --all` requires the build's `STRIPPED` ledger
+line. `tools/test-test-levers.py` (a host checker) drives the Rust step,
+`build_userspace_rust`, against a stub cargo and runs the resolver check
+against the real one, and its `--mutants` pass shows each of these checks
+turning red when removed. The strip is the second layer: tapestryd also gates the determinism
+verbs at runtime in every image (TAPESTRY.md 18.6).
 
 **The display group carries two decisions worth stating, because both look
 like arbitrary choices and are not.**
@@ -207,12 +243,12 @@ Instrument arc's I-9.
 
 The hand-coded bundles become data:
 
-| Preset | TESTS | BOOT_PROBES | DEV_ACCOUNTS | chunks |
-|---|---|---|---|---|
-| `configs/production.config` | n | n | **y** | lean set |
-| `configs/dev.config` | n | n | **y** | dev set |
-| `configs/ci.config` | y | y | y (implied) | test set |
-| `configs/everything.config` | n | n | y | all chunks on |
+| Preset | TESTS | BOOT_PROBES | DEV_ACCOUNTS | TEST_LEVERS | chunks |
+|---|---|---|---|---|---|
+| `configs/production.config` | n | n | **y** | **n** | lean set |
+| `configs/dev.config` | n | n | **y** | y | dev set |
+| `configs/ci.config` | y | y | y (implied) | y | test set |
+| `configs/everything.config` | n | n | y | y | all chunks on |
 
 `build.sh --config <name>` loads a preset. **Backward-compat migration:**
 `--production` becomes sugar for `--config production`, `--dev` for `--config dev`,
