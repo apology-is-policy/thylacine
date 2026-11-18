@@ -147,45 +147,72 @@
 (*                                 discards keeps the entry from before it   *)
 (*                                 and trusts it (audit round 4 of M15, F4): *)
 (*                                 NoStalePastRevalidation counterexample.   *)
-(*   fs_cache_reuse.cfg           EnableReuse with staging, every buggy      *)
-(*                                 flag FALSE (votes M31, M33): a deleted    *)
-(*                                 file's number goes to the next file       *)
-(*                                 created, and every open is named by       *)
+(*   fs_cache_reuse.cfg            EnableReuse with staging and MaxGen 2,    *)
+(*                                 every buggy flag FALSE (votes M31, M33,   *)
+(*                                 M34): a deleted file's number goes to the *)
+(*                                 next file created, every open is named by *)
 (*                                 number and generation where its fid is    *)
-(*                                 made. InvariantsReuse: InvariantsWb +     *)
-(*                                 NamesTrue + RecordsTrue +                 *)
-(*                                 DeadStateSkipped + NoMisdirectedLoss.     *)
-(*   fs_cache_reuse_told.cfg      the same, checking NeverTold too:          *)
+(*                                 made, a refused run is recorded under its *)
+(*                                 holder's name, and a deleted file's open  *)
+(*                                 reads through the Larder.                 *)
+(*                                 InvariantsReuse: InvariantsWb + NamesTrue *)
+(*                                 + RecordsTrue + DeadStateSkipped +        *)
+(*                                 NoMisdirectedLoss + CacheOfLiveFile.      *)
+(*   fs_cache_reuse_told.cfg       the same, checking NeverToldReport too:   *)
 (*                                 VIOLATED by design, the witness that an   *)
-(*                                 fsync is told its own file's loss while   *)
-(*                                 InvariantsReuse holds (NoMisdirectedLoss  *)
-(*                                 is not held by a report that never        *)
-(*                                 fires).                                   *)
-(*   fs_cache_reuse_coexist.cfg   the same, checking NeverBothHold too:      *)
+(*                                 fsync's report is told its own file's     *)
+(*                                 loss while InvariantsReuse holds          *)
+(*                                 (NoMisdirectedLoss is not held by a       *)
+(*                                 report that never fires).                 *)
+(*   fs_cache_reuse_told_leg.cfg   the same with NeverToldLeg: VIOLATED by   *)
+(*                                 design, the witness that an fsync's leg   *)
+(*                                 meets its own file's refused run and      *)
+(*                                 answers with it.                          *)
+(*   fs_cache_reuse_coexist.cfg    the same, checking NeverBothHold too:     *)
 (*                                 VIOLATED by design, the witness that the  *)
 (*                                 new file's open holds while the dead      *)
 (*                                 holder's run is still held                *)
 (*                                 (DeadStateSkipped is not held by a dead   *)
 (*                                 holder that never stands beside a live    *)
 (*                                 one).                                     *)
-(*   fs_cache_buggy_number_key.cfg                                           *)
-(*                                 BUGGY_NUMBER_KEY -- names compared by     *)
+(*   fs_cache_reuse_served.cfg     the same, checking NeverServedReused too: *)
+(*                                 VIOLATED by design, the witness that an   *)
+(*                                 open of a reused number is served from    *)
+(*                                 the Larder (NoWrongRead is not held by a  *)
+(*                                 name check that serves nothing).          *)
+(*   fs_cache_buggy_number_key.cfg BUGGY_NUMBER_KEY -- names compared by     *)
 (*                                 number alone (the key before vote M31):   *)
 (*                                 the dead holder refuses the new file's    *)
 (*                                 open (DeadStateSkipped counterexample).   *)
 (*   fs_cache_buggy_number_key_told.cfg                                      *)
-(*                                 the same with DeadStateSkipped left out:  *)
-(*                                 the new file's fsync is told the dead     *)
-(*                                 holder's loss (NoMisdirectedLoss          *)
-(*                                 counterexample).                          *)
+(*                                 the same with DeadStateSkipped left out,  *)
+(*                                 checking NoMisdirectedReport: an fsync's  *)
+(*                                 report is told another incarnation's loss *)
+(*                                 (counterexample; TLC's shortest: a        *)
+(*                                 deleted file's open told the new file's   *)
+(*                                 refused run).                             *)
+(*   fs_cache_buggy_number_key_told_leg.cfg                                  *)
+(*                                 the same checking NoMisdirectedLeg: an    *)
+(*                                 fsync's leg meets another incarnation's   *)
+(*                                 holder and answers with its refusal       *)
+(*                                 (counterexample).                         *)
 (*   fs_cache_buggy_unnamed_walk.cfg                                         *)
 (*                                 BUGGY_UNNAMED_WALK -- a plain walk names  *)
 (*                                 its open by number alone and that name    *)
 (*                                 matches every generation (before vote     *)
 (*                                 M33): DeadStateSkipped counterexample.    *)
 (*   fs_cache_buggy_unnamed_walk_told.cfg                                    *)
-(*                                 the same with DeadStateSkipped left out:  *)
+(*                                 the same with DeadStateSkipped and        *)
+(*                                 NoWrongRead left out (a dead open named   *)
+(*                                 by number alone is served the new file's  *)
+(*                                 entry, a counterexample as short):        *)
 (*                                 NoMisdirectedLoss counterexample.         *)
+(*   fs_cache_buggy_number_serve.cfg                                         *)
+(*                                 BUGGY_NUMBER_SERVE -- the Larder serves   *)
+(*                                 an entry to any open of its number        *)
+(*                                 (before vote M34): a deleted file's open  *)
+(*                                 is served the next file's (NoWrongRead    *)
+(*                                 counterexample).                          *)
 (*                                                                         *)
 (*   The staging cfgs run two opens (Opens = {o1, o2}), the rest one. Vote  *)
 (*   M23 (LARDER-DESIGN 12.6): a file's held bytes are the CLIENT's, so a    *)
@@ -201,29 +228,51 @@
 (*   impl the holder's own disjoint append lands during its flush (12.2),    *)
 (*   and the guard, pinned by a runtime test, covers what lands there.       *)
 (*                                                                         *)
-(*   REUSE (votes M31 and M33; audit round 8 of M15, F3). Stratum's qid.path *)
-(*   is the inode number alone: it frees the number at the last unlink,      *)
-(*   while opens of the file stand, and gives it to the next file created    *)
-(*   (Reuse). A model file is a NUMBER (Files) with its INCARNATIONS (gen).  *)
-(*   Every open is bound to the incarnation its fid was made on (inc) and is *)
-(*   named where its fid is made (Mint, LARDER-DESIGN 12.6), by the          *)
+(*   REUSE (votes M31, M33 and M34; audit rounds 8 and 9 of M15). Stratum's  *)
+(*   qid.path is the inode number alone: it frees the number at the last     *)
+(*   unlink, while opens of the file stand, and gives it to the next file    *)
+(*   created (Reuse). A model file is a NUMBER (Files) with its INCARNATIONS *)
+(*   (gen). Every open is bound to the incarnation its fid was made on (inc) *)
+(*   and is named where its fid is made (Mint, LARDER-DESIGN 12.6), by the   *)
 (*   generation, which the model's server always reports. Every holder, pin  *)
 (*   and lost-run record is compared by number and generation (Same:         *)
 (*   wb_same). State of another generation is a deleted file's: a leg skips  *)
-(*   it and it refuses no registration (DeadStateSkipped); a dead holder's   *)
-(*   run, which its fid can no longer land, is recorded under its own name   *)
-(*   (FlushDead), so only its own file's opens are told of it (Fsync;        *)
-(*   NoMisdirectedLoss). The reads and writes of a dead open, but for its    *)
-(*   run's flush, a write of it in flight at the reuse, and its fsync, act   *)
-(*   on a file the number no longer names and are beneath the model. Outside *)
-(*   it, pinned by runtime tests instead: an open whose Tgetattr failed (no  *)
-(*   name: it registers nothing, is told only losses recorded after it was   *)
-(*   made, and its legs, pin and report go by number --                      *)
-(*   dev9p.m33_unnamed_open_writes_through, m33_the_name_does_not_move), a   *)
-(*   server that reports no generation (number-only names, vote M31's        *)
-(*   allowance -- m33_plain_walk_names_the_file), the record table's         *)
-(*   capacity (an evicted record tells less, never another file's loss), and *)
-(*   a loss racing an open's sample (told to it, as if the open came first). *)
+(*   it and it refuses no registration (DeadStateSkipped). A refused run is  *)
+(*   recorded under its holder's own name (FlushRefused: a dead holder's     *)
+(*   always, as its fid can no longer land it, and a live holder's when the  *)
+(*   server refuses it), and an fsync is told only a loss under a name Same  *)
+(*   as its own, whether through the record (Fsync) or as its own leg's      *)
+(*   refusal (FsyncLeg): NoMisdirectedLoss. A dead open's read reaches the   *)
+(*   Larder by number, as dev9p_read and stat_native look it up (Read).      *)
+(*   Every entry carries the incarnation whose content it holds and the name *)
+(*   its serve compares (cache.einc, cache.ename), and is served only to an  *)
+(*   open named by that name or by the number alone (Serves, vote M34).      *)
+(*   Serving an open another incarnation's entry is a wrong read             *)
+(*   (NoWrongRead): a deleted file's open is never served the next file's    *)
+(*   bytes or attributes. NamesTrue and RecordsTrue hold by construction     *)
+(*   here, as Mint names an open by gen[f] and a refusal records inc[f][o].  *)
+(*   The obligation they stand for is the impl's: that a plain walk's        *)
+(*   Tgetattr asks about the walk's own new fid                              *)
+(*   (dev9p.m33_plain_walk_names_the_file), and that Stratum answers a fid   *)
+(*   whose number was reused with ESTALE rather than the new file's          *)
+(*   generation (h_getattr). A dead open's writes, but for its run's flush   *)
+(*   and a write of it in flight at the reuse, act on a file the number no   *)
+(*   longer names and are beneath the model. Outside it, pinned by runtime   *)
+(*   tests instead: an open with no name (its Tgetattr failed, or a strict   *)
+(*   session asked none) is served no own page or attribute, registers       *)
+(*   nothing, is told only losses recorded after it was made, and its legs   *)
+(*   and pin go by number, visiting every holder there and taking no refusal *)
+(*   from a named one (dev9p.m33_unnamed_open_writes_through,                *)
+(*   m33_the_name_does_not_move,                                             *)
+(*   m34_unnamed_file_misses_m34a_unnamed_dir_by_number,                     *)
+(*   m35_unnamed_leg_takes_no_named_refusal,                                 *)
+(*   m35a_unnamed_change_stops_the_holder,                                   *)
+(*   s15_unnamed_leg_visits_every_holder); an unnamed directory handle is    *)
+(*   served by number (vote M34a); a server that reports no generation keeps *)
+(*   number-only names (vote M31's allowance --                              *)
+(*   m33_plain_walk_names_the_file); the record table's capacity (an evicted *)
+(*   record tells less, never another file's loss); and a loss racing an     *)
+(*   open's sample (told to it, as if the open came first).                  *)
 (*                                                                           *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -379,15 +428,19 @@ CONSTANTS
                             \*   audit round 5 of M15, F1).
     EnableReuse,            \* BOOLEAN -- TRUE: a deleted file's number goes to
                             \*   the next file created (Reuse); opens are made
-                            \*   and named (Mint); a dead holder's run is
-                            \*   recorded as lost (FlushDead) and fsync reports
-                            \*   records (Fsync). Votes M31 and M33.
+                            \*   and named (Mint); a refused run is recorded
+                            \*   under its holder's name (FlushRefused) and
+                            \*   fsync reports records (Fsync) and its own
+                            \*   leg's refusal (FsyncLeg). Votes M31 and M33.
     MaxGen,                 \* TLC bound on a number's incarnations.
     BUGGY_NUMBER_KEY,       \* BOOLEAN -- TRUE: names are compared by number
                             \*   alone (the key before vote M31).
-    BUGGY_UNNAMED_WALK      \* BOOLEAN -- TRUE: a plain walk may name its open
+    BUGGY_UNNAMED_WALK,     \* BOOLEAN -- TRUE: a plain walk may name its open
                             \*   by number alone, a name that matches every
                             \*   generation (before vote M33).
+    BUGGY_NUMBER_SERVE      \* BOOLEAN -- TRUE: the Larder serves an entry to
+                            \*   any open of its number, whatever the open's
+                            \*   name (before vote M34).
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
@@ -416,9 +469,10 @@ ASSUME /\ Capacity \in Nat
        /\ MaxGen             \in Nat
        /\ BUGGY_NUMBER_KEY   \in BOOLEAN
        /\ BUGGY_UNNAMED_WALK \in BOOLEAN
+       /\ BUGGY_NUMBER_SERVE \in BOOLEAN
        \* Holders, pins and records are kept only where something stages.
        /\ (EnableReuse => EnableStaging)
-       /\ ((BUGGY_NUMBER_KEY \/ BUGGY_UNNAMED_WALK) => EnableReuse)
+       /\ ((BUGGY_NUMBER_KEY \/ BUGGY_UNNAMED_WALK \/ BUGGY_NUMBER_SERVE) => EnableReuse)
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
@@ -433,9 +487,12 @@ VARIABLES
                  \*   open's unflushed staged run holds (dev9p_priv.wb), 0 for
                  \*   none (every staged token is >= 1). Set by StageWrite;
                  \*   cleared by FlushClose, which lands THIS token.
-    cache,       \* [Files -> [valid: BOOLEAN, cvers: 0..MaxCvers]] -- the Larder
-                 \*   entry per file. `cvers` is the content-token the entry will
-                 \*   serve; meaningful only while `valid`.
+    cache,       \* [Files -> [valid: BOOLEAN, cvers: 0..MaxCvers, einc: 0..MaxGen,
+                 \*   ename: Names]] -- the Larder entry per file. `cvers` is the
+                 \*   content-token the entry will serve, `einc` the incarnation
+                 \*   whose content it is, `ename` the name its serve compares
+                 \*   (vote M34: an own page's installing writer's, an
+                 \*   attribute's generation); meaningful only while `valid`.
     validated,   \* [Files -> BOOLEAN] -- f's cached entry passed the most recent
                  \*   open-time revalidation and no write has happened to f since
                  \*   (the close-to-open "known fresh" mark). Set by Open; cleared
@@ -458,12 +515,18 @@ VARIABLES
                  \*   name (p9_wb_losses): its sequence (0: none), whether an fsync
                  \*   was told of it, and the incarnation whose run it was.
     lseq,        \* Nat -- the client's record sequence (wb_loss.seq).
-    bad_tell     \* BOOLEAN -- history: an fsync was told a loss of a file other
-                 \*   than its own. NoMisdirectedLoss == ~bad_tell.
+    bad_tell,    \* SUBSET Arms -- history: the arms through which an fsync was
+                 \*   told a loss of a file other than its own (its report, its
+                 \*   leg). NoMisdirectedLoss == bad_tell = {}.
+    tells        \* SUBSET Arms -- history: the arms through which an fsync was
+                 \*   told any loss (the witnesses' non-vacuity).
 
-rvars == <<gen, inc, name, errseq, rec, lseq, bad_tell>>
+rvars == <<gen, inc, name, errseq, rec, lseq, bad_tell, tells>>
 vars  == <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend,
-           gen, inc, name, errseq, rec, lseq, bad_tell>>
+           gen, inc, name, errseq, rec, lseq, bad_tell, tells>>
+
+\* How an fsync is told a loss: its report of the record, or its own leg's refusal.
+Arms == {"report", "leg"}
 
 \* A name with no generation: the number alone (wb_same's !has_gen).
 NoGen == MaxGen + 1
@@ -476,6 +539,13 @@ Same(a, b) == BUGGY_NUMBER_KEY \/ a = NoGen \/ b = NoGen \/ a = b
 
 \* The open is of the file its number names now. Without Reuse every open is.
 Live(f, o) == inc[f][o] = gen[f]
+
+\* The Larder serves an entry to an open (vote M34; larder.c own_serves,
+\* attr_serves): one named by the number alone takes any entry, one named by a
+\* generation only an entry under that generation. A page read from the server is
+\* checked by version instead, and Stratum starts a reused number's version past
+\* the old file's, so its test is this one. BUGGY_NUMBER_SERVE serves by number.
+Serves(n, e) == BUGGY_NUMBER_SERVE \/ n = NoGen \/ n = e
 
 \* The records Same as name n, the newest of them, and an open's sample under n
 \* (wb_loss_find_locked, wb_loss_sample): the newest's sequence once some open
@@ -508,7 +578,8 @@ TypeOk ==
     /\ svr_cvers \in [Files -> 0..MaxCvers]
     /\ guest_cvers \in [Files -> 0..MaxCvers]
     /\ stage \in [Files -> [Opens -> 0..MaxCvers]]
-    /\ cache \in [Files -> [valid : BOOLEAN, cvers : 0..MaxCvers]]
+    /\ cache \in [Files -> [valid : BOOLEAN, cvers : 0..MaxCvers, einc : 0..MaxGen,
+                            ename : Names]]
     /\ validated \in [Files -> BOOLEAN]
     /\ bad_read \in BOOLEAN
     /\ wpend \in [Files -> [Opens -> BOOLEAN]]
@@ -518,7 +589,8 @@ TypeOk ==
     /\ errseq \in [Files -> [Opens -> Nat]]
     /\ rec \in [Files -> [Names -> [seq : Nat, seen : BOOLEAN, inc : 0..MaxGen]]]
     /\ lseq \in Nat
-    /\ bad_tell \in BOOLEAN
+    /\ bad_tell \in SUBSET Arms
+    /\ tells \in SUBSET Arms
 
 (***************************************************************************)
 (* Cold start: the server holds every file at content-version 0, the       *)
@@ -528,7 +600,7 @@ Init ==
     /\ svr_cvers   = [f \in Files |-> 0]
     /\ guest_cvers = [f \in Files |-> 0]
     /\ stage       = [f \in Files |-> [o \in Opens |-> 0]]
-    /\ cache     = [f \in Files |-> [valid |-> FALSE, cvers |-> 0]]
+    /\ cache     = [f \in Files |-> [valid |-> FALSE, cvers |-> 0, einc |-> 0, ename |-> 0]]
     /\ validated = [f \in Files |-> FALSE]
     /\ bad_read  = FALSE
     /\ wpend     = [f \in Files |-> [o \in Opens |-> FALSE]]
@@ -538,7 +610,8 @@ Init ==
     /\ errseq    = [f \in Files |-> [o \in Opens |-> 0]]
     /\ rec       = [f \in Files |-> [k \in Names |-> [seq |-> 0, seen |-> FALSE, inc |-> 0]]]
     /\ lseq      = 0
-    /\ bad_tell  = FALSE
+    /\ bad_tell  = {}
+    /\ tells     = {}
 
 (***************************************************************************)
 (* Open(f) -- the close-to-open REVALIDATION + populate point. The guest    *)
@@ -553,16 +626,18 @@ Init ==
 (* entry counts as a hit, so a stale entry is kept and marked validated      *)
 (* without refetching -- the serve-without-cvers-check bug.                  *)
 (***************************************************************************)
-Refetch(f, fresh) ==
-    \* install f valid@fresh, respecting Capacity (evict a victim if full and
-    \* f is not already occupying a slot).
+Refetch(f, fresh, ei, en) ==
+    \* install f valid@fresh, incarnation ei's under name en, respecting Capacity
+    \* (evict a victim if full and f is not already occupying a slot).
     \/ /\ cache[f].valid \/ Cardinality(ValidSet) < Capacity
-       /\ cache'     = [cache EXCEPT ![f] = [valid |-> TRUE, cvers |-> fresh]]
+       /\ cache'     = [cache EXCEPT ![f] = [valid |-> TRUE, cvers |-> fresh,
+                                              einc |-> ei, ename |-> en]]
        /\ validated' = [validated EXCEPT ![f] = TRUE]
     \/ /\ ~cache[f].valid /\ Cardinality(ValidSet) >= Capacity
        /\ \E v \in ValidSet \ {f} :
              /\ cache'     = [cache EXCEPT ![v].valid = FALSE,
-                                           ![f] = [valid |-> TRUE, cvers |-> fresh]]
+                                           ![f] = [valid |-> TRUE, cvers |-> fresh,
+                                                   einc |-> ei, ename |-> en]]
              /\ validated' = [validated EXCEPT ![v] = FALSE, ![f] = TRUE]
 
 Open(f) ==
@@ -572,7 +647,8 @@ Open(f) ==
              /\ cache'     = cache
              /\ validated' = [validated EXCEPT ![f] = TRUE]
           \/ /\ ~is_hit                        \* miss or stale: drop + refetch
-             /\ Refetch(f, fresh)
+             \* the reply's attributes carry the generation (walk_attrs, Tgetattr)
+             /\ Refetch(f, fresh, gen[f], gen[f])
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, bad_read, wpend>>
     /\ UNCHANGED rvars
 
@@ -617,22 +693,35 @@ OpenSkipped(f) ==
 (* stage either: vote M23's observing legs flush the holder first (LARDER-     *)
 (* DESIGN 12.6). BUGGY_PEER_SKIPS_STAGED drops that condition -- audit round 4 *)
 (* of M15, F1.                                                                *)
-Read(f, o) ==
-    \/ \* the staged-overlay arm: the holder's own read within its run.
-       /\ stage[f][o] # 0
-       /\ Live(f, o)    \* a dead open reads a file the number no longer names
-       /\ bad_read' = (bad_read \/ stage[f][o] # guest_cvers[f])
-       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, wpend>>
-       /\ UNCHANGED rvars
-    \/ \* the cache arm. CORRECT only when no open holds a stage of f (the
-       \* impl's overlay-wins split, and the observing legs' flush).
-       /\ (stage[f][o] = 0 \/ BUGGY_READ_SKIPS_STAGED)
-       /\ (PeersClear(f, o) \/ BUGGY_PEER_SKIPS_STAGED)
-       /\ cache[f].valid
-       /\ Live(f, o)
-       /\ bad_read' = (bad_read \/ cache[f].cvers # guest_cvers[f])
-       /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, wpend>>
-       /\ UNCHANGED rvars
+(* A dead open's read reaches the cache arm too (audit round 9 of M15, F1):  *)
+(* dev9p_read and stat_native look the Larder up by number. The serve admits *)
+(* an entry only under the open's name (Serves, vote M34). An open served    *)
+(* another incarnation's entry has read another file, whatever the token:    *)
+(* its own fid would have answered ESTALE. BUGGY_NUMBER_SERVE serves by      *)
+(* number alone. The staged-overlay arm is the open's own run, its own       *)
+(* file's bytes: it cannot cross files, and judging a dead holder's read of  *)
+(* it would need the deleted file's content, which is not modelled.          *)
+\* The staged-overlay arm: the holder's own read within its run.
+ReadStaged(f, o) ==
+    /\ stage[f][o] # 0
+    /\ Live(f, o)
+    /\ bad_read' = (bad_read \/ stage[f][o] # guest_cvers[f])
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, wpend>>
+    /\ UNCHANGED rvars
+
+\* The cache arm. CORRECT only when no open holds a stage of f under o's name (the
+\* impl's overlay-wins split, and the observing legs' flush).
+ReadCache(f, o) ==
+    /\ (stage[f][o] = 0 \/ BUGGY_READ_SKIPS_STAGED)
+    /\ (PeersClear(f, o) \/ BUGGY_PEER_SKIPS_STAGED)
+    /\ cache[f].valid
+    /\ Serves(name[f][o], cache[f].ename)
+    /\ bad_read' = (bad_read \/ cache[f].einc # inc[f][o]
+                             \/ (Live(f, o) /\ cache[f].cvers # guest_cvers[f]))
+    /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, wpend>>
+    /\ UNCHANGED rvars
+
+Read(f, o) == ReadStaged(f, o) \/ ReadCache(f, o)
 
 (***************************************************************************)
 (* OwnWrite(f) -- the guest writes f through, in two steps: OwnWriteBegin is  *)
@@ -741,11 +830,11 @@ StageWrite(f, o) ==
 (* lost-write bug -- a close/death path that neither flushes nor deliberately *)
 (* write-throughs. NoLostStage catches it structurally (staged=FALSE yet      *)
 (* guest > svr); a subsequent Open+Read also serves the pre-write content     *)
-(* (bad_read fires via the cache arm).                                        *)
+(* (bad_read fires via the cache arm). A refused run is FlushRefused.        *)
 (***************************************************************************)
 FlushClose(f, o) ==
     /\ stage[f][o] # 0
-    /\ Live(f, o)        \* a dead holder's run ends in FlushDead
+    /\ Live(f, o)        \* a dead holder's run is always refused
     \* The run lands the token it holds -- the newest content only while the
     \* changing legs order every other write after it.
     /\ IF BUGGY_LOST_STAGE
@@ -760,8 +849,9 @@ FlushClose(f, o) ==
     \* honest: evicts a victim when full). The correct pairing installs ONLY
     \* when the flush landed; BUGGY_POPULATE_UNFLUSHED installs on the lost
     \* arm too, making the cache claim content the server does not hold.
+    \* The own pages carry the holder's registered name (vote M34).
     /\ IF EnableFlushPopulate /\ (~BUGGY_LOST_STAGE \/ BUGGY_POPULATE_UNFLUSHED)
-       THEN Refetch(f, stage[f][o])
+       THEN Refetch(f, stage[f][o], inc[f][o], name[f][o])
        ELSE /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
             /\ validated' = [validated EXCEPT ![f] = FALSE]
 
@@ -784,7 +874,7 @@ Reuse(f) ==
     /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ cache'       = [cache EXCEPT ![f].valid = FALSE]
     /\ validated'   = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<stage, bad_read, wpend, inc, name, errseq, rec, lseq, bad_tell>>
+    /\ UNCHANGED <<stage, bad_read, wpend, inc, name, errseq, rec, lseq, bad_tell, tells>>
 
 (***************************************************************************)
 (* Mint(f, o) -- an open of the file number f names now is made in slot o,   *)
@@ -808,27 +898,61 @@ Mint(f, o) ==
           /\ name'   = [name EXCEPT ![f][o] = n]
           /\ errseq' = [errseq EXCEPT ![f][o] = Sample(f, n)]
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend,
-                   gen, rec, lseq, bad_tell>>
+                   gen, rec, lseq, bad_tell, tells>>
 
 (***************************************************************************)
-(* FlushDead(f, o) -- a dead holder's run is flushed (its close, its fsync,  *)
-(* or a leg that lands it): its fid answers ESTALE, so nothing lands, and    *)
-(* the refusal is recorded under the holder's own name (wb_flush_locked's    *)
-(* refused arm, wb_loss_record; the closer's job records a run it gives      *)
-(* up the same way). The number's cache entry drops, as on every failed      *)
-(* flush; the new file's goes with it, which is sound: a drop serves         *)
-(* nothing.                                                                  *)
+(* FlushRefused(f, o) -- a holder's run is flushed (its close, its fsync,    *)
+(* the closer, or another open's leg) and refused: a dead holder's always,   *)
+(* as its fid answers ESTALE, and a live holder's when the server refuses a  *)
+(* chunk of it (the refused arm of FlushClose, audit round 9 of M15, F7). It *)
+(* is recorded under the holder's own name (wb_flush_locked's refused arm,   *)
+(* wb_loss_record; the closer's job records a run it gives up the same way), *)
+(* and the number's cache entry drops, as on every failed flush; the new     *)
+(* file's goes with it, which is sound: a drop serves nothing. A dead        *)
+(* holder's run lands nothing on the file the number names now. A live       *)
+(* holder's may land in part, so the file then holds content no token yet    *)
+(* names (a fresh one) and the rest of the run is lost: an fsync of the file *)
+(* is told of it through the record.                                         *)
 (***************************************************************************)
-FlushDead(f, o) ==
-    /\ stage[f][o] # 0
-    /\ ~Live(f, o)
-    /\ stage'     = [stage EXCEPT ![f][o] = 0]
+\* p's run refused, its record made told or not.
+Refuse(f, p, told) ==
+    /\ stage[f][p] # 0
+    /\ IF Live(f, p)
+         THEN /\ guest_cvers[f] < MaxCvers
+              /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
+              /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
+         ELSE UNCHANGED <<svr_cvers, guest_cvers>>
+    /\ stage'     = [stage EXCEPT ![f][p] = 0]
     /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
     /\ validated' = [validated EXCEPT ![f] = FALSE]
-    /\ rec'       = [rec EXCEPT ![f][name[f][o]] =
-                        [seq |-> lseq + 1, seen |-> FALSE, inc |-> inc[f][o]]]
+    /\ rec'       = [rec EXCEPT ![f][name[f][p]] =
+                        [seq |-> lseq + 1, seen |-> told, inc |-> inc[f][p]]]
     /\ lseq'      = lseq + 1
-    /\ UNCHANGED <<svr_cvers, guest_cvers, bad_read, wpend, gen, inc, name, errseq, bad_tell>>
+
+FlushRefused(f, o) ==
+    /\ Refuse(f, o, FALSE)
+    /\ UNCHANGED <<bad_read, wpend, gen, inc, name, errseq, bad_tell, tells>>
+
+(***************************************************************************)
+(* FsyncLeg(f, o, p) -- an fsync through open o, whose leg lands the run of  *)
+(* holder p first (wb_holder_flush at dev9p_fsync), meets p's refusal: it is *)
+(* recorded under p's name, and the report that follows tells o of it, so o  *)
+(* answers with it (vote M25) and its sample moves past it. A named open's   *)
+(* leg reaches only holders under a Same name; an unnamed open's takes no    *)
+(* refusal from a named holder (vote M35), which is beneath the model and    *)
+(* pinned by dev9p.m35_unnamed_leg_takes_no_named_refusal. bad_tell records  *)
+(* an answer that was another file's loss. A leg that lands p's run is p's   *)
+(* FlushClose.                                                               *)
+(***************************************************************************)
+FsyncLeg(f, o, p) ==
+    /\ EnableReuse
+    /\ p # o
+    /\ Same(name[f][o], name[f][p])
+    /\ Refuse(f, p, TRUE)
+    /\ errseq'   = [errseq EXCEPT ![f][o] = lseq + 1]
+    /\ tells'    = tells \cup {"leg"}
+    /\ bad_tell' = IF inc[f][p] # inc[f][o] THEN bad_tell \cup {"leg"} ELSE bad_tell
+    /\ UNCHANGED <<bad_read, wpend, gen, inc, name>>
 
 (***************************************************************************)
 (* OwnWriteDead(f, o) -- a write-through in flight at the reuse ends:        *)
@@ -840,14 +964,14 @@ OwnWriteDead(f, o) ==
     /\ ~Live(f, o)
     /\ wpend' = [wpend EXCEPT ![f][o] = FALSE]
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read,
-                   gen, inc, name, errseq, rec, lseq, bad_tell>>
+                   gen, inc, name, errseq, rec, lseq, bad_tell, tells>>
 
 (***************************************************************************)
 (* Fsync(f, o) -- an fsync through open o reports the newest record Same as  *)
 (* its name whose sequence is past its sample, once (wb_loss_report, at      *)
 (* dev9p_fsync and the ring's Dev.fsync_report). Its write-back first is     *)
-(* the holder's FlushClose or FlushDead. bad_tell records a report of a      *)
-(* loss that was not the open's own file's.                                  *)
+(* the holder's FlushClose or FlushRefused, or its own leg's (FsyncLeg).     *)
+(* bad_tell records a report of a loss that was not the open's own file's.   *)
 (***************************************************************************)
 Fsync(f, o) ==
     /\ EnableReuse
@@ -856,7 +980,9 @@ Fsync(f, o) ==
        IN /\ rec[f][k].seq > errseq[f][o]
           /\ errseq'   = [errseq EXCEPT ![f][o] = rec[f][k].seq]
           /\ rec'      = [rec EXCEPT ![f][k].seen = TRUE]
-          /\ bad_tell' = (bad_tell \/ rec[f][k].inc # inc[f][o])
+          /\ tells'    = tells \cup {"report"}
+          /\ bad_tell' = IF rec[f][k].inc # inc[f][o] THEN bad_tell \cup {"report"}
+                                                    ELSE bad_tell
     /\ UNCHANGED <<svr_cvers, guest_cvers, stage, cache, validated, bad_read, wpend,
                    gen, inc, name, lseq>>
 
@@ -874,9 +1000,10 @@ Next ==
               \/ StageWrite(f, o)
               \/ FlushClose(f, o)
               \/ Mint(f, o)
-              \/ FlushDead(f, o)
+              \/ FlushRefused(f, o)
               \/ OwnWriteDead(f, o)
               \/ Fsync(f, o)
+              \/ \E p \in Opens : FsyncLeg(f, o, p)
 
 Spec == Init /\ [][Next]_vars
 
@@ -948,9 +1075,13 @@ InvariantsWb ==
     /\ OneHolder
 
 \* NamesTrue (vote M33) -- an open's name is its own file's generation, or none.
-NamesTrue == \A f \in Files, o \in Opens : name[f][o] \in {inc[f][o], NoGen}
-
 \* RecordsTrue (vote M31) -- a record under a generation is that incarnation's.
+\* Both hold by construction here (Mint names by gen[f], a refusal records
+\* inc[f][o]); they keep the buggy flags honest. The impl's obligation they stand
+\* for is pinned by dev9p.m33_plain_walk_names_the_file (the Tgetattr goes on the
+\* walk's own new fid) and by Stratum's h_getattr (a fid whose number was reused
+\* answers ESTALE, never the new file's generation).
+NamesTrue == \A f \in Files, o \in Opens : name[f][o] \in {inc[f][o], NoGen}
 RecordsTrue == \A f \in Files, k \in 0..MaxGen : rec[f][k].seq # 0 => rec[f][k].inc = k
 
 \* DeadStateSkipped (votes M31, M33) -- state of another generation is a deleted
@@ -963,9 +1094,19 @@ DeadStateSkipped ==
         \A p \in Opens \ {o} :
             Live(f, p) \/ ~Same(name[f][o], name[f][p]) \/ (stage[f][p] = 0 /\ ~wpend[f][p])
 
-\* NoMisdirectedLoss (votes M31, M33) -- no fsync is ever told a loss of a file
-\* other than its own. BUGGY_NUMBER_KEY and BUGGY_UNNAMED_WALK violate it.
-NoMisdirectedLoss == ~bad_tell
+\* NoMisdirectedLoss (votes M31, M33, M35) -- no fsync is ever told a loss of a
+\* file other than its own, through its report or its own leg. BUGGY_NUMBER_KEY
+\* and BUGGY_UNNAMED_WALK violate it; the two arms are checked apart by the told
+\* cfgs.
+NoMisdirectedLoss   == bad_tell = {}
+NoMisdirectedReport == "report" \notin bad_tell
+NoMisdirectedLeg    == "leg" \notin bad_tell
+
+\* CacheOfLiveFile (vote M34) -- every entry the Larder holds is of the file its
+\* number names now: the guest's create drops the number's entries before the new
+\* file's install (dev9p_create), so a dead open served an entry is always served
+\* another incarnation's, which Read judges a wrong read.
+CacheOfLiveFile == \A f \in Files : cache[f].valid => cache[f].einc = gen[f]
 
 InvariantsReuse ==
     /\ InvariantsWb
@@ -973,12 +1114,20 @@ InvariantsReuse ==
     /\ RecordsTrue
     /\ DeadStateSkipped
     /\ NoMisdirectedLoss
+    /\ CacheOfLiveFile
 
-\* Witnesses, VIOLATED by design (fs_cache_reuse_told.cfg, _coexist.cfg): each
-\* counterexample is a reachable state in which InvariantsReuse holds.
-\* NeverTold -- no fsync is told any loss: its counterexample is a report firing
-\* on its own file's loss, so NoMisdirectedLoss is not held by a silent report.
-NeverTold == \A f \in Files, k \in Names : ~rec[f][k].seen
+\* Witnesses, VIOLATED by design (fs_cache_reuse_told.cfg, _told_leg.cfg,
+\* _coexist.cfg, _served.cfg): each counterexample is a reachable state in which
+\* InvariantsReuse holds.
+\* NeverToldReport, NeverToldLeg -- no fsync is told any loss through that arm:
+\* the counterexample is the arm telling its own file's loss, so
+\* NoMisdirectedLoss is not held by an arm that never tells.
+NeverToldReport == "report" \notin tells
+NeverToldLeg    == "leg" \notin tells
+\* NeverServedReused -- no open of a reused number can be served from the Larder:
+\* the counterexample is the new file's open served, so NoWrongRead is not held
+\* by a name check that serves nothing.
+NeverServedReused == \A f \in Files, o \in Opens : gen[f] > 0 => ~ENABLED ReadCache(f, o)
 \* NeverBothHold -- no two incarnations of a number hold at once: its
 \* counterexample is the new file's open holding beside the dead holder, so
 \* DeadStateSkipped is not held by a dead holder never standing beside a live one.

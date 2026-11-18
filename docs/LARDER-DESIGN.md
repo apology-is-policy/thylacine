@@ -1230,6 +1230,10 @@ version-gated and serves any handle whose open-time version matches: Stratum
 starts a reused number's version past the old file's (`si_cvers` = prior + 1),
 so a version match never crosses files. A serve by name (a stat by name, the
 walk serve) resolves the name to the current file and keeps its own rule.
+`fs_cache.tla` models it: a deleted file's open reads through the Larder, every
+entry carries its incarnation and the name its serve compares, and
+`fs_cache_buggy_number_serve.cfg` shows the serve by number giving a deleted
+file's open the next file's entry.
 
 **The own install's guard (votes M24 and M24a, 2026-11-16).** The read
 populate's guard closes a read racing an invalidate (pre-mutation bytes
