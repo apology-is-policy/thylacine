@@ -194,9 +194,11 @@ Three sub-caches share the owner + key:
 **The three hooks (per sub-cache):**
 - **Serve** — at the top of `dev9p_stat_native` / `dev9p_walk_attrs` (and the
   per-component `dev9p_walk`) / `dev9p_read`: if a valid entry exists, return it
-  and skip the RPC.
+  and skip the RPC. A serve through a handle (`dev9p_stat_native`, `dev9p_read`)
+  also asks whether the entry is the handle's file (votes M34 and M34a, 13).
 - **Populate** — after each `getattr` / `walkgetattr` / `read` reply: install the
-  attr / dentry+qid / pages, tagged with the reply's `cvers`.
+  attr / dentry+qid / pages, tagged with the reply's `cvers`. The plain walk's
+  Tgetattr (12.6, vote M36) is such a reply.
 - **Invalidate** — at `dev9p_write` (the file's pages + bump its cached entry),
   and at create / rename / unlink (the parent's dentries), and on a `cvers`
   mismatch at open (drop + refetch).
@@ -604,7 +606,13 @@ proven-in-principle to delivered.
   those, so there is NO privilege / X-search / I-28 consequence; the content is
   untouched; `nlink` staleness is largely moot at v1.0 (no sync `link`/`symlink`/
   `mknod` path — hardlinks are Loom-only, the seam above). Bounded by the next
-  own-write or LRU eviction. The fix needs the moved/unlinked file's `qid.path`
+  own-write or LRU eviction. All of this holds only while the number still names
+  the file. Stratum frees the number at the last unlink while fids stand and gives
+  it to the next file created, and audit round 9 of vote M15 found that a held fid
+  of the deleted file was then served the next file's attributes, and its own
+  pages too: content, across principals sharing the session. Votes M34 and M34a
+  (2026-11-18) close it by the file's name (13, "An own page names its writer's
+  file"). The fix needs the moved/unlinked file's `qid.path`
   (not available at the rename/unlink site, which takes parent + name), so it is a
   v1.x refinement, not a v1.0 code fix. (The *reused-ino* twin — a create at a
   freed ino serving a prior occupant's stale attr AND now pages — IS fixed at v1.0
@@ -977,21 +985,37 @@ learns the generation from its Twalkgetattr; a plain walk that lands on a plain
 file asks it with one Tgetattr on the new fid, as Linux's 9P client asks it
 whenever it makes an inode from a fid (the resolver walks one name at a time on
 any path that holds `..`, at a union member, and on a server without the fused
-walk); a clone that walks no name names its source's file; a create asks once,
-with a Tgetattr on the new fid; a cached open takes it from the Larder's entry
-for the leaf, as a stat by name does. Every open, navigation handle and Loom
-registration of the file is so named before its leg, its registration and its
-sample, and the file locks then ask nothing more. An open's name is fixed when
-it is made: a generation the file locks learn later does not change it, so its
-sample and its report read the same records (round 8 F2).
+walk), and asks the basic attributes in the same request, whose reply fills the
+Larder's attribute entry under the walk's install guard, so a stat after the
+walk is served (vote M36, 2026-11-18, as Linux asks `P9_STATS_BASIC |
+P9_STATS_GEN`); a clone that walks no name names its source's file; a create
+asks once, with a Tgetattr on the new fid; a cached open takes it from the
+Larder's entry for the leaf, as a stat by name does. Every open, navigation
+handle and Loom registration of the file is so named before its leg, its
+registration and its sample, and the file locks then ask nothing more of a
+named open. An open's name is fixed when it is made: a generation the file
+locks learn later does not change it, so its sample and its report read the
+same records (round 8 F2).
 State of another generation is a deleted file's: a leg skips it, it refuses no
 registration, and no open of the new file samples or is told its record. A dead
 holder's refusal is recorded under its own generation, so only its own file's
 opens are told of it. A server that reports no generation keeps number-only
-names. An open whose Tgetattr failed (a plain walk's or a create's: a caught
-note, no memory, the file gone) has no name: it registers nothing and writes
-through, it is told only losses recorded after it was made, and its legs and its
-report go by number. A strict session never stages, so it keeps no holder, pin
+names. An open whose Tgetattr failed (no memory, the file gone, a server's
+refusal) has no name, and so has an open made before its session named files
+(before its first attribute-returning walk made it cacheable). A caught note or
+a death during a plain walk's Tgetattr fails the walk instead, as every wait in
+a call does (ARCH 8.8.3: a caller that sees its note RETURNS -T_E_INTR and never
+sleeps again in the same call), and a restarted call names its open; a
+create's keeps the open unnamed, its file already made. An open with no name
+registers nothing and writes through, and is told only losses recorded after it
+was made. Its legs go by number, since any holder at the number may be its own
+file's: a leg lands every holder's held run at the number, not only the first
+it finds, and its change stops every holder at the number staging (vote M35a,
+2026-11-18), but it takes no refusal from a holder named by a generation (vote
+M35, 2026-11-18). Such an open hears a loss only through the record, past its
+sample -- which may include a deleted file's later loss -- and so M31's "the
+dead writer's refusal reaches only that writer" holds for every leg. Its pin
+goes by number. A strict session never stages, so it keeps no holder, pin
 or record for an open to be named against, and asks nothing.
 
 **The pin (votes M24 and M24a, 2026-11-16).** A leg that runs before the
@@ -1182,6 +1206,30 @@ read observed server content). The boundary page of an append chain EXTENDS
 only when the existing page is OWN and ends exactly at the new run's start
 (never a hole, never a mixed cvers/own page); the failed/partial-flush arm
 keeps the fail-safe whole-file drop.
+
+**An own page names its writer's file (votes M34 and M34a, 2026-11-18).** The
+single-writer premise makes an own page the current content of a FILE, but the
+cache is keyed by the inode number, and Stratum gives a deleted file's number
+to the next file created while opens of the deleted file stand (12.6, "A
+file's name"). Audit round 9 of vote M15 found such an open served the next
+file's own pages, and its fstat the next file's attributes. So an own page
+records the name its writer registered under (the holder's generation, or
+none on a server that reports none), and the attribute entry keeps the
+generation its reply carried. A read, a mapping fill or an fstat through a
+handle is served an own page or an attribute only when the handle's name is
+the same generation; a handle named on a server that reports no generation is
+served by number. A plain file's handle with no name (its Tgetattr failed, or
+it was made before its session named files) is served neither: it asks the
+server, which answers a deleted file's fid with `ESTALE`. A directory's handle
+with no name (the attach root, a directory a plain walk reached) is served the
+attributes by number (vote M34a), so the resolver's per-directory search check
+stays a cache hit; the residue is that a deleted directory's unnamed handle
+can report the next occupant's metadata, never content (a directory has no own
+pages), and a walk from it answers `ESTALE`. A page a read populated stays
+version-gated and serves any handle whose open-time version matches: Stratum
+starts a reused number's version past the old file's (`si_cvers` = prior + 1),
+so a version match never crosses files. A serve by name (a stat by name, the
+walk serve) resolves the name to the current file and keeps its own rule.
 
 **The own install's guard (votes M24 and M24a, 2026-11-16).** The read
 populate's guard closes a read racing an invalidate (pre-mutation bytes
