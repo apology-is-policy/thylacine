@@ -123,6 +123,7 @@ static u32  g_create_flags;          // the open flags the last Tlcreate carried
 static u32  g_ga_mode = 0100644u;    // M8: the mode every attribute reply reports
 static u32  g_ga_gid = 0x5678u;      // F-5: the gid every Rgetattr reports
 static u32  g_ga_fail_ecode;         // != 0: every Tgetattr answers Rlerror(ecode)
+static struct Proc *g_ga_kill_proc;  // marked dying as the next Tgetattr is answered
 static u64  g_ga_gen;                // B-3h: the generation every Rgetattr reports
 static u32  g_tgetattr_seen;         // B-3h: Tgetattrs since the last lock_wire_reset
 static u64  g_tgetattr_mask;         // B-3h: the last Tgetattr's request mask
@@ -645,6 +646,10 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TGETATTR) {
         g_tgetattr_seen++;
+        if (g_ga_kill_proc) {        // a death that arrives while the request is on the wire
+            __atomic_store_n(&g_ga_kill_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+            g_ga_kill_proc = NULL;
+        }
         if (g_ga_event_path) {
             u64 ep = g_ga_event_path;
             g_ga_event_path = 0;
@@ -881,6 +886,7 @@ static struct Spoor *make_open_client_and_root(void) {
     g_ga_mode = 0100644u;
     g_ga_fail_ecode = 0;
     g_ga_event_path = 0;
+    g_ga_kill_proc = NULL;
     g_unlinkat_fail_ecode = 0;
     g_renameat_fail_ecode = 0;
     g_rd_name = g_rd_foo;
@@ -11043,17 +11049,21 @@ void test_dev9p_s15_leg_resumes_after_a_closer(void) {
 }
 
 // Round 10 F4 (ARCH 8.8.3): a death during the plain walk's Tgetattr fails the walk,
-// as a caught note does, and clunks the fid it bound. The control, one variable away
-// (the same refusal on a thread no death has reached): the walk succeeds unnamed.
+// as a caught note does. A dying thread sends no Tclunk: the fid it bound is handed
+// on (the closer's in production; this bare client, with no attachment, reports a
+// refusal). The control, one variable away (the same refusal on a thread no death
+// has reached): the walk succeeds unnamed.
 static struct Spoor   *g_f3_root;
 static struct Spoor   *g_f3_nc;
 static struct Walkqid *g_f3_w;
 static u16             g_f3_werr;
 static struct test_dying g_f3_thread;
+static bool              g_f3_die_on_ga;
 
 static void f3_walk(void *arg) {
     (void)arg;
     struct Thread *t = current_thread();
+    if (g_f3_die_on_ga) g_ga_kill_proc = t->proc;    // armed here: no race with the start
     t->walk_errno = 0;
     const char *names[1] = { "wbfile" };
     g_f3_w    = dev9p.walk(g_f3_root, g_f3_nc, names, 1);
@@ -11075,20 +11085,29 @@ void test_dev9p_f3_plain_walk_death_fails_the_walk(void) {
         g_ga_fail_ecode = T_E_IO;
         u32 cl0 = g_clunk_seen;
         u32 ga0 = g_tgetattr_seen;
+        struct p9_closer_stats st0, st1;
+        p9_closer_stats(&st0);
         bool started = true;
         if (dying) {
-            started = test_dying_start(&g_f3_thread, f3_walk, NULL, /*dead_now=*/true);
+            // Killed as its Tgetattr is answered: a death pending before the walk
+            // refuses the Twalk itself, and no Tgetattr is asked.
+            g_f3_die_on_ga = true;
+            started = test_dying_start(&g_f3_thread, f3_walk, NULL, /*dead_now=*/false);
             if (started) {
                 TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_f3_thread));
                 if (test_dying_done(&g_f3_thread)) test_dying_reap(&g_f3_thread);
             }
+            g_f3_die_on_ga = false;
         } else {
             f3_walk(NULL);
         }
+        p9_closer_stats(&st1);
+        g_ga_kill_proc  = NULL;
         g_ga_fail_ecode = 0;
         g_twalk_path_ov = 0;
         u32 asked   = g_tgetattr_seen - ga0;
         u32 clunked = g_clunk_seen - cl0;
+        u64 handed  = st1.live_refusals - st0.live_refusals;
         bool bound = g_f3_w && g_f3_w->nqid == 1;
         if (g_f3_w) walkqid_free(g_f3_w);
         struct dev9p_priv *np = bound ? dev9p_priv_of(g_f3_nc) : NULL;
@@ -11105,7 +11124,8 @@ void test_dev9p_f3_plain_walk_death_fails_the_walk(void) {
         if (dying) {
             TEST_ASSERT(!bound, "a death during it fails the walk");
             TEST_ASSERT(g_f3_werr != 0, "with a reason");
-            TEST_EXPECT_EQ((u64)clunked, 1ull, "and the fid it bound is clunked");
+            TEST_EXPECT_EQ((u64)clunked, 0ull, "the dying thread sends no Tclunk");
+            TEST_EXPECT_EQ(handed, 1ull, "it hands the fid on: a refusal on this bare client");
         } else {
             TEST_ASSERT(bound, "CONTROL: no death: the refusal leaves the walk standing");
             TEST_EXPECT_EQ((u64)wb, (u64)DEV9P_WB_FAILED, "CONTROL: and the open has no name");

@@ -5805,7 +5805,8 @@ void test_stalk_union_note_ends_the_search(void) {
     struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
     struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
     TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
-    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt");
+    // MREPL, so no covered member: the union is exactly um1, then um2.
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MREPL), 0, "um1 MREPL umpt");
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE umpt");
     struct Thread *t = current_thread();
     TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
