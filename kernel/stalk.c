@@ -38,6 +38,7 @@
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>       // struct Proc -> territory
 #include <thylacine/thread.h>     // current_thread -> note_interruptible
+#include <thylacine/notes.h>      // thread_die_pending (a union search's end)
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // SYS_WALK_OPEN_NAME_MAX + struct t_stat
 #include <thylacine/territory.h>  // mount_lookup + PGRP_MOUNT_CAP + root_ref
@@ -267,6 +268,16 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     return stalk_cross_from(p, probe, 0, out, crossed_pheno);
 }
 
+// ARCH 8.8.3: once a caught note has unwound a wait of this call (its mark, kept
+// until an op's own reply stands) or a death is pending, the call sleeps no more:
+// a loop over a union's members ends there, since a later member would be walked
+// with the note claimed and a hit there is a file the path does not name. A
+// server's own EINTR leaves no mark: that member refused, and is skipped.
+bool stalk_call_ended(void) {
+    struct Thread *t = current_thread();
+    return t && (t->note_call_unwound || thread_die_pending(t));
+}
+
 // stalk_union_has_child (UM) -- raw Dev.walk existence probe for the union
 // readdir dedup (see stalk.h). Mirrors the per-component walk's three miss-path
 // cleanups exactly (NULL / reuse-violation share the parent aux -> detach+unref;
@@ -275,22 +286,27 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
 // later member's same-named entry regardless of access or link-ness. A member that
 // cannot answer reads as not holding the name: the later entry is still listed, so a
 // listing may show a name twice and never loses one to a member that could not say.
-bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
-                           const char *name, u32 namelen) {
+// A probe a caught note or a death ended answers -T_E_INTR (stalk_call_ended).
+int stalk_union_has_child(struct Proc *p, struct Spoor *dir,
+                          const char *name, u32 namelen) {
     (void)p;
-    if (!dir || !dir->dev || !dir->dev->walk)              return false;
-    if (namelen == 0 || namelen > SYS_WALK_OPEN_NAME_MAX)  return false;
+    if (stalk_call_ended())                                return -T_E_INTR;
+    if (!dir || !dir->dev || !dir->dev->walk)              return 0;
+    if (namelen == 0 || namelen > SYS_WALK_OPEN_NAME_MAX)  return 0;
     char nb[SYS_WALK_OPEN_NAME_MAX + 1];
     for (u32 i = 0; i < namelen; i++) nb[i] = name[i];
     nb[namelen] = '\0';
 
     struct Spoor *nc = spoor_clone(dir);
-    if (!nc)                                               return false;
+    if (!nc)                                               return 0;
     const char *names[1] = { nb };
     struct Walkqid *w = dir->dev->walk(dir, nc, names, 1);
-    if (!w)             { nc->aux = NULL; spoor_unref(nc);            return false; }
-    if (w->spoor != nc) { walkqid_free(w); nc->aux = NULL; spoor_unref(nc); return false; }
-    bool found = (w->nqid == 1);
+    if (!w) {
+        nc->aux = NULL; spoor_unref(nc);
+        return stalk_call_ended() ? -T_E_INTR : 0;
+    }
+    if (w->spoor != nc) { walkqid_free(w); nc->aux = NULL; spoor_unref(nc); return 0; }
+    int found = (w->nqid == 1);
     walkqid_free(w);
     spoor_clunk(nc);    // nc was reused (w->spoor == nc) -> clunk-safe either way
     return found;
@@ -380,7 +396,7 @@ struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
         if ((um.flags[k] & MCREATE) || um.n == 1) {
             cm = stalk_cross_src(p, um.src[k], um.flags[k], NULL);   // the FIRST MCREATE member (or the only one)
             if (cm) spoor_path_transplant(cm, base);  // #66: the mount-point name
-            else    *errp = T_E_IO;                    // the chosen member failed to cross
+            else    *errp = stalk_call_ended() ? T_E_INTR : T_E_IO;   // the chosen member failed to cross
             break;                                     // Plan 9: create in the FIRST writable
         }
     }
@@ -422,7 +438,16 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
     snap->point = point;
     spoor_ref(point);
     snap->n = 0;
-    for (int k = 0; k < um.n; k++) {
+    for (int k = 0; k <= um.n; k++) {
+        // A member skipped for a caught note would leave the fd's listing short
+        // for its life: the open fails instead (ARCH 8.8.3).
+        if (stalk_call_ended()) {
+            union_members_release(&um);
+            union_snap_free(snap);
+            *errp = T_E_INTR;
+            return NULL;
+        }
+        if (k == um.n) break;
         struct Spoor *root = stalk_cross_src(p, um.src[k], um.flags[k], NULL);  // pheno irrelevant to readdir
         if (!root)                              continue;        // cross hole -> skip (Plan 9)
         if (!(root->qid.type & QTDIR)) { spoor_clunk(root); continue; }  // non-directory member
@@ -983,6 +1008,7 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
     if (err) { *errp = err; return NULL; }
     struct Spoor *hit = NULL;
     for (int k = 0; k < um.n && !hit; k++) {
+        if (stalk_call_ended()) { *errp = T_E_INTR; break; }
         // Per-member phenotype: accumulate locally, propagate only on a WIN.
         bool member_pheno = false;
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
@@ -1040,7 +1066,7 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         hit = nc;                      // HIT: first member with the component
     }
     union_members_release(&um);
-    if (!hit && !*errp) *errp = failed;
+    if (!hit && !*errp) *errp = stalk_call_ended() ? T_E_INTR : failed;
     return hit;                        // NULL: all members exhausted -> ENOENT
 }
 
@@ -1054,8 +1080,9 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
 // that fails to cross / is not a directory / denies X-search / lacks the name
 // is SKIPPED (not an error). Returns the ref-held member (mount-point name
 // transplanted -- #66/I-33) or NULL when no member holds the name (the caller
-// answers -T_E_NOENT). *errp is set on an allocation failure, and when no member
-// held the name and one could not say (union_walk_failure).
+// answers -T_E_NOENT). *errp is set on an allocation failure, when no member
+// held the name and one could not say (union_walk_failure), and to T_E_INTR when
+// a caught note or a death ended the search (stalk_call_ended).
 struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
                                          const char *leafname, int *errp) {
     *errp = 0;
@@ -1066,6 +1093,7 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
     if (err) { *errp = err; return NULL; }
     struct Spoor *hit = NULL;
     for (int k = 0; k < um.n && !hit; k++) {
+        if (stalk_call_ended()) { *errp = T_E_INTR; break; }
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
         struct Spoor *mroot = stalk_cross_src(p, um.src[k], um.flags[k], NULL);
         if (!mroot) {                                      // F8: cross-fail -> skip
@@ -1108,7 +1136,7 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
         hit = mroot;               // HIT: first member that holds `leafname`
     }
     union_members_release(&um);
-    if (!hit && !*errp) *errp = failed;
+    if (!hit && !*errp) *errp = stalk_call_ended() ? T_E_INTR : failed;
     return hit;                    // NULL: no member holds the leaf -> ENOENT
 }
 

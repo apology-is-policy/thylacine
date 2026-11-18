@@ -37,6 +37,7 @@
 #include <thylacine/path.h>     // #66: quarry->path assertions
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>    // sched: the dying thread's yield-wait
 #include <thylacine/thread.h>
 #include <thylacine/spoor.h>
 #include <thylacine/stalk.h>
@@ -305,6 +306,11 @@ static int         g_fix_walk_err_skip;
 static u64         g_fix_stat_err_qid;
 static u64         g_fix_walk_err2_parent;
 static int         g_fix_walk_err2_rc;
+// A refusal above (the walk's first arm, the stat's, the readdir's) also leaves the
+// call's mark, as a caught note's unwind does (ARCH 8.8.3), and a stat or readdir
+// refusal answers EINTR.
+static bool        g_fix_err_marks;
+static u64         g_fix_readdir_err_qid;   // a readdir of this directory is refused
 
 static bool fix_walk_refused(u64 parent, const char *name) {
     if (!g_fix_walk_err_name || !fix_streq(name, g_fix_walk_err_name)) return false;
@@ -315,6 +321,7 @@ static bool fix_walk_refused(u64 parent, const char *name) {
     if (g_fix_walk_err_parent && g_fix_walk_err_parent != parent)      return false;
     if (g_fix_walk_err_skip > 0) { g_fix_walk_err_skip--; return false; }
     if (g_fix_walk_err_rc) dev_walk_failed(g_fix_walk_err_rc);
+    if (g_fix_err_marks) current_thread()->note_call_unwound = true;
     return true;
 }
 
@@ -385,7 +392,11 @@ static int g_fix_stat_calls;
 
 static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
-    if (g_fix_stat_err_qid && c->qid.path == g_fix_stat_err_qid) return -T_E_IO;
+    if (g_fix_stat_err_qid && c->qid.path == g_fix_stat_err_qid) {
+        if (!g_fix_err_marks) return -T_E_IO;
+        current_thread()->note_call_unwound = true;
+        return -T_E_INTR;
+    }
     g_fix_stat_calls++;
     return fix_stat_qid(c->qid.path, out);
 }
@@ -589,6 +600,11 @@ static long fix_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     // tests fail on the old cross-without-open path and pass ONLY on the
     // opened-member snapshot (union_snap).
     if (!(c->flag & COPEN)) return -1;
+    if (g_fix_readdir_err_qid && c->qid.path == g_fix_readdir_err_qid) {
+        if (!g_fix_err_marks) return -T_E_IO;
+        current_thread()->note_call_unwound = true;
+        return -T_E_INTR;
+    }
     u8 *out = (u8 *)buf;
     long len = 0;
     u64  ord = 0;
@@ -5727,3 +5743,147 @@ void test_stalk_walk_failure_on_the_rewalk(void) {
     TEST_EXPECT_EQ(split_qid, (u64)24, "control: the mount's name resolves");
 }
 
+// Round 10 F1 (ARCH 8.8.3): once a caught note has ended a member's walk, the union's
+// search ends with EINTR -- um2, which holds the same name, is never walked, so no
+// call acts on a file the path does not name. The control, one variable away (the
+// same refusal, no mark: the member refused on its own), skips um1 and finds um2's
+// entry, as Plan 9's union skip says. Every loop over the members: the holder
+// search, the path walk, the readdir dedup's probe, a member's readdir, the union
+// open's snapshot; and a death pending ends the holder search the same way.
+static struct Proc      *g_un_p;
+static struct Spoor     *g_un_pt;
+static struct Spoor     *g_un_hit;
+static int               g_un_err;
+static int               g_un_walks;
+static struct test_dying g_un_thread;
+
+static void un_dying_holding(void *arg) {
+    (void)arg;
+    g_fix_walk_calls = 0;
+    g_un_hit   = stalk_union_member_holding(g_un_p, g_un_pt, "shared", &g_un_err);
+    g_un_walks = g_fix_walk_calls;
+}
+
+static long un_count_entries(const u8 *buf, s64 got, u64 *q2) {
+    long n = 0;
+    u64 qp = 0, ck = 0;
+    char nm[64];
+    while (got > 0 && urd_entry(buf, (long)got, (int)n, &qp, &ck, nm, sizeof(nm)) > 0) {
+        if (n == 2 && q2) *q2 = qp;
+        n++;
+    }
+    return n;
+}
+
+void test_stalk_union_note_ends_the_search(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER umpt");
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && !t->note_call_unwound, "a test thread's call has no mark");
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);   // for the readdir arms
+
+    for (u32 i = 0; i < 2; i++) {
+        bool noted = i == 0;
+        g_fix_err_marks = noted;
+        walk_reason_set("shared", 22, T_E_INTR, 0);     // um1's "shared" is refused
+
+        g_fix_walk_calls = 0;
+        int eh = 0;
+        struct Spoor *h = stalk_union_member_holding(&p, pt, "shared", &eh);
+        int hw = g_fix_walk_calls;
+        t->note_call_unwound = false;                  // what the EL0-return tail clears
+        u64 hq = h ? h->qid.path : 0;
+        if (h) spoor_clunk(h);
+
+        int ec = 0;
+        struct Spoor *c = stalk_err(&p, root, "umpt/shared", 11, STALK_WALK, 0, &ec);
+        t->note_call_unwound = false;
+        u64 cq = c ? c->qid.path : 0;
+        if (c) spoor_clunk(c);
+
+        int hc = stalk_union_has_child(&p, um1, "shared", 6);
+        t->note_call_unwound = false;
+
+        u8  buf[512];
+        u64 q2 = 0;
+        s64 gd = q ? union_readdir_run(&p, q, buf, (long)sizeof(buf), 0) : -1;
+        t->note_call_unwound = false;
+        long nd = un_count_entries(buf, gd, &q2);
+
+        walk_reason_clear();
+        g_fix_readdir_err_qid = 22;                    // um1's own listing is refused
+        s64 gr = q ? union_readdir_run(&p, q, buf, (long)sizeof(buf), 0) : -1;
+        t->note_call_unwound = false;
+        g_fix_readdir_err_qid = 0;
+        long nr = un_count_entries(buf, gr, NULL);
+
+        g_fix_stat_err_qid = 25;                       // um2's search check is refused
+        int eo = 0;
+        struct Spoor *o = stalk_err(&p, root, "umpt", 4, STALK_OPEN, 0, &eo);
+        t->note_call_unwound = false;
+        g_fix_stat_err_qid = 0;
+        g_fix_err_marks = false;
+        int on = (o && o->union_snap) ? o->union_snap->n : -1;
+        if (o) spoor_clunk(o);
+
+        TEST_ASSERT(q != NULL, "the union opens");
+        if (noted) {
+            TEST_ASSERT(h == NULL, "a caught note in um1's walk ends the holder search");
+            TEST_EXPECT_EQ(eh, T_E_INTR, "with EINTR");
+            TEST_EXPECT_EQ(hw, 1, "um2 is never walked");
+            TEST_ASSERT(c == NULL, "the path walk ends too");
+            TEST_EXPECT_EQ(ec, T_E_INTR, "with EINTR");
+            TEST_EXPECT_EQ(hc, -T_E_INTR, "the dedup probe answers EINTR");
+            TEST_EXPECT_EQ(nd, 2l, "the listing stops at the probe: um1's two entries");
+            TEST_EXPECT_EQ(gr, -(s64)T_E_INTR, "a refused member listing ends the readdir: EINTR");
+            TEST_ASSERT(o == NULL, "a refused member's search check fails the union open");
+            TEST_EXPECT_EQ(eo, T_E_INTR, "with EINTR");
+        } else {
+            TEST_EXPECT_EQ(hq, (u64)25, "CONTROL: um1 refused on its own: um2 holds shared");
+            TEST_EXPECT_EQ(hw, 2, "CONTROL: both members walked");
+            TEST_EXPECT_EQ(cq, (u64)26, "CONTROL: the path walk finds um2's shared");
+            TEST_EXPECT_EQ(hc, 0, "CONTROL: the probe reads as absent");
+            TEST_EXPECT_EQ(nd, 4l, "CONTROL: the listing goes on, um2's shared listed too");
+            TEST_EXPECT_EQ(q2, (u64)26, "CONTROL: the third entry is um2's shared");
+            TEST_EXPECT_EQ(nr, 1l, "CONTROL: um1's listing skipped: um2's only2 alone");
+            TEST_EXPECT_EQ(on, 1, "CONTROL: the open skips um2: one member");
+        }
+    }
+
+    // A death pending: the holder search walks no member. Control, one variable away
+    // (the same refusal, no death): um2 holds shared.
+    walk_reason_set("shared", 22, T_E_IO, 0);
+    int ek = 0;
+    g_fix_walk_calls = 0;
+    struct Spoor *hk = stalk_union_member_holding(&p, pt, "shared", &ek);
+    int kw = g_fix_walk_calls;
+    u64 kq = hk ? hk->qid.path : 0;
+    if (hk) spoor_clunk(hk);
+    g_un_p = &p; g_un_pt = pt; g_un_hit = NULL; g_un_err = 0; g_un_walks = -1;
+    bool started = test_dying_start(&g_un_thread, un_dying_holding, NULL, /*dead_now=*/true);
+    if (started) {
+        TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_un_thread));
+        if (test_dying_done(&g_un_thread)) test_dying_reap(&g_un_thread);
+    }
+    walk_reason_clear();
+    bool dhit = g_un_hit != NULL;
+    if (g_un_hit) spoor_clunk(g_un_hit);
+    if (q) spoor_clunk(q);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+
+    TEST_EXPECT_EQ(kq, (u64)25, "CONTROL: no death: um1 refused, um2 holds shared");
+    TEST_EXPECT_EQ(kw, 2, "CONTROL: both members walked");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_ASSERT(!dhit, "a death pending ends the holder search");
+    TEST_EXPECT_EQ(g_un_err, T_E_INTR, "with EINTR");
+    TEST_EXPECT_EQ(g_un_walks, 0, "no member walked");
+}

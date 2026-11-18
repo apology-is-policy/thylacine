@@ -333,6 +333,9 @@ u64 dev9p_wb_leg_sleeps(void);
 u32  dev9p_wb_pins(struct p9_client *cl, u64 path);
 void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on);
 void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on);
+// The same entry for a file named by a generation: a holder of another generation
+// registers beside it, so it can stand between two holders.
+void dev9p_wb_test_job_gen(struct p9_client *cl, u64 path, u64 gen, bool on);
 u32  dev9p_wb_test_purge(struct p9_client *cl);
 // A hook run once, on the next leg that found a run held, between its look and
 // its flush, with no lock held; one run once on the next fsync of a plain file,

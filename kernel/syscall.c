@@ -4599,10 +4599,12 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
         if (src->dev->perm_enforced) bound_by = &parent_st;
         if (!admitted || perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
             s64 deny = -T_E_ACCES;
-            if (perm_check(p, &parent_st, PERM_X) == 0 &&
+            if (perm_check(p, &parent_st, PERM_X) == 0) {
                 // width: both callers refused a name past SYS_WALK_OPEN_NAME_MAX
-                stalk_union_has_child(p, src, name_scratch, (u32)name_len_raw))
-                deny = -T_E_EXIST;
+                int hc = stalk_union_has_child(p, src, name_scratch, (u32)name_len_raw);
+                if (hc > 0)      deny = -T_E_EXIST;
+                else if (hc < 0) deny = hc;     // a caught note ended the probe
+            }
             spoor_clunk(src);
             return deny;
         }
@@ -5125,8 +5127,12 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
     u64  idx    = 0;      // 0-based index into the merged-dedup sequence
     long outlen = 0;      // bytes written to `out`
     bool full   = false;
+    // A caught note or a death ended a member's read or a dedup probe: no later
+    // member is read (ARCH 8.8.3), and what was emitted is the merged sequence's
+    // own prefix.
+    bool ended  = false;
 
-    for (int k = 0; k < nmembers && !full; k++) {
+    for (int k = 0; k < nmembers && !full && !ended; k++) {
         struct Spoor *m = members[k].opened;   // the OREAD fid -- readdir
         if (!m)                               continue;   // (snapshot stores no NULLs; defensive)
         if (!(m->qid.type & QTDIR))           continue;   // non-directory member
@@ -5135,7 +5141,10 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
         s64 moff = 0;
         for (;;) {
             long got = m->dev->readdir(m, tmp, UNION_RD_TMP, moff);
-            if (got <= 0)                     break;       // member EOD / error
+            if (got <= 0) {                                // member EOD / error
+                ended = got < 0 && stalk_call_ended();
+                break;
+            }
             long pos = 0;
             bool advanced = false;
             while (pos + 24 <= got && !full) {
@@ -5150,14 +5159,15 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                 // DEDUP first-member-wins: drop a member[k>0] entry whose name an
                 // earlier member already provides. Relookup (no seen-set state):
                 // deterministic, so re-drive resumes at the same idx.
-                bool dup = false;
-                for (int j = 0; j < k && !dup; j++) {
+                int dup = 0;
+                for (int j = 0; j < k && dup == 0; j++) {
                     // R2-F1: dedup Twalks the UNOPENED clone -- a 9P server
                     // rejects a Twalk from the opened readdir fid.
                     struct Spoor *mj = members[j].walkable;
                     if (mj && (mj->qid.type & QTDIR))
                         dup = stalk_union_has_child(p, mj, nm, nlen);
                 }
+                if (dup < 0) { ended = true; break; }
 
                 if (!dup) {
                     if (idx >= in_ordinal) {
@@ -5178,7 +5188,7 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                 advanced = true;
                 pos += entry;
             }
-            if (full || !advanced)            break;
+            if (full || ended || !advanced)   break;
         }
     }
 
@@ -5190,6 +5200,7 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
     // silently truncate the listing. Unreachable at want >= 2048 (a dirent is
     // <= 24 + 255); the guard bounds a pathological tiny buffer.
     if (full && outlen == 0)                         return -T_E_INVAL;
+    if (ended && outlen == 0)                        return -T_E_INTR;
     return (s64)outlen;   // 0 => nothing at/after in_ordinal => end-of-directory
 }
 

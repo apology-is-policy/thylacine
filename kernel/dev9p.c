@@ -763,6 +763,8 @@ static u64 wb_open_sample(struct dev9p_priv *p, u64 path) {
 }
 
 // fsync's report: the file's record, once, when this open's sample is behind it.
+// An open with no name marks nothing told: it may be a deleted file's (vote M35),
+// and the file's own later opens are told still (votes M27, M30a).
 static int wb_loss_report(struct dev9p_priv *p, struct dev9p_fkey k) {
     struct p9_wb_losses *t = &p->client->wb_loss;
     if (__atomic_load_n(&t->seq, __ATOMIC_ACQUIRE) == 0) return 0;
@@ -771,7 +773,7 @@ static int wb_loss_report(struct dev9p_priv *p, struct dev9p_fkey k) {
     struct p9_wb_loss *r = wb_loss_find_locked(t, k);
     if (r && r->seq > p->wb_errseq) {
         p->wb_errseq = r->seq;
-        r->seen      = true;
+        if (!k.unnamed) r->seen = true;
         rc           = -r->err;
     }
     spin_unlock(&t->lock);
@@ -1105,7 +1107,7 @@ void dev9p_wb_test_pin(struct p9_client *cl, u64 path, bool on) {
     spin_unlock(&b->lock);
 }
 
-void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
+static void wb_test_job_set(struct p9_client *cl, u64 path, bool has_gen, u64 gen, bool on) {
     if (!on) {
         wb_reg_leave(&g_wb_test_job);
         return;
@@ -1116,14 +1118,22 @@ void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
     g_wb_test_job.cl     = cl;
     g_wb_test_job.holder = NULL;
     g_wb_test_job.path   = path;
-    g_wb_test_job.gen    = 0;
-    g_wb_test_job.has_gen = false;
+    g_wb_test_job.gen    = gen;
+    g_wb_test_job.has_gen = has_gen;
     g_wb_test_job.seq    = ++b->seq;
     g_wb_test_job.next   = b->head;
     b->head              = &g_wb_test_job;
     __atomic_store_n(&g_wb_test_job.linked, true, __ATOMIC_RELEASE);
     __atomic_fetch_add(&g_wb_reg_count, 1u, __ATOMIC_RELEASE);
     spin_unlock(&b->lock);
+}
+
+void dev9p_wb_test_job(struct p9_client *cl, u64 path, bool on) {
+    wb_test_job_set(cl, path, false, 0, on);
+}
+
+void dev9p_wb_test_job_gen(struct p9_client *cl, u64 path, u64 gen, bool on) {
+    wb_test_job_set(cl, path, true, gen, on);
 }
 
 // A test that fails with a holder registered leaks the open, and its entry

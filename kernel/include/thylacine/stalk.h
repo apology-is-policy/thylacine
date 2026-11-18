@@ -231,9 +231,16 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe, struct Spoor **out,
 // Dev.walk existence probe: NO permission check and NO symlink expansion (dedup
 // is about NAME PRESENCE, not access). Used by the union readdir merge to drop a
 // later member's entry whose name an earlier member already provides (first-
-// member-wins). Returns false on any miss / walk failure / over-long name.
-bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
-                           const char *name, u32 namelen);
+// member-wins). Returns 1 when present, 0 on any miss / walk failure / over-long
+// name, -T_E_INTR when a caught note or a death ended the probe (the caller then
+// ends its call with it).
+int stalk_union_has_child(struct Proc *p, struct Spoor *dir,
+                          const char *name, u32 namelen);
+
+// ARCH 8.8.3: a caught note has unwound a wait of the current call (its mark) or
+// a death is pending, so the call must return now, sleeping no more. Every loop
+// over a union's members asks it after a member fails.
+bool stalk_call_ended(void);
 
 
 // stalk_union_member_holding (UM, UM-7 F3) -- the member of the union at
