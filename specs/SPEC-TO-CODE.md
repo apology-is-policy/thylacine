@@ -2764,8 +2764,9 @@ The serve by name is pinned by `dev9p.m34_dead_open_no_other_files_own_page` and
 `dev9p.f3_plain_walk_note_fails_the_walk` and the `dev9p.m31_*` tests.
 
 TLC 2026-11-18 (Files={f1,f2}, Capacity=1, MaxCvers=3, Opens={o1,o2},
-MaxGen=2); all twenty-six fs_cache cfgs as wanted (aux-gate
-resid/m15-tlc-fscache.sh):
+MaxGen=2; the round 10 cfgs Files={f1}); all thirty-four fs_cache cfgs as
+wanted (aux-gate resid/m15-tlc-fscache.sh). The twenty-six earlier ones keep
+their verdicts, distinct-state counts and trace lengths through round 10:
 - `fs_cache_reuse.cfg` (from `fs_cache_wb.cfg`: EnableReuse, MaxGen 0 -> 2, and
   the invariants `InvariantsReuse` adds): every one of them. GREEN -- 10544250
   distinct states (2494548 before round 9).
@@ -2800,6 +2801,39 @@ resid/m15-tlc-fscache.sh):
   `NoWrongRead` VIOLATED -- after a reuse and the new file's populate, a deleted
   file's open is served the new file's entry (4 states: Init, reuse, open,
   read).
+- `fs_cache_reuse_unnamed.cfg` (from `fs_cache_reuse.cfg`: Files {f1},
+  EnableUnnamed): every invariant of `InvariantsReuse`. GREEN -- 14848 distinct
+  states.
+- `fs_cache_reuse_unnamed_told.cfg`: `NeverToldUnnamed` VIOLATED by design, the
+  witness that an open with no name hears its own file's loss (5 states: Init,
+  stage, mint, refuse, fsync).
+- `fs_cache_reuse_unnamed_residue.cfg`: `NeverMisToldUnnamed` VIOLATED by
+  design, vote M35's accepted cost: the new file's open with no name is told the
+  deleted file's refused run by number (6 states: Init, stage, reuse, mint,
+  refuse, fsync).
+- `fs_cache_buggy_unnamed_serve.cfg` (BUGGY_UNNAMED_SERVE, vote M34's unnamed
+  clause dropped): `NoWrongRead` VIOLATED -- a deleted file's open with no name
+  is served the new file's entry (5 states: Init, mint, reuse, open, read).
+- `fs_cache_buggy_unnamed_leg_told.cfg` (BUGGY_UNNAMED_LEG_TOLD, before vote
+  M35): `NoMisdirectedLoss` VIOLATED -- the new file's open with no name answers
+  its fsync with the refusal its leg met at the deleted file's holder (5 states:
+  Init, stage, reuse, mint, leg).
+- `fs_cache_buggy_unnamed_marks_seen.cfg` (BUGGY_UNNAMED_MARKS_SEEN, before
+  round 10 F2): `NoMisdirectedSeen` VIOLATED. TLC's shortest: the new file's
+  open with no name is told the deleted file's refused run and marks that record
+  told (6 states: Init, stage, reuse, mint, refuse, fsync), a mark no later open
+  reads, since a deleted file takes none. The harmful direction, a deleted
+  file's open with no name marking the live file's record, is 7 states (an
+  invariant restricted to it, on a scratch copy of the model).
+- `fs_cache_reuse_external.cfg` (from `fs_cache_reuse.cfg`: Files {f1},
+  EnableExternalReuse, `CacheOfLiveFile` left out): every invariant listed.
+  GREEN -- 3375 distinct states.
+- `fs_cache_buggy_serve_older.cfg` (BUGGY_SERVE_OLDER): `NoWrongRead` VIOLATED
+  -- after another client's reuse of the number, the new file's open is served
+  the deleted file's entry (5 states: Init, open, external reuse, mint, read).
+  Without an external reuse the flag stays green: `CacheOfLiveFile` holds there,
+  so no entry is older than any open's name (a scratch one-file copy of
+  `fs_cache_reuse.cfg` with the flag: GREEN, 2870 distinct states).
 
 The fifteen earlier cfgs run with `EnableReuse = FALSE`, where every open is
 live and every name the same. The ones without staging keep their figures
