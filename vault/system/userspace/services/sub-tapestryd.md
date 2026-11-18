@@ -18,21 +18,27 @@ updated: 2026-11-18
 
 The serve loop's FRAME tick is counted from an anchor, rate-exact
 (`frame_clock.rs`, in the host-tested lib): `ticks_due(elapsed_ns, hz)` is
-floor(elapsed x hz / 1 s), and the poll timeout `ms_until_next` is the time to
-the first nanosecond at which one more tick is due, rounded UP to whole
-milliseconds (at least 1), so a wake is never early and never a tick late. The
-loop still fires at most one `frame_tick` per pass (a stalled loop coalesces
-its backlog) and re-anchors on a rate change or an unfreeze. Before, the period
-was `1000 / hz` in integer milliseconds: 16 ms at 60 Hz ran 62.5 Hz, 66 ms at
-the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- every mac quake timedemo
-read 62.5 fps. TAPESTRY 18.4 says 60 Hz, now true. Witnesses: three host tests
-(the count over 10 s at 1, 7, 15, 60, 144 and 240 Hz with and without pass
-overhead; no early wake at any phase, including a whole number of milliseconds
-before a fractional boundary and a nanosecond either side; the boundaries
-themselves), four mutants killed (the integer-ms period, a timeout rounded
-down, the next tick read as the current one, the boundary floored); and
-ls-gfx-quake's ceiling, a timedemo at most 61 fps (one present per tick
-cannot beat the clock).
+floor(elapsed x hz / 1 s). The poll timeout `ms_until_tick(elapsed_ns, hz,
+ticks_done)` aims at the next UNFIRED tick from a clock read taken just before
+the poll, not the one step (2) used -- so the pass's own work (the tick itself,
+the fence pump) never pushes a tick back -- rounded UP to whole milliseconds,
+and 0 if that tick fell due during the pass (the next pass fires it). The loop
+still fires at most one `frame_tick` per pass (a stall coalesces its backlog)
+and re-anchors on a rate change (the ctl or the idle throttle) or an unfreeze;
+the frozen test-mode clock and the fence-pending 1 ms clamp are unchanged.
+Before, the period was `1000 / hz` in integer milliseconds: 16 ms at 60 Hz ran
+62.5 Hz, 66 ms at the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- every
+mac quake timedemo read 62.5 fps -- and the timeout came from the step (2)
+sample, so every tick was delivered late by the pass's work. TAPESTRY 18.4
+says 60 Hz, now true. Witnesses: four host tests (the count over 10 s at 1, 7,
+15, 60, 144 and 240 Hz with pass work of 0, 137 us and half a period, every tick
+under 1 ms past its boundary; at every phase -- a millisecond walk and a sweep
+of whole milliseconds before each fractional boundary, a nanosecond either
+side -- a wake has exactly one more tick due and none a millisecond earlier; a
+tick already due polls at once; the old period's rates), ten mutants killed;
+and ls-gfx-quake's ceiling, a timedemo at most 61 fps (one present per tick
+cannot beat the clock). Round 49 (Opus 5.5, same-family): 0 P0, 0 P1, 1 P2 (a
+"never late" assertion that let a skipped tick through), 3 P3.
 
 ## FRAME is opt-in per surface (November 18, vote 144)
 

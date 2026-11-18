@@ -821,9 +821,11 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
 - **FRAME is the display clock** (D1's pacing signal): base virtio-gpu 2D has
   NO guest-visible vblank (`EVENT_DISPLAY` is config-change only — verified),
   so tapestryd SYNTHESIZES a fixed-rate FRAME tick (60 Hz default,
-  `clock-rate` ctl): exactly that many ticks a second, counted from an anchor
-  (never a rounded millisecond period, which at 60 Hz ran 62.5), with the
-  poll timeout rounded up so a wake is never early. Honest by construction; a real vblank source on future
+  `clock-rate` ctl): ticks fall due at exactly that rate, counted from an
+  anchor (never a rounded millisecond period, which at 60 Hz ran 62.5); the
+  poll timeout is read fresh and rounded up, so a wake is never early; a pass
+  that runs past a tick coalesces the missed ones into one; a rate change
+  (the ctl, or the idle throttle) re-anchors the count. Honest by construction; a real vblank source on future
   hardware backends slots in behind the same event. A client that only
   recycles on present-CQEs never needs FRAME (the game loop); a client that
   paces (video) arms it.

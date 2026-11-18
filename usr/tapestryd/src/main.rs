@@ -520,7 +520,8 @@ impl Driver for Tapestryd {
 
         // The FRAME clock (section 18.4): a synthesized fixed-rate tick
         // riding the poll timeout (base virtio-gpu 2D has no guest vblank).
-        // Re-anchored when the ctl changes clock-rate.
+        // Re-anchored when the effective rate changes (the clock-rate ctl or
+        // the idle throttle) and on unfreeze.
         let mut anchor = Instant::now();
         let mut ticks_done: u64 = 0;
         let mut cur_hz = self.comp.clock_hz;
@@ -875,7 +876,9 @@ impl Driver for Tapestryd {
             let timeout = if frozen {
                 30 // no tick scheduled; a short pace keeps input drained
             } else {
-                frame_clock::ms_until_next(elapsed_ns, cur_hz)
+                // A fresh read: this pass's work (the tick itself, the fence
+                // pump) must not push the next tick back.
+                frame_clock::ms_until_tick(anchor.elapsed().as_nanos() as u64, cur_hz, ticks_done)
             };
             // W2d: the GPU IRQ is not pollable (the G-5 engine owns it;
             // irq.wait only inside a sync submit), so while fenced chains
