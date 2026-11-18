@@ -6095,6 +6095,68 @@ void test_dev9p_m31_a_new_file_at_a_dead_files_number(void) {
     }
 }
 
+// Vote M31: every leg of a file at a dead holder's number skips the dead holder's
+// run: the walk that names the file and the open after it, a stat by name the
+// Larder serves (named by the generation the Larder keeps), and a cached open (the
+// same). The dead holder's run goes at its own last close. The control, one
+// variable away (the server names the holder's generation): the walk's leg lands
+// the holder's run.
+void test_dev9p_m31_legs_skip_a_dead_holder(void) {
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 9 + 1);
+    u8 *chunk = m23_chunk();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    const char *names[1] = { "wbfile" };
+    size_t lens[1] = { 6 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    for (u32 i = 0; i < 2; i++) {
+        bool reborn = i == 0;
+        struct Spoor *root = m31_root();
+        TEST_ASSERT(root != NULL, "root");
+        struct Spoor *f1 = m31_create(root, true, 0x51u);
+        wb_wire_reset();
+        long w0 = f1 ? dev9p.write(f1, chunk, 256, 0) : -1;
+        struct Spoor *n = f1 ? m31_peer(root, reborn ? 0x52u : 0x51u) : NULL;
+        u32 seen_n = g_twrite_seen;
+        u32 wga0 = g_wga_seen;
+        struct Walkqid *q = n ? dev9p.walk_attrs(root, NULL, names, lens, 1, sts) : NULL;
+        if (q == DEV_WALK_ATTRS_UNSUPPORTED) q = NULL;
+        bool served = q && q->nqid == 1 && q->spoor == NULL && g_wga_seen == wga0;
+        if (q) walkqid_free(q);
+        u32 seen_q = g_twrite_seen;
+        struct Spoor *co = NULL;
+        if (n) {
+            struct larder *l = &g_client.larder;
+            larder_page_install(l, larder_gen_snapshot(l), M23_PATH, 0, 0, data, (u32)sizeof(data));
+            co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+        }
+        struct dev9p_priv *cp = co ? dev9p_priv_of(co) : NULL;
+        bool cached = cp && cp->cached_open;
+        u32 seen_co = g_twrite_seen;
+        if (co) { spoor_clunk(co); (void)p9_client_reader_pump_ready(&g_client); }
+        int ncl = n ? d9_close(n) : -1;
+        int c1 = f1 ? d9_close(f1) : -1;
+        u32 seen_end = g_twrite_seen;
+        m23_end(root);
+
+        TEST_ASSERT(f1 && n, "a holder and an open through a walk that asks the generation");
+        TEST_EXPECT_EQ((u64)w0, 256ull, "the holder's write is held");
+        if (reborn) {
+            TEST_EXPECT_EQ((u64)seen_n, 0ull,
+                           "the walk naming another generation, and its open, land nothing of the dead holder's");
+            TEST_ASSERT(served, "the Larder serves a stat by name of the file");
+            TEST_EXPECT_EQ((u64)seen_q, 0ull, "and its leg, named by the Larder's generation, lands nothing");
+            TEST_ASSERT(cached, "a cached open of the file is minted");
+            TEST_EXPECT_EQ((u64)seen_co, 0ull, "and its leg lands nothing");
+            TEST_EXPECT_EQ((u64)seen_end, 1ull, "the dead holder's run goes at its own last close");
+        } else {
+            TEST_EXPECT_EQ((u64)seen_n, 1ull, "CONTROL: the holder's generation: the walk's leg lands its run");
+            TEST_EXPECT_EQ((u64)seen_end, 1ull, "CONTROL: and nothing is left for its close");
+        }
+        TEST_ASSERT(ncl == 0 && c1 == 0, "both close");
+    }
+}
+
 // Vote M31: a create asks its new file's generation with one Tgetattr, on a loose
 // cacheable session only, and one that cannot learn it writes through: its name
 // could not tell its file from a dead one's. The control, one variable away (the

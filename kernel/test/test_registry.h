@@ -2123,6 +2123,7 @@ void test_dev9p_m30a_a_loss_is_told_once(void);
 void test_dev9p_m30a_holders_fsync_marks_the_loss_told(void);
 void test_dev9p_m31_a_dead_files_loss_is_not_the_new_files(void);
 void test_dev9p_m31_a_new_file_at_a_dead_files_number(void);
+void test_dev9p_m31_legs_skip_a_dead_holder(void);
 void test_dev9p_m31_create_that_cannot_learn_writes_through(void);
 void test_dev9p_m27_create_samples_the_record(void);
 void test_dev9p_m27_navigation_handle_samples_at_its_walk(void);

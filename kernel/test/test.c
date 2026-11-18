@@ -3105,6 +3105,8 @@ struct test_case g_tests[] = {
                                        test_dev9p_m31_a_dead_files_loss_is_not_the_new_files, false, NULL },
     { "dev9p.m31_a_new_file_at_a_dead_files_number",
                                        test_dev9p_m31_a_new_file_at_a_dead_files_number, false, NULL },
+    { "dev9p.m31_legs_skip_a_dead_holder",
+                                       test_dev9p_m31_legs_skip_a_dead_holder, false, NULL },
     { "dev9p.m31_create_that_cannot_learn_writes_through",
                                        test_dev9p_m31_create_that_cannot_learn_writes_through, false, NULL },
     { "dev9p.m27_create_samples_the_record",
