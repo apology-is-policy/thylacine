@@ -71,8 +71,11 @@ use crate::input::{
     REL_X, REL_Y,
 };
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
-const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES <= 64);
+// The listeners, the conns, one watch per pane, and the broker's news.
+const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES + 1 <= 64);
+use lictor::proxy::news::{self, Watch};
 use tapestryd::epoch::{Reading, SeatEpoch};
+use tapestryd::frame_clock;
 use tapestryd::pointer::{self, Ptr, Tablet};
 const _: () = assert!(
     pointer::EV_SYN == EV_SYN && pointer::EV_KEY == EV_KEY && pointer::EV_REL == EV_REL
@@ -368,16 +371,19 @@ fn unanswered(said: &mut bool, device: &str) {
 }
 
 impl Tapestryd {
-    /// Deal with the seat a drain's events are of, before any of them is
-    /// handed on. `false` when an episode is on: what was drained is no
-    /// program's, and the pass starts again.
-    fn seat_read(&mut self, epoch: &mut SeatEpoch, seat: (u64, u32)) -> bool {
+    /// Deal with a reading of the seat -- asked on news, or the seat a
+    /// drain's events are of -- before anything it covers is handed on.
+    /// `false` when an episode is on: what was drained is no program's, and
+    /// the pass starts again. A seat that has come back re-pends input and
+    /// the GPU: neither queue was news while it was away.
+    fn seat_read(&mut self, epoch: &mut SeatEpoch, seat: (u64, u32), pending: &mut u32) -> bool {
         match epoch.read(seat.0, seat.1) {
             Reading::Standing => true,
             Reading::Resumed => {
                 self.comp.interaction_suspend();
                 self.mods = Mods::default();
                 self.comp.seat_resumed();
+                *pending |= news::INPUT | news::GPU;
                 #[cfg(feature = "test-mode")]
                 say!("tapestryd: seat back generation={}", seat.0);
                 true
@@ -567,7 +573,8 @@ impl Driver for Tapestryd {
 
         // The FRAME clock (section 18.4): a synthesized fixed-rate tick
         // riding the poll timeout (base virtio-gpu 2D has no guest vblank).
-        // Re-anchored when the ctl changes clock-rate.
+        // Re-anchored when the effective rate changes (the clock-rate ctl or
+        // the idle throttle) and on unfreeze.
         let mut anchor = Instant::now();
         let mut ticks_done: u64 = 0;
         let mut cur_hz = self.comp.clock_hz;
@@ -575,35 +582,60 @@ impl Driver for Tapestryd {
         // Residual-2 idle throttle: the last time real INPUT arrived. Init to
         // now so bring-up runs at the ctl rate until the console settles.
         let mut last_input = Instant::now();
-        // I-6: the pass clock. The input devices are poll-mode and are NOT in
-        // the pollfd set, so nothing about an arriving event wakes this loop
-        // -- the drain interval IS the pass period, and a held pass is the
-        // only way the eventq can fill. This names such a pass.
+        // I-6: a slow pass. Input reaches this loop as news, so a held pass
+        // delays it and loses nothing (Lictor's input thread keeps the rings
+        // drained). This names such a pass.
         #[cfg(feature = "test-mode")]
         let mut pass_mark = Instant::now();
 
+        // Vote 147: Lictor says when one of its answers changed -- the seat,
+        // an input queue, a fence list, the engine's state or the display's
+        // counts (vote M37) -- and this loop asks only then. The watch is one
+        // more descriptor in the poll below. Every reading of the seat, asked
+        // alone on news or carried by a drain's reply, goes through the epoch
+        // before anything it covers is handed on.
+        let watch = match Watch::start(news::ALL) {
+            Ok(w) => w,
+            Err(error) => { say!("tapestryd: lictor news failed {:?}", error); return Err(error); }
+        };
+        let mut pending = 0u32;
         let mut epoch = SeatEpoch::new();
         let mut unanswered_said = false;
         loop {
-            // The pass's first reading of the seat comes with the keyboard's
-            // events; with no keyboard, or a drain the broker did not answer,
-            // the seat is asked alone.
-            raw_events.clear();
-            let read = self.kbd.as_mut().map(|kbd| kbd.drain(|ev| raw_events.push(ev)));
-            if read == Some(None) {
-                unanswered(&mut unanswered_said, "keyboard");
+            pending |= watch.take();
+            if watch.failed() {
+                say!("tapestryd: lictor news failed");
+                return Err(Error::Hardware);
             }
-            let seat = match read.flatten() {
-                Some(seat) => seat,
-                None => match self.comp.gpu.seat_state() {
-                    Ok(seat) => seat,
+            if pending & news::SEAT != 0 {
+                pending &= !news::SEAT;
+                let seat = match self.comp.gpu.seat_state() {
+                    Ok(state) => state,
                     Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
-                },
-            };
-            if !self.seat_read(&mut epoch, seat) {
+                };
+                self.seat_read(&mut epoch, seat, &mut pending);
+            }
+            if epoch.away() {
                 self.comp.interaction_suspend();
-                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                // Nothing below runs until the seat returns, and its return is
+                // news; whatever else arrives meanwhile stays pending.
+                watch.wait();
                 continue;
+            }
+            let drain_input = pending & news::INPUT != 0;
+            pending &= !news::INPUT;
+            // The keyboard's events come with the seat they are of. With no
+            // keyboard, no input news, or a drain the broker did not answer,
+            // the seat stands as last read.
+            raw_events.clear();
+            if drain_input {
+                let read = self.kbd.as_mut().map(|kbd| kbd.drain(|ev| raw_events.push(ev)));
+                if read == Some(None) {
+                    unanswered(&mut unanswered_said, "keyboard");
+                }
+                if read.flatten().is_some_and(|seat| !self.seat_read(&mut epoch, seat, &mut pending)) {
+                    continue;
+                }
             }
 
             #[cfg(feature = "test-mode")]
@@ -660,15 +692,17 @@ impl Driver for Tapestryd {
             // events flow regardless of held modifiers (clients see mods).
             if let Some(tab) = self.tablet.as_mut() {
                 raw_events.clear();
-                let seat = tab.drain(|ev| raw_events.push(ev));
-                if seat.is_none() {
-                    unanswered(&mut unanswered_said, "tablet");
-                }
-                if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat)) {
-                    if input_seen {
-                        last_input = Instant::now();
+                if drain_input {
+                    let seat = tab.drain(|ev| raw_events.push(ev));
+                    if seat.is_none() {
+                        unanswered(&mut unanswered_said, "tablet");
                     }
-                    continue;
+                    if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat, &mut pending)) {
+                        if input_seen {
+                            last_input = Instant::now();
+                        }
+                        continue;
+                    }
                 }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
@@ -695,15 +729,17 @@ impl Driver for Tapestryd {
             // on the wire (i32 as u32).
             if let Some(m) = self.mouse.as_mut() {
                 raw_events.clear();
-                let seat = m.drain(|ev| raw_events.push(ev));
-                if seat.is_none() {
-                    unanswered(&mut unanswered_said, "mouse");
-                }
-                if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat)) {
-                    if input_seen {
-                        last_input = Instant::now();
+                if drain_input {
+                    let seat = m.drain(|ev| raw_events.push(ev));
+                    if seat.is_none() {
+                        unanswered(&mut unanswered_said, "mouse");
                     }
-                    continue;
+                    if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat, &mut pending)) {
+                        if input_seen {
+                            last_input = Instant::now();
+                        }
+                        continue;
+                    }
                 }
                 input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
@@ -780,24 +816,28 @@ impl Driver for Tapestryd {
                 ticks_done = 0;
             }
             was_frozen = frozen;
-            let period_ms = (1000 / cur_hz.max(1)) as u64;
-            let elapsed_ms = anchor.elapsed().as_millis() as u64;
+            let elapsed_ns = anchor.elapsed().as_nanos() as u64;
             if !frozen {
-                let due = elapsed_ms / period_ms.max(1);
+                let due = frame_clock::ticks_due(elapsed_ns, cur_hz);
                 if due > ticks_done {
+                    self.comp.ticks_coalesced += due - ticks_done - 1;
                     ticks_done = due;
                     self.comp.frame_tick();
                 }
             }
 
-            // (3) The fence pump (W2d): drain retired fenced chains off the
-            // device and post each on its owning ctx -- then the deferred
-            // event-read + fence-read deliveries (backward, remove-safe).
-            self.comp.warp_service_fences();
-            // The fence pump's invocations left the engine's state as of
-            // this pass, and the broker's count of display events is that of
-            // its last reply of any kind: bind the screen if that is owed,
-            // then follow the host's display if it changed and has stood.
+            // (3) The fence pump (W2d): on GPU news, drain retired fenced
+            // chains off the device and post each on its owning ctx; every
+            // pass, the pumps they feed, then the deferred event-read +
+            // fence-read deliveries (backward, remove-safe).
+            let gpu_news = pending & news::GPU != 0;
+            pending &= !news::GPU;
+            self.comp.warp_service_fences(gpu_news);
+            // The engine's state and the broker's count of display events are
+            // those of its last reply of any kind; a change to either is GPU
+            // news (vote M37), on which the fence pump's take has just asked.
+            // Bind the screen if that is owed, then follow the host's display
+            // if it changed and has stood.
             self.comp.bind_pump();
             self.comp.display_pump();
             let mut i = conns.len();
@@ -909,21 +949,21 @@ impl Driver for Tapestryd {
             }
             let interaction_base = pollfds.len();
             self.comp.interaction_poll(&mut pollfds);
-            let remain = period_ms.saturating_sub(elapsed_ms % period_ms.max(1));
+            // Last: interaction_ready finds its own by descriptor.
+            pollfds.push(TPollFd {
+                fd: watch.fd(),
+                events: T_POLLIN,
+                revents: 0,
+            });
             let timeout = if frozen {
                 30 // no tick scheduled; a short pace keeps input drained
             } else {
-                remain.clamp(1, period_ms.max(1)) as i32
+                // A fresh read: this pass's work (the tick itself, the fence
+                // pump) must not push the next tick back.
+                frame_clock::ms_until_tick(anchor.elapsed().as_nanos() as u64, cur_hz, ticks_done)
             };
-            // W2d: the GPU IRQ is not pollable (the G-5 engine owns it;
-            // irq.wait only inside a sync submit), so while fenced chains
-            // are in flight the pass pace IS the fence-completion latency
-            // -- clamp to 1 ms (the input-drain precedent).
-            let timeout = if self.comp.warp_fences_pending() {
-                timeout.min(1)
-            } else {
-                timeout
-            };
+            // A retired fenced chain arrives as GPU news: the GPU interrupt is
+            // not pollable, so Lictor's loop keeps a 1 ms pace while chains are out.
             let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
             if rc >= 0 { self.comp.interaction_ready(&pollfds[interaction_base..]); }
             if rc < 0 {

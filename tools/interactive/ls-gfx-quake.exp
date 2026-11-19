@@ -18,7 +18,11 @@
 #                  ~= 17 s, inside the 120 s budget. (SDL_THYLACINE_NOPACE
 #                  opts a benchmark out.) The gate asserts a 40 fps floor:
 #                  FRAME is opt-in (TAPESTRY 18.4), and a surface SDL never
-#                  armed paces on its 50 ms timeout (<= 20 fps).
+#                  armed paces on its 50 ms timeout (<= 20 fps). (No ceiling:
+#                  a timedemo reads under the clock whenever a frame misses a
+#                  tick, so it cannot witness the clock's rate -- an
+#                  integer-ms 62.5 Hz tick read 60.9 once; ls-gfx-throttle
+#                  reads the compositor's own tick counter instead.)
 #   render leg   : a screendump carries Quake's textured-world color
 #                  richness (not a flat/black surface) -- the pixels
 #                  reached the scanout. (The fps line is the DETERMINISTIC

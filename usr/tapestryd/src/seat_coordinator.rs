@@ -12,7 +12,7 @@ use libthyla_rs::{
     sync::Mutex,
     *,
 };
-use lictor::{gpu_api::Request as SeatRequest, rpc_client::Client};
+use lictor::{gpu_api::Request as SeatRequest, proxy::news::{self, Watch}, rpc_client::Client};
 const MAX_CONNS: usize = PARTICIPANTS + 2;
 const MSIZE: usize = 4096;
 const MAX_FIDS: usize = 4;
@@ -507,6 +507,8 @@ impl Conn {
     }
 }
 fn run(shared: &Shared, control: &Control) -> Result<()> {
+    // Before the first sample, so no change after it goes unheard.
+    let watch = Watch::start(news::SEAT).map_err(|_| Error::Io)?;
     let mut seat = Client::connect().map_err(|_| Error::Io)?;
     let state: (u64, u32) = seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
     shared
@@ -526,7 +528,7 @@ fn run(shared: &Shared, control: &Control) -> Result<()> {
         return Err(Error::Io);
     }
     let listener = unsafe { File::from_raw_fd(listener as i32, libthyla_rs::handle::Rights::READ) };
-    let result = serve(shared, control, &listener, &mut seat);
+    let result = serve(shared, control, &listener, &mut seat, &watch, state);
     // A posted resident cannot be left with a live poster and a dead server.
     // Whole-process failure also revokes Tapestry's designated seat identity.
     if result.is_err() {
@@ -537,7 +539,14 @@ fn run(shared: &Shared, control: &Control) -> Result<()> {
     }
     result
 }
-fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client) -> Result<()> {
+fn serve(
+    shared: &Shared,
+    control: &Control,
+    listener: &File,
+    seat: &mut Client,
+    watch: &Watch,
+    mut state: (u64, u32),
+) -> Result<()> {
     let mut conns = Vec::new();
     conns
         .try_reserve_exact(MAX_CONNS)
@@ -549,12 +558,18 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
         if control.stopping() {
             return Ok(());
         }
-        let state: (u64, u32) = seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
-        shared
-            .table
-            .lock()
-            .observe(state.0, state.1)
-            .map_err(|_| Error::Io)?;
+        // The seat's pair changes only as news (vote 147).
+        if watch.take() & news::SEAT != 0 {
+            if watch.failed() {
+                return Err(Error::Io);
+            }
+            state = seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
+            shared
+                .table
+                .lock()
+                .observe(state.0, state.1)
+                .map_err(|_| Error::Io)?;
+        }
         if state.1 != 1 {
             acknowledged = None;
         }
@@ -607,7 +622,7 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
                 }
             }
         }
-        let mut poll = [TPollFd::default(); MAX_CONNS + 2];
+        let mut poll = [TPollFd::default(); MAX_CONNS + 3];
         poll[0] = TPollFd {
             fd: control.stop_fd(),
             events: T_POLLIN,
@@ -631,7 +646,16 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
                 count += 1;
             }
         }
-        Error::from_syscall_return(unsafe { t_poll(poll.as_mut_ptr(), count, 10) })?;
+        poll[count] = TPollFd {
+            fd: watch.fd(),
+            events: T_POLLIN,
+            revents: 0,
+        };
+        // A lane needs the pace (peer death, the answer and unjoined bounds), and so
+        // does an episode: the serve thread writes the table the aggregate reads.
+        // Otherwise only a descriptor can change anything here.
+        let timeout = if conns.is_empty() && state.1 == 0 { -1 } else { 10 };
+        Error::from_syscall_return(unsafe { t_poll(poll.as_mut_ptr(), count + 1, timeout) })?;
         for n in 2..count {
             conns[map[n - 2]].io(poll[n].revents, shared);
         }

@@ -56,6 +56,12 @@ impl SeatEpoch {
     /// The broker answered `generation` and `phase`. An episode that is on
     /// is not yet one that has ended: its generation is taken only by the
     /// reading that finds the seat back.
+    /// The last reading was of an episode, and no reading since has shown
+    /// the seat back.
+    pub const fn away(&self) -> bool {
+        self.away
+    }
+
     pub fn read(&mut self, generation: u64, phase: u32) -> Reading {
         if phase != 0 {
             self.away = true;
@@ -85,6 +91,20 @@ mod tests {
         }
         // A boot whose seat never changed hands has nothing to put down.
         assert_eq!(SeatEpoch::new().read(0, 0), Reading::Standing);
+    }
+
+    #[test]
+    fn away_holds_from_an_episode_until_the_seat_is_read_back() {
+        let mut epoch = SeatEpoch::new();
+        assert!(!epoch.away(), "a new epoch is not away");
+        epoch.read(1, 0);
+        assert!(!epoch.away());
+        epoch.read(2, 1);
+        assert!(epoch.away(), "an episode read is away");
+        epoch.read(2, 3);
+        assert!(epoch.away(), "and stays away while it is on");
+        assert_eq!(epoch.read(2, 0), Reading::Resumed);
+        assert!(!epoch.away(), "the seat read back is not");
     }
 
     #[test]

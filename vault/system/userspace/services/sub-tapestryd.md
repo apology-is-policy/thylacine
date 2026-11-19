@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/epoch.rs, usr/tapestryd/src/pointer.rs, usr/tapestryd/src/display_stall.rs, tools/interactive/ls-halcyon-login-close.exp, tools/interactive/ls-gfx-console-close.exp, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/warp_ids.rs]
+code: [usr/tapestryd/src/epoch.rs, usr/tapestryd/src/pointer.rs, usr/tapestryd/src/display_stall.rs, tools/interactive/ls-halcyon-login-close.exp, tools/interactive/ls-gfx-console-close.exp, tools/interactive/ls-halcyon-scale-fitted.exp, tools/interactive/ls-display-follow-declared.exp, tools/interactive/ls-display-follow.exp, tools/interactive/rfb_resize.py, usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml, usr/tapestryd/src/motion.rs, usr/tapestryd/src/lib.rs, usr/tapestryd/src/frame_clock.rs, usr/tapestryd/src/warp_ids.rs]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
@@ -14,6 +14,77 @@ design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
 updated: 2026-11-18
 ---
+## The serve loop asks Lictor only on news (November 18, operator vote 147)
+
+Lictor tells the compositor when one of its answers changed (`/srv/lictor/news`,
+sub-lictor "News"), and the serve loop asks only then. A `lictor::proxy::news::Watch`
+for SEAT, INPUT and GPU is one more descriptor in the poll, after the
+interaction watches (`interaction_ready` finds its own by descriptor; the static
+bound counts it). Each pass ORs `take()` into `pending`: SeatState only on SEAT;
+the three input drains only on INPUT (an empty drain did nothing anyway); on GPU,
+`warp_service_fences(true)` takes the completions, then after posting them the
+vindications -- Lictor pumps the ring every pass before it tells, so no poll call
+-- and adopts the engine's state from those replies (GPU news also carries the
+display's event count and the restores that ended blank, operator vote M37,
+2026-11-19: `display_pump` and `bind_pump` read them off the last reply, and
+without that a host display change at idle woke nothing), while the pumps it feeds
+(`warp_destroy_owed`, `warp_pump_retires`, `comp_rb_pump`, the test stall watch)
+run every pass on state of their own. Every reading of the seat -- SeatState on
+SEAT news, and the seat each drain's reply carries -- goes through `SeatEpoch`
+(the seat's readings, below); while the last one was of an episode the loop waits
+on the watch, where it slept 10 ms a turn, the classes that arrive meanwhile stay
+pending, and a seat that has come back re-pends INPUT and GPU (`seat_read`). A failed watch ends the loop like a
+failed broker call. The 1 ms poll clamp while fences were pending is gone, with
+`warp_fences_pending`: a retired chain arrives as GPU news, and Lictor's loop keeps
+the 1 ms pace while chains are out. The seat coordinator has its own Watch for
+SEAT, asks for the seat only on news, and blocks without a timeout while it has
+no lanes in a normal seat; with a lane, or in an episode (the serve thread writes
+the table `aggregate` reads), it keeps its 10 ms pace. Before, every pass made
+eight synchronous broker calls and the coordinator one every 10 ms: ~372 a second
+at idle, three 9P round trips each, the ci image's 15-36% idle floor (OPEN-BUGS
+2026-11-18T13:47Z). q-eb1: ~3 calls/s at idle, strict idle 8.4% and 9.5%.
+
+---
+## The FRAME clock ticks at its rate (November 18)
+
+The serve loop's FRAME tick is counted from an anchor, rate-exact
+(`frame_clock.rs`, in the host-tested lib): `ticks_due(elapsed_ns, hz)` is
+floor(elapsed x hz / 1 s). The poll timeout `ms_until_tick(elapsed_ns, hz,
+ticks_done)` aims at the next UNFIRED tick from a clock read taken just before
+the poll, not the one step (2) used -- so the pass's own work (the tick itself,
+the fence pump) never pushes a tick back -- rounded UP to whole milliseconds,
+and 0 if that tick fell due during the pass (the next pass fires it). The loop
+still fires at most one `frame_tick` per pass (a stall coalesces its backlog)
+and re-anchors on a rate change (the ctl or the idle throttle) or an unfreeze;
+the frozen test-mode clock is unchanged (the fence-pending 1 ms clamp went with
+the broker's news, below).
+Before, the period was `1000 / hz` in integer milliseconds: 16 ms at 60 Hz ran
+62.5 Hz, 66 ms at the 15 Hz idle rate ran 15.15, 4 ms at 240 ran 250 -- the
+mac quake timedemos read 60.8-62.5 fps -- and the timeout came from the step (2)
+sample, so every tick was delivered late by the pass's work. TAPESTRY 18.4
+says 60 Hz, now true. Witnesses: four host tests (the count over 10 s at 1, 7,
+15, 60, 144 and 240 Hz with pass work of 0, 137 us and half a period, every tick
+under 1 ms past its boundary; at every phase -- a millisecond walk and a sweep
+of whole milliseconds before each fractional boundary, a nanosecond either
+side -- a wake has exactly one more tick due and none a millisecond earlier; a
+tick already due polls at once; the old period's rates), ten mutants killed;
+and ls-gfx-throttle's rate leg: while Leg B's DYNAMIC pin holds the clock at
+60, a test build's root ctl is read twice ten seconds apart; each render
+carries `tick` (delivered), `coalesced` (`Comp::ticks_coalesced`, ticks that
+fell due inside a pass that had already ticked -- the serve loop adds
+`due - ticks_done - 1`) and `clock-ns` (the render's monotonic time), so the
+rate `tick + coalesced` over `clock-ns` is timed in the guest and no serial
+latency enters it: 59.7..60.3 Hz passes, the host-timed figure must agree
+within 5%, leaving 60 inside the window fails outright, and the figures go out
+as an `LS-CI RECORD: CLOCK` line. (Round 50 showed the first, host-timed
+version could read a correct clock above 61 or the 62.5 Hz one inside its band
+on ~0.2 s of serial-latency asymmetry between its two reads.) A client cannot be the
+witness: the first try, a 61 fps ceiling on ls-gfx-quake's timedemo, passed the
+restored 62.5 Hz tick at 60.9 fps (q-fc1 MQ) -- a timedemo reads under the
+clock whenever a frame misses a tick -- so it was removed. Round 49 (Opus 5.5,
+same-family): 0 P0, 0 P1, 1 P2 (a "never late" assertion that let a skipped
+tick through), 3 P3. Round 50 (the rate leg): 0 P0, 0 P1, 2 P2, 6 P3.
+
 ## FRAME is opt-in per surface (November 18, vote 144)
 
 TAPESTRY 18.4 (vote 144): `Comp::frame_tick` pushes a FRAME only to a surface
@@ -39,7 +110,7 @@ kaua-term and the scenario surface openers (ls-gpu-dead, warp-poison-retire)
 read no surface events. Before this an idle halcyond session
 took ~60 FRAMEs a second across its surfaces and dropped every one (AS-4f
 gate 2). Witnesses: the battery's frame opt-in leg in ls-gfx-panes (frozen
-clock; disarmed, A's stream up to a FOCUS caused after two ticks holds no
+clock; disarmed, A's stream up to a typed key after two ticks holds no
 FRAME; re-armed, the same read holds exactly the next tick; `frame maybe` is
 refused; a typed key bounds each read, and the armed tick's FRAME is queued
 when `frame off` lands, so the purge is tested too); ls-gfx-quake's SDL arm,
@@ -313,7 +384,9 @@ a pass, `bind_pump` and then `display_pump`, after the fence pump and before
 the deferred event deliveries, which carry the CONFIGUREs a mode change
 queues. Both read the engine's state from `gpu.engine`, which only an
 invocation's reply moves (a query's does not); the fence pump invokes the
-broker three times every pass, so that state is this pass's. `display_pump`
+broker on GPU news, and a change to the engine's state, the display's event
+count or the restores that ended blank is GPU news (vote M37), so whatever moved
+has been asked by the time the pumps read it. `display_pump`
 hands the count and the monotonic clock to `display::Follow`, which answers
 `Ask` once the count has stood 150 ms, so a train of events is one mode
 change, and `Pinned` when an explicit `mode W H` was the last word (the verb
@@ -891,8 +964,8 @@ every vCPU that touched emulated hardware. Lictor now holds a readback, the
 client's or the compositor's, until its context's earlier chains retire, and
 holds that context's later chains behind it. The seam sees no change in its
 counts: a parked chain has its fence id and its slot, and it counts in
-`fences_in_flight`, `ctx_fences_in_flight` and the outstanding count that
-`warp_fences_pending` reads. Each tag carries how long the chain was parked and
+`fences_in_flight`, `ctx_fences_in_flight` and the outstanding count
+(`fenced_outstanding`) that keeps Lictor's serve loop at its 1 ms pace. Each tag carries how long the chain was parked and
 how long it took from publication to retirement. The ctx ctl reports both for
 the context's last readback (`readback-parked-ms`, `readback-exec-ms`), and the
 warp ctl reports both for the last landed compositor readback
@@ -4183,9 +4256,9 @@ with the reading (`Tapestryd::seat_read`) before it hands any of them on:
 for a seat that has come back it puts its state down first
 (`interaction_suspend`, the modifiers, `seat_resumed`), and what a drain
 brings while an episode is on is handed to no program and the pass starts
-again. The pass's first reading comes with the keyboard's drain; the seat
-is asked alone only where there is no keyboard or its drain was not
-answered. Under test-mode the return is said: `tapestryd: seat back
+again. The seat is asked alone on SEAT news, and a reading comes with
+every drain, which runs on INPUT news; while the last reading was of an
+episode (`SeatEpoch::away`) the pass waits on the news watch. Under test-mode the return is said: `tapestryd: seat back
 generation=N`.
 
 Until 2026-11-13 the pass asked the seat and then drained, and asked again

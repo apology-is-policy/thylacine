@@ -22,6 +22,7 @@ pub mod eventq;
 pub mod backend;
 pub mod gpu_api;
 pub mod framing;
+pub mod news;
 #[cfg(feature = "guest")]
 pub mod rpc_client;
 #[cfg(feature = "guest")]

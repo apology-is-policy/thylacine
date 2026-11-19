@@ -15,6 +15,7 @@ extern crate alloc;
 pub mod chords;
 pub mod display_stall;
 pub mod epoch;
+pub mod frame_clock;
 pub mod keymap;
 pub mod motion;
 pub mod pane;
