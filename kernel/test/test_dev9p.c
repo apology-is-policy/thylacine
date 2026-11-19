@@ -7696,8 +7696,8 @@ void test_dev9p_m25_refusal_outlives_its_record(void) {
 // A caught note that cancels the leg of a two-name walk ends the open with
 // EINTR: the note names no component, so the resolver does not take the run one
 // name at a time and walk again with the note claimed. The control, one variable
-// away, has no mark: the server's EINTR is a refusal, the leg goes on, and the
-// walk asks again.
+// away, has no mark: the server's EINTR is a refusal, the leg goes on, the walk
+// asks again, and the open opens the file.
 static void eintr_walk_leg(bool mark, int *err, u32 *wga, bool *opened) {
     *err = 0; *wga = 0xffffffffu; *opened = false;
     u8 *chunk = m23_chunk();
@@ -7739,6 +7739,7 @@ void test_dev9p_m23_stalk_eintr_names_no_component(void) {
     TEST_EXPECT_EQ((u64)e0, (u64)T_E_INTR, "and fails EINTR");
     TEST_EXPECT_EQ((u64)w0, 1ull, "after one Twalkgetattr: no step walks the run again");
     TEST_ASSERT(w1 >= 2u, "CONTROL: with no mark the leg goes on and the walk asks again");
+    TEST_ASSERT(o1, "CONTROL: and the open opens the file");
 }
 
 // The stalk-level twin of m23_cached_open_interrupted_fails: the resolver ends
@@ -11010,6 +11011,18 @@ void test_dev9p_s15_leg_visits_past_its_batch(void) {
     }
 }
 
+static struct test_dying g_s15_writer;
+static struct Spoor     *g_s15_older;
+static struct Spoor     *g_s15_newer;
+static long              g_s15_wo;
+static long              g_s15_wn;
+
+static void s15_writes(void *arg) {
+    u8 *chunk = (u8 *)arg;
+    g_s15_wo = g_s15_older ? dev9p.write(g_s15_older, chunk, 256, 0) : -1;
+    g_s15_wn = g_s15_newer ? dev9p.write(g_s15_newer, chunk + 256, 256, 0) : -1;
+}
+
 // Round 10 F3: a leg that meets a run on its way to a closer lands the holders it
 // collected, waits, and looks again past the closer's entry: the holder registered
 // after the closer's entry lands before the wait, the one registered before it once
@@ -11034,8 +11047,24 @@ void test_dev9p_s15_leg_resumes_after_a_closer(void) {
         struct dev9p_priv *np = newer ? dev9p_priv_of(newer) : NULL;
         bool both = op && np && op->wb_eligible && np->wb_eligible;
         wb_wire_reset();
-        long wo = older ? dev9p.write(older, chunk, 256, 0) : -1;
-        long wn = newer ? dev9p.write(newer, chunk + 256, 256, 0) : -1;
+        // Every write's leg, the holder's own included, waits out a closer's
+        // entry it matches, and only this thread ends the entry: the writes
+        // run on a thread of their own, killed if they wait.
+        g_s15_older = older;
+        g_s15_newer = newer;
+        g_s15_wo    = -1;
+        g_s15_wn    = -1;
+        bool wstarted = test_dying_start(&g_s15_writer, s15_writes, chunk, /*dead_now=*/false);
+        bool wdone    = false;
+        if (wstarted) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_s15_writer));
+            wdone = test_dying_done(&g_s15_writer);
+            if (!wdone) test_dying_kill(&g_s15_writer);
+            TEST_YIELD_UNTIL(test_dying_done(&g_s15_writer));
+            test_dying_reap(&g_s15_writer);
+        }
+        long wo = g_s15_wo;
+        long wn = g_s15_wn;
         g_m23_spoor = o;
         g_m23_rc    = -1;
         bool started = both && o && test_dying_start(&g_m23_thread, m23_dying_read, NULL,
@@ -11069,6 +11098,7 @@ void test_dev9p_s15_leg_resumes_after_a_closer(void) {
 
         TEST_ASSERT(both, "premise: two holders at one number, of two generations");
         TEST_ASSERT(o != NULL && started, "an unnamed open reading on its own thread");
+        TEST_ASSERT(wstarted && wdone, "the writes end: neither leg waits on the closer's entry");
         TEST_ASSERT(wo == 256 && wn == 256, "both writes are held");
         if (closer) {
             TEST_ASSERT(!early, "the read waits while the closer's entry stands");
