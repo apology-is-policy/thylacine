@@ -264,15 +264,13 @@ fn killstop() -> i64 {
         None => 0,
     };
     let ready = got == 1 && tag[0] == b'R';
-    // The premise: the server holds none of the bytes yet, so the exit close
-    // has a flush to do. A written-through file would make the rung vacuous;
-    // the same stat after the reap must show the bytes (its control).
-    let stat = if ready { Some(fs::metadata(DIRTY_PATH)) } else { None };
-    let stat_failed = matches!(stat, Some(Err(_)));
-    let staged = matches!(&stat, Some(Ok(m)) if m.len() == 0);
+    // No look at the file before the kill: a stat or an open of it lands the
+    // child's staged run itself (vote M23), and the rung is here to watch the
+    // exit close flush it. No observer on the session sees a staged run, so
+    // staging itself is the kernel suite's to pin.
 
     // Stop the job, and see the stop reported (a report, not a reap).
-    let suspended = staged && ctl_write(pid, b"suspend");
+    let suspended = ready && ctl_write(pid, b"suspend");
     let mut stopped = false;
     if suspended {
         let mut st: i32 = 0;
@@ -302,10 +300,6 @@ fn killstop() -> i64 {
     if !reaped {
         let why = if !ready {
             "the child did not stage its write"
-        } else if stat_failed {
-            "the stat of the staged file failed"
-        } else if !staged {
-            "the child's bytes reached the server before its close: nothing staged to flush"
         } else if !suspended {
             "the /proc suspend write was refused"
         } else if !stopped {
@@ -330,9 +324,8 @@ fn killstop() -> i64 {
     }
     drop(child);
 
-    // The flush ran: the kill did not cost the child its accepted write. And the
-    // stat that read 0 before the kill now reads the payload's size, so that 0
-    // was the staging, not a path that cannot see the bytes.
+    // The flush ran: the kill did not cost the child its accepted write, and a
+    // stat of the file shows its size.
     let flushed = file_holds(DIRTY_PATH, DIRTY_PAYLOAD);
     let sized = matches!(fs::metadata(DIRTY_PATH), Ok(m) if m.len() == DIRTY_PAYLOAD.len() as u64);
     let _ = fs::remove_file(DIRTY_PATH);
@@ -341,7 +334,7 @@ fn killstop() -> i64 {
         return 13;
     }
     if !sized {
-        t_putstr("jc-probe: FAIL (the stat does not show the flushed bytes: its 0 before the kill proves nothing) at leg killst\n");
+        t_putstr("jc-probe: FAIL (the stat does not show the flushed bytes) at leg killst\n");
         return 13;
     }
     0

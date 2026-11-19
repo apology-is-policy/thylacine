@@ -33,8 +33,9 @@
 //                 a read lock, flock, fchmod and futimens. Before the lock it
 //                 reads what it saw at open, and once locked what the last
 //                 holder wrote.
-//   downgrade   : a write lock converted to a read lock lands the holder's
-//                 staged append first, so the reader it admits reads it.
+//   downgrade   : an append under a write lock is seen by a peer's open, which
+//                 lands the staged run itself (vote M23), and the reader the
+//                 conversion to a read lock admits reads it.
 //   whence      : SEEK_CUR locks the byte under a real cursor and SEEK_END the
 //                 byte before the end, neither moving the cursor.
 //   mapped      : a map holds no lock: a flock goes at the descriptor's last
@@ -407,14 +408,16 @@ static int leg_cached_inherited(int fd) {
     return 0;
 }
 
-// fd was born by its create, so its appends stage in the kernel. The child's
-// fstat shows the byte has not reached the server until the conversion lands it.
+// fd was born by its create, so its appends stage in the kernel, and a peer's open
+// lands the staged run before it looks (vote M23): the child, opening the file
+// while fd holds the write lock, sees the append. No open on the session sees a
+// staged run, so staging itself is the kernel suite's to pin.
 static int leg_downgrade(int fd) {
     off_t end = lseek(fd, 0, SEEK_END);
     if (end < 0) return fail("downgrade: lseek");
     if (lk(fd, F_SETLK, 'w', 0, 1) != 0) return fail("downgrade: F_SETLK WRLCK");
     if (write(fd, "y", 1) != 1) return fail("downgrade: the append");
-    if (child("size", num(0, end), 0, 0, 0, 0) != 0) return fail("downgrade: the append was not staged");
+    if (child("size", num(0, end + 1), 0, 0, 0, 0) != 0) return fail("downgrade: a peer's open does not see the append");
     if (lk(fd, F_SETLK, 'r', 0, 1) != 0) return fail("downgrade: the conversion");
     if (child("rbyte", num(0, end), "y", 0, 0, 0) != 0) return fail("downgrade: the reader it admitted does not read the append");
     printf("pouch-hello-locks: downgrade ok\n");
