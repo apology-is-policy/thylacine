@@ -32,7 +32,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-11-16
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -1090,6 +1090,20 @@ row the resolution retitled reads as lost; the report names the merge's new
 row that opens the same way.
 `--merge REV` reads one merge of history unfiltered: at the corona main merge
 c59c2a6fb it reports the lost VMO / BURROW row and the four rows it copied.
+
+## The skip verdict check (2026-11-19)
+
+`build_ramfs` runs `tools/test-skip-verdict.py` after the audit-trigger row
+check: fatal, about 7 s, its output in `build/skip-verdict.log` and the last
+20 lines of it on a failure. It checks the kernel suite's skip verdict (vote
+17) on the host: a copy of `tools/run-vm.sh` runs to its exec under a
+stand-in QEMU in a temp tree, once per launcher configuration, and the
+bootargs each configuration declares must be exactly the skips `tools/test.sh`'s
+skip block lets pass as not coverage; then the block's own refusals, each with
+its acceptance one variable away. A boot from the tree is never touched. Until
+then nothing ran it, and it went stale for nine days: f48fc214c made run-vm.sh
+declare an MSI controller for GICv3 under hvf, and the check still wanted none
+(fixed in 35af3e4ce). The operator put it in the build (vote M39, 2026-11-19).
 
 ## The kernel test registry check (2026-10-28)
 

@@ -1067,6 +1067,20 @@ DOSBOXCONF
         || { echo "==> audit-trigger row check FAILED -- a row is duplicated, or an" >&2
              echo "    unpushed merge dropped one and this tree still lacks it" >&2
              exit 1; }
+
+    # The kernel suite's skip verdict (vote 17), on the host: the bootargs
+    # run-vm.sh declares for each launcher configuration against the skips
+    # test.sh's skip block lets pass. Nothing ran it, and it went stale for
+    # nine days (OPEN-BUGS 2026-11-19T07:17Z); operator vote M39 put it here.
+    # It runs a copy of run-vm.sh in a scratch tree under a stand-in QEMU, so
+    # it never touches a boot from this tree. Fatal, about 7 s.
+    echo "==> skip verdict check (run-vm.sh's declarations against test.sh's skip block)"
+    python3 "$REPO_ROOT/tools/test-skip-verdict.py" --logs "$BUILD_DIR/skip-verdict" \
+        > "$BUILD_DIR/skip-verdict.log" 2>&1 \
+        || { tail -20 "$BUILD_DIR/skip-verdict.log" >&2
+             echo "==> skip verdict check FAILED -- see tools/test-skip-verdict.py" >&2
+             echo "    and $BUILD_DIR/skip-verdict.log" >&2
+             exit 1; }
 }
 
 # GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe
