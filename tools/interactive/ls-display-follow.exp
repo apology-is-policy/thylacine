@@ -29,6 +29,16 @@
 #              (1000x640), and down to 640x400.
 #   no size:   a host that tells 0x0 disables the output. The compositor asks,
 #              is told nothing, and the mode stands.
+#   quiet:     a follow with nothing presenting. In every leg before it the
+#              console's cursor blinks, and each blink is a present whose
+#              reply carries the broker's count of display events, so the
+#              compositor would read a change off the next blink's reply even
+#              if the broker's news left the count out. Here the picture is
+#              first seen to change with nothing typed, then the blink is
+#              turned off (`aurora-push`, session-scoped: nothing persists)
+#              and the picture is seen to stand before the host is told: the
+#              change reaches the compositor as GPU news (vote M37) or not at
+#              all, and the mode follows to 1280x800.
 #
 # What must not be said is armed once, before every wait of the run, the
 # library's own (the login, a command's echo, the shutdown) included:
@@ -164,9 +174,30 @@ wait_cells 64 18 "followed to 640x400"
 wait_redraw "followed to 640x400"
 lc_pass "display: followed the host down to 640x400"
 
+# ---------- quiet: a follow with nothing presenting ----------
+wait_changes_alone "the cursor blinks"
+set what "turning the cursor's blink off"
+lc_send "echo cursor-blink off > /tmp/display-quiet"
+lc_send "aurora-push /tmp/display-quiet; echo display-quiet-pushed | tr a-z A-Z"
+lc_within 10 {
+    -re {DISPLAY-QUIET-PUSHED[\r\n]} { }
+    timeout { lc_fail "the shell did not answer the push of cursor-blink off" }
+    eof     { lc_fail "qemu exited while the cursor's blink was turned off" }
+}
+wait_still "the cursor no longer blinks"
+tell 1280x800
+follow_expect {tapestryd: display event \d+: asking the host} "the event is taken up with nothing presenting"
+follow_expect [begun 640x400 1280x800 direct] "the change begins from the direct state"
+follow_expect [up 1280x800] "the mode is up with nothing presenting"
+follow_expect [followed 1280x800] "the event is followed to 1280x800"
+wait_dims "1280 800" "followed to 1280x800 with nothing presenting"
+wait_cells 128 36 "followed to 1280x800 with nothing presenting"
+wait_redraw "followed to 1280x800 with nothing presenting"
+lc_pass "display: with nothing presenting, the host's change is news and is followed"
+
 file delete -force $ppm
 set what "the shutdown"
 lc_quit
 file delete -force $::env(THYLACINE_VNC_SOCKET)
-lc_pass "ls-display-follow: a fitted first mode, four follows and a refusal"
+lc_pass "ls-display-follow: a fitted first mode, five follows and a refusal"
 exit 0

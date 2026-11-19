@@ -673,7 +673,14 @@ failed or was left unfinished, a pinned mode, an extinction) are armed once
 with `expect_before`, which puts them ahead of the patterns of every wait from
 the boot to the shutdown, the shared library's waits included; the redraw
 waits for its command's own output, so a line said during it fails under its
-own label.
+own label. Its last follow, to 1280x800, is made with nothing presenting. In
+every leg before it the console's cursor blinks, and each blink is a present
+whose reply carries the broker's count of display events, so those legs would
+pass with the count left out of the news. The last leg first sees the picture
+change with nothing typed, then turns the blink off (`aurora-push` of
+`cursor-blink off`, session-scoped) and sees the picture stand for eight dumps
+before telling the host. Nothing asks the broker between the tell and the
+follow, so the count can reach the compositor only as GPU news (vote M37).
 
 `tools/interactive/ls-display-stall.exp` makes a bind go unanswered, three
 times, and makes a change from the composed state. It boots with the stall

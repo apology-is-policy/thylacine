@@ -113,6 +113,44 @@ proc wait_redraw {label} {
     }
     lc_fail "the scanout's picture did not change after a command was typed ($label): the device shows a screen nothing is drawn into"
 }
+# The picture changes with nothing typed: a client presents of its own accord
+# (the console's cursor, blinking). The positive half of wait_still, one
+# setting away: a still picture is evidence of quiet only from a sampler seen
+# to catch a picture that moves. The cursor's phase flips every 30 frames,
+# half a second at 60 Hz and 2 s at the 15 Hz idle tick.
+proc wait_changes_alone {label} {
+    set ::what "the picture changing alone ($label)"
+    set before [lindex [dims] 3]
+    if {$before eq ""} { lc_fail "no dump to tell a change by ($label; $::dims_why)" }
+    for {set i 0} {$i < 12} {incr i} {
+        after 700
+        set now [lindex [dims] 3]
+        if {$now ne "" && $now ne $before} {
+            lc_step "the scanout's picture changed with nothing typed ($label)"
+            return
+        }
+    }
+    lc_fail "the scanout's picture did not change with nothing typed ($label): nothing presents of its own accord, so a still picture after it would prove nothing"
+}
+# The picture stands: eight dumps in a row, 0.7 s apart or more, alike, so for
+# over 5 s nothing was presented that changed it (two flips of the cursor at
+# the idle tick). Waited for, as the push that stops the blink redraws once.
+proc wait_still {label} {
+    set ::what "the picture standing ($label)"
+    set last ""
+    set alike 0
+    for {set i 0} {$i < 24} {incr i} {
+        set now [lindex [dims] 3]
+        if {$now eq ""} { lc_fail "no dump to tell a still picture by ($label; $::dims_why)" }
+        if {$now eq $last} { incr alike } else { set last $now; set alike 1 }
+        if {$alike >= 8} {
+            lc_step "the scanout's picture stood for eight dumps ($label)"
+            return
+        }
+        after 700
+    }
+    lc_fail "the scanout's picture never stood for eight dumps ($label): something still presents"
+}
 # Wait for a line of the compositor's. A follow that is put off because the
 # device is stalled before it is asked is noted and waited out. One pattern
 # that is either line, which matches the one said first: as two patterns the
