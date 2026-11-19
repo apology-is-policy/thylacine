@@ -101,6 +101,10 @@ impl Gpu {
     fn query<R: Wire>(&self, request: Request) -> Result<R, Error> {
         self.client.borrow_mut().call(request)
     }
+    /// The broker's Stats as they stand: an invocation read for its reply's
+    /// Stats alone. A client that asks only on news can hold a reply from
+    /// before a stall the news has not yet told it of.
+    pub fn refresh(&mut self) -> Result<(), Error> { self.invoke::<Info>(Request::Info).map(|_| ()) }
     fn adopt(&mut self, s: Stats) {
         self.cmd_seq = s.cmd_seq; self.last_scanout_seq = s.last_scanout_seq;
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;

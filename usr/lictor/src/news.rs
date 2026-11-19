@@ -10,8 +10,10 @@
 //! `TakeVindications`). News therefore tells the client
 //! nothing a request could not, and nothing about input the seat kept back: an
 //! event pressed at a trusted screen is gone from the queue before the pass ends.
-//! No queue is news during an episode: none of its takes is admitted then, and a
-//! late fence retired mid-episode would say when (I-27). It is news after.
+//! No queue is news during an episode, only one in a normal seat being reported:
+//! the fence takes are parked then, and a late fence retired mid-episode would
+//! say when (I-27); the input takes are admitted, but the seat queues nothing
+//! while the phase is not 0. It is news after.
 //!
 //! A queue is news once per take. Told, the client takes; the take, not the
 //! reply, rearms it. A queue nobody takes is told once and then stays quiet, so

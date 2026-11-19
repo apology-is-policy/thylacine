@@ -6576,11 +6576,12 @@ impl Comp {
             self.direct_unsettled_said = false;
             return;
         }
-        if self.gpu.engine != Engine::Live {
-            return;
-        }
         let now_ms = libthyla_rs::time::monotonic_ns() / 1_000_000;
         if !self.bind_again.ready(now_ms) {
+            return;
+        }
+        self.engine_as_it_stands();
+        if self.gpu.engine != Engine::Live {
             return;
         }
         match self.scanout {
@@ -6600,6 +6601,19 @@ impl Comp {
         }
     }
 
+    /// The engine's state, asked again if it reads Live. Under the news
+    /// broker it is the last invocation's, and a stall begun since is told
+    /// only by the next news, so a pump about to act on a Live engine would
+    /// count a bind or an asking the broker refused before sending it as
+    /// one made. A state that is not Live is not asked: its end is GPU news,
+    /// which the fence pump takes, adopting the state it ends in.
+    fn engine_as_it_stands(&mut self) -> Engine {
+        if self.gpu.engine == Engine::Live {
+            let _ = self.gpu.refresh();
+        }
+        self.gpu.engine
+    }
+
     /// Once a pass: has the host's display changed (the broker counts the
     /// device's display events, and every reply carries the count)? The
     /// mode follows once the count has stood for `display::QUIET_MS`,
@@ -6609,7 +6623,7 @@ impl Comp {
         let n = self.gpu.display_events();
         match self.follow.step(n, now_ms) {
             display::Step::Wait => {}
-            step @ (display::Step::Ask | display::Step::Pinned) => match self.gpu.engine {
+            step @ (display::Step::Ask | display::Step::Pinned) => match self.engine_as_it_stands() {
                 Engine::Dead => say!("tapestryd: display event {}: not followed, the device is dead", n),
                 // Nothing asked of a stalled engine is answered, and the
                 // broker ends a stall itself: it answers again, or it

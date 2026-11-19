@@ -785,9 +785,10 @@ when it is ready and a take has run since the reader was told while it was
 ready, so the take, not the reply, rearms it -- an undrained device is told once
 and never spins a reader -- and only a reported queue is marked. Takes are counted
 where they execute: InputDrain in its arm, TakeCompletions and TakeVindications
-when `Device::execute` returns Ok. No queue is news while the seat is not normal
-(none of its takes is admitted then, and a fence retired mid-episode would say
-when); it is news after. Every bit is a function of state an admitted request
+when `Device::execute` returns Ok. No queue is news while the seat is not normal,
+only one in a normal seat being reported (`reportable`): the fence takes are parked
+then, and a fence retired mid-episode would say when; the input takes are admitted,
+but the seat queues nothing while the phase is not 0. It is news after. Every bit is a function of state an admitted request
 already answers at the same point, so news tells the compositor nothing a
 request could not, and nothing about input pressed at a trusted screen, which the
 seat removes from the queue within the pass (I-27). Counting arrivals instead
@@ -1042,9 +1043,13 @@ that reply's generation, and a client that deals with the pair before it hands t
 has no episode between its reading and its events. Until 2026-11-13 the reply was the events
 alone and the compositor asked `SeatState` beside it: two requests, neither ever parked, and
 a whole episode fits between two requests of a client kept off the processor. A reply at a
-phase that is not 0 carries events only if the status read of that turn of the loop failed,
-which it does not for the seat's service: what `Seat::input` gathered at phase 0 in that
-turn, or the `SYN_DROPPED` it leaves after a chord the kernel refused. The compositor drops
+phase that is not 0 can carry the `SYN_DROPPED` that `Seat::input` leaves after a chord
+the kernel refused: the restore's tail (`drain_episode_tail`, after the RESTORED or FAILED
+adopt) gathers input with no status read after it in that turn, and a chord refused there
+(the kernel refuses one at NORMAL when Corvus is gone, when a serial episode has opened, or
+for a key value above 2) sets phase 4 locally, so that turn's replies carry
+`(generation, 4, [SYN_DROPPED])`; outside the tail a status read of that turn writes over
+the phase before any request is served. The compositor drops
 what such a reply carries and puts its state down at the next reading of phase 0, so it
 does not depend on that turn's order ([[sub-tapestryd]]).
 `proxy::input::InputDev::drain` returns the pair, is `must_use`, and returns `None` for a

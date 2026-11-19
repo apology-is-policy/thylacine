@@ -600,7 +600,8 @@ impl Driver for Tapestryd {
         };
         let mut pending = 0u32;
         let mut epoch = SeatEpoch::new();
-        let mut unanswered_said = false;
+        // Per device: one device's unanswered drain is no word on another's.
+        let mut unanswered_said = [false; 3];
         loop {
             pending |= watch.take();
             if watch.failed() {
@@ -631,7 +632,7 @@ impl Driver for Tapestryd {
             if drain_input {
                 let read = self.kbd.as_mut().map(|kbd| kbd.drain(|ev| raw_events.push(ev)));
                 if read == Some(None) {
-                    unanswered(&mut unanswered_said, "keyboard");
+                    unanswered(&mut unanswered_said[0], "keyboard");
                 }
                 if read.flatten().is_some_and(|seat| !self.seat_read(&mut epoch, seat, &mut pending)) {
                     continue;
@@ -695,7 +696,7 @@ impl Driver for Tapestryd {
                 if drain_input {
                     let seat = tab.drain(|ev| raw_events.push(ev));
                     if seat.is_none() {
-                        unanswered(&mut unanswered_said, "tablet");
+                        unanswered(&mut unanswered_said[1], "tablet");
                     }
                     if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat, &mut pending)) {
                         if input_seen {
@@ -732,7 +733,7 @@ impl Driver for Tapestryd {
                 if drain_input {
                     let seat = m.drain(|ev| raw_events.push(ev));
                     if seat.is_none() {
-                        unanswered(&mut unanswered_said, "mouse");
+                        unanswered(&mut unanswered_said[2], "mouse");
                     }
                     if seat.is_some_and(|seat| !self.seat_read(&mut epoch, seat, &mut pending)) {
                         if input_seen {

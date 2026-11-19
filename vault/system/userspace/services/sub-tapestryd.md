@@ -26,8 +26,10 @@ the three input drains only on INPUT (an empty drain did nothing anyway); on GPU
 vindications -- Lictor pumps the ring every pass before it tells, so no poll call
 -- and adopts the engine's state from those replies (GPU news also carries the
 display's event count and the restores that ended blank, operator vote M37,
-2026-11-19: `display_pump` and `bind_pump` read them off the last reply, and
-without that a host display change at idle woke nothing), while the pumps it feeds
+2026-11-19: `display_pump` reads the count off the last reply of any kind, and
+`bind_pump` sees a blank restore through the proxy's `scanout_unsettled`, which
+the last invocation's reply moves; without that a host display change at idle
+woke nothing), while the pumps it feeds
 (`warp_destroy_owed`, `warp_pump_retires`, `comp_rb_pump`, the test stall watch)
 run every pass on state of their own. Every reading of the seat -- SeatState on
 SEAT news, and the seat each drain's reply carries -- goes through `SeatEpoch`
@@ -386,17 +388,22 @@ queues. Both read the engine's state from `gpu.engine`, which only an
 invocation's reply moves (a query's does not); the fence pump invokes the
 broker on GPU news, and a change to the engine's state, the display's event
 count or the restores that ended blank is GPU news (vote M37), so whatever moved
-has been asked by the time the pumps read it. `display_pump`
+is adopted by the pass after the news. Between them a stall can begin after the
+last reply, so a pump with work owed asks once before acting on an engine that
+reads Live (`engine_as_it_stands`, an `Info` invocation): a bind or an asking the
+broker refuses before sending is then no attempt, and lengthens no wait. An
+engine that reads otherwise is not asked; its end is GPU news (audit, 2026-11-19). `display_pump`
 hands the count and the monotonic clock to `display::Follow`, which answers
 `Ask` once the count has stood 150 ms, so a train of events is one mode
 change, and `Pinned` when an explicit `mode W H` was the last word (the verb
 calls `follow.pin()`; `mode auto` asks at once and calls `unpin()` unless its
 asking was refused). The clock is the real one. Test-mode freezes the frame
 clock and not this one, so under test-mode a display event is still followed
-when it has stood 150 ms of real time. The pass returns at the seat's phase
-before it reaches the pumps, so nothing is followed and nothing is bound while
-the trusted screen is up; the count is in `seat_state`'s reply like any other,
-and the event is followed afterwards.
+when it has stood 150 ms of real time. While the last reading of the seat was
+of an episode the pass waits before it reaches the pumps; in an episode not yet
+read, the pumps can run, and Lictor's admission parks what they send until the
+seat is back (`gpu_api::admit`), so nothing is followed and nothing is bound
+while the trusted screen is up. The event is followed afterwards.
 
 **What following does.** A dead device is not asked (`... not followed, the
 device is dead`). A stalled one is not asked either, since nothing asked of a
@@ -4277,11 +4284,12 @@ The rule's second half does not wait for a generation. What a drain brings
 at a phase that is not 0 is handed to no program, and it can be the
 stream's own word for a loss: a chord the kernel refuses moves no
 generation, and Lictor answers it with `SYN_DROPPED` in the keyboard's next
-reply. Lictor as built is not read at such a phase after a refusal
-(`Seat::step` takes the kernel's phase before any request is served, and
-the kernel's status read does not fail for the seat's service:
-`kernel/proc.c` `proc_seat_op`), so no reply of today's carries that word
-at a phase that is not 0. The compositor does not stand on that. Having
+reply. Lictor can be read at such a phase after a refusal: a chord refused
+in the restore's tail (`drain_episode_tail`, after the RESTORED or FAILED
+adopt, with no status read after it in that turn) leaves its local phase 4,
+and that turn's replies carry `(generation, 4, [SYN_DROPPED])` (sub-lictor,
+"A drain is answered with the seat it is of"). The compositor does not stand
+on either way. Having
 handed a drain to nobody, it puts its state down when the phase is 0 again,
 which is what the word would have had it do (`seat_resumed` is what
 `SYN_DROPPED` runs). Until 2026-11-13 the rule read a return only off a
