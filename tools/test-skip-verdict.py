@@ -56,7 +56,9 @@ def configs(disk, pool):
         ("no-disk-no-pool", dict(base, THYLACINE_DISK_IMG="/nonexistent/disk.img",
                                  THYLACINE_POOL_IMG="/nonexistent/pool.img"), 4, drop(gic2, "virtio-blk")),
         ("disk-only", dict(base, THYLACINE_POOL_IMG="/nonexistent/pool.img"), 4, dict(gic2, **{"virtio-blk": 1})),
-        ("hvf-gic3-auto", dict(base, THYLACINE_GIC="3"), 4, dict(FULL)),
+        # hvf, GICv3, its=auto: an MSI controller either way (QEMU's own GICv3 its ITS,
+        # Apple's in-kernel one under QEMU 11.1 the v2m frame); its=on: the host's ITS.
+        ("hvf-gic3-auto", dict(base, THYLACINE_GIC="3"), 4, dict(FULL, msi=1)),
         ("hvf-gic3-its-on", dict(base, THYLACINE_GIC="3", THYLACINE_ITS="on"), 4, dict(FULL)),
         ("gpu-gl-model", dict(base, THYLACINE_GPU_DEV="virtio-gpu-gl-pci"), 4, gic2),
         ("share", dict(base, SHARE="1"), 4, dict(gic2, **{"virtio-pci-9p": 1})),
