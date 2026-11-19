@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -68,7 +68,8 @@ int           stalk_cross_mounts(p, probe, struct Spoor **out, bool *crossed_phe
 // union helpers (UM), exposed for the fd/rename create-dest and remove-parent:
 struct Spoor *stalk_union_member_holding(p, point, const char *leaf, int *errp);
 struct Spoor *stalk_union_create_member (p, point, int *errp);
-bool          stalk_union_has_child(p, dir, const char *name, u32 namelen);
+int           stalk_union_has_child(p, dir, const char *name, u32 namelen);  // 1 / 0 / -T_E_INTR
+bool          stalk_call_ended(void);   // a caught note or a death ended this call
 ```
 
 - `start` is **BORROWED** — stalk never refs or clunks it. Since #844 every
@@ -277,6 +278,21 @@ per member in declared order, and returns the **first hit**:
   the reason keeps a lookup that could not answer from creating the file in an
   `MCREATE` member (`stalk.union_walk_failure`,
   `stalk.create_refuses_on_a_failed_walk`).
+- **A caught note or a death ends the search** (audit round 10 of M15, F1). A
+  member failure while the call's note mark is set (`t->note_call_unwound`,
+  set by every caught-note unwind and kept until an op's own reply stands) or
+  while a death is pending is no skip: `stalk_call_ended()` is asked at the top
+  of each member and where the loop ends, and the search returns `EINTR` (ARCH
+  8.8.3: a call that sees a caught note returns EINTR and sleeps no more). A
+  later member would be walked with the note claimed, and an op whose reply
+  beats its Tflush clears the mark and succeeds, so a hit there would be a file
+  the path does not name. A server's own `EINTR` leaves no mark: that member
+  refused, and is skipped. The same holds in `stalk_union_member_holding`, at
+  the union create's target cross (`EINTR`, not `EIO`), in the union open's
+  member snapshot (the open fails rather than list short for its life), and in
+  `stalk_union_has_child` (`-T_E_INTR`). Pinned by
+  `stalk.union_note_ends_the_search`: a noted arm and a control one variable
+  away (the same refusal as a server's own) at each site, and a death arm.
 - **First-hit wins**, in declared order, mirroring the readdir dedup —
   `stalk_union_has_child` is the name-presence probe that merge uses (no perm
   check, no symlink follow, because dedup is about presence, not access).
@@ -637,13 +653,15 @@ returning each walked component's full attributes. Then:
   root. A full BIND walk's leaf is exempt (the quarry/descent machinery
   owns it). A prefix re-walk that no longer matches (racing
   unlink/rename) fails `T_E_NOENT`, as a sequential racer would.
-- **A failed run**: NULL with a reason other than a miss, on a run of more than one
-  name, is taken one component at a time, whose X-checks come first. A server may
+- **A failed run**: NULL with a reason other than a miss or a caught note's `EINTR`,
+  on a run of more than one name, is taken one component at a time, whose X-checks come first. A server may
   answer a failure past its first name with an Rlerror for the whole op, as Stratum
   does for a mid-run EIO, and only the base was checked, so the reason would otherwise
   tell a caller with no search on `secret` that `secret/x` exists
   (`stalk.fused_failure_keeps_the_x_gate`). A miss with a run of one is reported as it
-  stands.
+  stands. A caught note's `EINTR` names no component, and a step would walk again with
+  the note claimed, so the resolution fails with it at once (M15 round 6 F4;
+  `dev9p.m23_stalk_eintr_names_no_component`).
 - **Partial, no split**: the miss at component k is real; report NOENT
   only after `sts[k-1]` passes the X-check (the invariant's last
   obligation).
@@ -696,7 +714,10 @@ path has no quarry-cross) discards the cached open (`spoor_clunk` waits for
 nothing: a loose open sends nothing, and a strict open's kept fid clunks
 asynchronously) and falls back to the normal walk, whose split/cross machinery
 owns the crossing. A NULL return reveals nothing — the observable outcome
-is the normal path's.
+is the normal path's — unless the Dev recorded why with `dev_walk_failed`:
+the resolver clears `walk_errno` before the call, and a NULL with it set fails
+the open with that errno (dev9p's holder leg, interrupted by a caught note or
+ended by a death, with the file's run still held; M15 round 5, R5b-F3).
 
 ### The final hop
 
@@ -831,7 +852,10 @@ server's own `EACCES` crosses by value like any other reason. `clone_walk_zero` 
 caller's disposition, and the readdir merge's presence probe reports nothing. A member
 that cannot answer that probe reads as not holding the name, so the later entry is still
 listed: a name may show twice in a listing, and is never lost to a member that could not
-say. No create or unlink follows from it; both ask `stalk_union_member_holding`.
+say. A probe a caught note or a death ended answers `-T_E_INTR` instead, and its caller
+fails the call: the merged readdir returns what it has gathered, else `EINTR`, and
+create's existence check returns `EINTR` ([[sub-kernel-syscall-dispatch]]). No create or
+unlink follows from it; both ask `stalk_union_member_holding`.
 A failure past the first name of a batched walk reaches the walk-NULL arm only from the
 per-component loop, after dev9p's sentinel or the arm's own fallback, so the gate before
 that name has run.

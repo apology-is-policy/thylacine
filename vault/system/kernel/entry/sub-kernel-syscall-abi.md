@@ -24,7 +24,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction, abi-memory
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-11-14
+updated: 2026-11-19
 ---
 ## Session registry factory ABI
 
@@ -1223,7 +1223,10 @@ role, epoch and watch contract. No live clipboard is supplied by the kernel ABI.
 `kernel/include/thylacine/errno.h` is also owned here: each value is pinned by a
 static assertion and uses its POSIX number. [[abi-errno]] owns the full registry
 and mirror obligations. ENOSPC=28 distinguishes bounded interaction-capacity
-exhaustion from allocator failure; libthyla-rs maps it to `Error::NoSpace`.
+exhaustion from allocator failure; libthyla-rs maps it to `Error::NoSpace`. EXDEV=18 (a rename between two
+devices), EFBIG=27, EROFS=30 and ENAMETOOLONG=36 joined with the operator's signoff (vote M15,
+`dec-2026-11-14-exdev-and-names`); the last three name values servers already sent by value, so they mint no new
+ABI value. libthyla-rs maps them to `CrossesDevices`, `FileTooLarge`, `ReadOnlyFilesystem` and `NameTooLong`.
 The explicit error range passes unchanged through pouch and libt.
 
 The boot suite's native-marshaller wrapper and counter-boundary injection are
@@ -1370,8 +1373,9 @@ Existing numbers whose answers changed, no number or record moved:
 - `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set
   ([[dec-2026-10-07-loom-register-errno]]): `-EBADF` for a `loom_fd` or listed
   fd that is not open, `-EFAULT` for an argument array the kernel cannot read,
-  a failed write-behind flush's own errno (`-ENOSPC`, the server's `-EIO`, a
-  caught note's `-EINTR`, after which the run is still staged), `-EINVAL` for
+  a failed write-behind flush's errno (`-ENOSPC` or `-EDQUOT` when the server
+  refused for space, `-EIO` for any other refusal, vote M28; a caught note's
+  `-EINTR`, after which the run is still staged), `-EINVAL` for
   the rest. A caller that tested `rc < 0` is unaffected; `libthyla_rs`'s
   `register_handles` / `register_buffers` now map the value through
   `Error::from_syscall_return` instead of answering `InvalidArgument` for
@@ -1472,7 +1476,9 @@ that does not resolve, `-EBADF` for a source that is not a live readable Spoor
 handle (an index of 2^32 or more no longer narrows onto a live handle),
 `-ENOTDIR` as before, `-ELOOP` for a cycle and `-ENOSPC` for a full table.
 `SYS_UNMOUNT`: the same path answers, and `-EINVAL` when nothing is mounted at
-the point. `T_E_NOSPC` (28) joins `errno.h`. A caller that tested `rc != 0` or
+the point. `T_E_NOSPC` (28) joins `errno.h`. (`T_E_DQUOT`, 122, joined it on
+2026-11-17, vote M28: a server's quota refusal of a write-behind run crosses
+as itself, as ENOSPC does; no new value, Linux's.) A caller that tested `rc != 0` or
 `rc < 0` is unaffected. Mirrors: libt's `t_mount` and `t_unmount` comments;
 `libthyla_rs` gains `Error::NoSpace`, and `territory::unmount` maps the value
 instead of answering `NotFound` for every failure; ut's `unmount` names the

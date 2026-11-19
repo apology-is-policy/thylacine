@@ -22,6 +22,349 @@ needed the operator.
 
 
 ---
+## 2026-11-19 (aux): vote M15 to its round 10 close -- six audit rounds of write-behind, and a witness that could never fire
+
+Run on the Mac runner arc, station "Interop service (/mnt/mac)", 2026-11-15 to 11-19. Opus 5.5 throughout;
+every reviewer Opus 5.5 at max (Fable out of credits), so each was told to re-derive rather than agree.
+
+### What it is
+
+M15 (EXDEV in the kernel's rename, `mv`'s copy fallback) pulled in the Larder's write-behind: who holds a file's
+staged bytes, which operations land them first, what a lost run tells whom. Audit rounds 5 through 10 each found
+real defects; the operator voted M17-M36 (with M22a, M24a, M30a, M34a, M35a) as they surfaced. The round 10 close
+ran on the Mac under leases in parts: core (the full kernel suite, the three Mac scenarios, nine app mutants), the
+kernel witnesses in two leases (128 sabotages, each red with exactly its FAIL lines), and twelve control bakes.
+
+### The run, in order
+
+- Audit round 5 (Opus on Opus, max; 0 P0, 0 P1, 1 P2, 4 P3; my self-audit found nothing: it never asked about a
+  leg that runs before its holder registers). The P2: a changing operation's leg ran before the holder existed, so
+  it was ordered with nothing -- B's write passed its leg, stalled, A opened OTRUNC, registered, staged and flushed,
+  the server applied A's run and then B's Twrite, and A's flush installed its pages as OWN, which
+  larder_page_serve trusts whatever the version: every reader on the client got A's bytes while the server held
+  B's. fs_cache.tla's OwnWrite and FlushClose are atomic, so it could not show this. The operator voted M24 (a
+  changing operation pins the file until its wire op and drops are done; no open becomes the holder meanwhile; the
+  own install is guarded by the Larder generation) and M24a. A duplicate aux session spawned a second reviewer on
+  the same brief after a restart (R5b: 0/0/1/7); its F8 (a leg's wait spun a CPU per waiter) and F5 (a test helper
+  freeing the root's priv on a failed walk) were real.
+- Writing round 5's lease script found two defects in it before any lease: the boot log is CRLF, so every predicted
+  FAIL line read NOT AS WANTED until fails_are stripped the CR (shown both ways on the reap tree's real log); and
+  its FAIL regex knew three of the runner's tags, not all seven (ACCOUNT-UNPAIRED, NP-FIXTURE, OFF-CPU0, P9-FIXTURE,
+  TORPOR-KNOB, WB-REGISTRY, LEAKED-PROC(n)), so a tagged line would have been missed.
+- m15-sab-syntax.sh restored only kernel/ after compiling each sabotage, so the nine Rust sabotages stayed applied
+  in the tidy tree after a "clean" check. It now restores by name and refuses a non-C file; tested both ways.
+- The merge of main 3d42230ce (02ba95109): main's 93c4c09a0 added two volatile RAM reads to test_shared_anon.c, so
+  check-mmio-forms' pin for that file went from 4 to 6 (pin and self-test). The disk filled once during this
+  stretch; the operator recovered it, and the standing rule became: on ENOSPC, stop, say so, delete nothing.
+- Audit round 6 (Opus on Opus, max; 0 P0, 0 P1, 0 P2, 10 P3, and two of mine). Its F1 came from a scripture
+  sentence: 12.6 said the holder's own operations take no pin because its wb_lock orders them, but its wstat's
+  Tsetattr runs outside that lock and its entry can leave meanwhile, so a new holder's anchor could go wrong. My
+  self-audit had accepted the sentence; the round-5 lesson again -- a premise in scripture is a claim to test. The
+  operator voted M26 (the holder's changes pin too), M27 (a closer's lost run is recorded against the file and the
+  next fsync through an open not yet told returns EIO once, Linux's errseq), M28 (a refusal is EIO except ENOSPC
+  and EDQUOT, Linux's mapping_set_error; T_E_DQUOT 122 is new) and M29 (a mapping through an open that can stage is
+  private). The code fixes F2a, F4, F6, F8, F9, F10 and S-1 rode along (a4f59ef31, ab406bab7).
+- Implementing M27 found a loss it did not name: a last close whose answer reaches no program (an exit's close) and
+  whose flush the server refuses. The operator voted M30 (record it too). Implementing M30 then found that the
+  lock-flush job recorded its loss outside wb_lock after a leg could already have read the latch, and that fsync
+  returned a leg's refusal without catching its open up, so one loss could be told to one open twice (S-3). M30a
+  (record at the refusal, under the holder's lock; every fsync that reports a loss catches its open up) superseded
+  M30's close site and kept its outcome (1fa7ecd32, 72214abc1).
+- With M30a the record tells a peer exactly what M25 and F2a return, so their sabotages would have stayed green: a
+  sabotage that passes is the finding. A KERNEL_TESTS hook between an fsync's leg and its report now evicts the
+  record, so the leg's own answer is the only one left, and the M25 tests gained an evicted leg (25335044d).
+- The told-once witness first refused with EBADF; p9_client's map_error folds a server's EBADF into EIO, so the
+  test could not tell M28's mapping from the client's fold. It refuses with EACCES now (dc9443d05).
+- Audit round 7 (Opus on Opus, max; 0 P0, 0 P1, 2 P2, 6 P3; my self-audit S-4..S-7 found two of them). It found
+  what my self-audit had waved past: I dismissed qid.path reuse as "9P intro(5) forbids it" without reading the
+  server. Stratum frees an inode number at the last unlink while fids stand (inode.c 1036-1090), gives it to the
+  next file created (inode.c 834), and its qid.path is (dataset << 32) | ino with no generation (server.c 410). So
+  write-behind state keyed by the number belonged to whichever file held it last: a new file on a deleted file's
+  number could not stage, every leg of it flushed the dead writer's run into an ESTALE recorded against the
+  number, and its fsyncs reported a loss it never had. The operator voted M31 (every registry entry, pin and
+  lost-run record names its file by number and generation, as Linux NFS's file handle does) and M32 (a Loom ring's
+  FSYNC is told a lost write, as IORING_OP_FSYNC passes errseq). Code fixes F3 (a navigation handle samples at its
+  mint), F5 (an fsync writes back its own run before it reports, as nfs_file_fsync), F6 (ARCH follows M28), F7
+  rode along (b3f853383 scripture, 511ea14cf code, 05ee7e3e5 tests, b9f1da78d a late leg witness).
+- The scripture I wrote for M31 said more than the vote: "and so does a name whose generation is unknown ... which
+  only ever flushes sooner or tells more". The vote said only that a server reporting no generation keeps
+  number-only keys.
+- Audit round 8 (Opus on Opus, max; 0 P0, 0 P1, 1 P2, 4 P3; self-audit S-8..S-12). F1 was my scripture error
+  above, and wider than I had judged: stalk turns the fused walk off for EVERY path holding `..` (stalk.c 1212,
+  `pounce_ok = !path_has_dotdot(path, pathlen)`) and at a symlink target (2102), so the plain Twalk -- which carries
+  no generation -- is a common route, and every open through it was named by number alone on the one server M31 is
+  for. 12.6's sentence "an open learns the generation from its walk's Twalkgetattr" was true only of the route I
+  had traced. F2: a generation the file locks learned later changed an open's write-behind name between its sample
+  and its report. The operator voted M33 (as Linux's 9P client asks P9_STATS_GEN whenever it makes an inode from a
+  fid: a plain walk that lands on a plain file asks one Tgetattr; a zero-name clone copies its source's; a name is
+  fixed when it is made; an open whose Tgetattr fails registers nothing and is told only later losses). 9261539cf
+  scripture, ede9376dc code, 43940143b tests (M33's witnesses, F4's generation-leg and ring-FSYNC witnesses, F5: the
+  runner, not the test's last line, releases the closer's and write-behind's test knobs and names a leak
+  CLOSER-KNOB(...), round 4 F8's enqueued lesson made code).
+- F3: fs_cache.tla's files were single incarnations, so the model could not see any of rounds 7 and 8. The reuse
+  regime (cdb42af37) makes a model file a (number, generation): Reuse gives a number to a new file, Mint names an
+  open where its fid is made, FlushDead records a dead holder's refusal under its own name, Fsync is
+  wb_loss_report. reuse GREEN over 2,494,548 distinct states; the witnesses NeverTold and NeverBothHold red by
+  design; BUGGY_NUMBER_KEY (the key before M31) and BUGGY_UNNAMED_WALK (the walk before M33) red in 4- and 6-state
+  traces; the fifteen earlier cfgs give the parent tree's verdicts, state counts and trace lengths exactly. The
+  runner script first counted states from a TLC Progress line rather than the final one -- a long run prints
+  running counts first; it now takes the last.
+- F4's "nonzero default fixture generation" was NOT done: g_ga_gen stays 0 so every existing witness's FAIL set
+  stays as derived, and the coincidence it hid (a NONE holder and a generation-0 walk agreeing) is pinned directly
+  by a witness at generation 0x5a and its sabotage.
+- Found while preparing the close: votes M17 to M33 had no decision notes in the vault (M10 to M16 do), and
+  dec-2026-10-07-close-eio still said close returns only EIO, which M28 changed. Twenty notes are written from the
+  operator's own option texts, M22, M24 and M30 born superseded by M22a, M24a and M30a, close-eio superseded by
+  M28's.
+- Audit round 9 (Opus on Opus, max; 0 P0, 1 P1, 0 P2, 8 P3; self-audit S-13..S-16). F1 [P1] was a modelling
+  choice of mine from round 8. I had left a deleted file's reads "beneath the model" (fs_cache.tla's Read cache
+  arm carried `/\ Live(f, o)`), on the premise that they act on a file the number no longer names. But dev9p_read
+  serves by c->qid.path (dev9p.c 3040), a writer's own pages skip the version check (larder.c 738), and the
+  attribute serve keys the number alone (larder.c 149-165). So an open of a deleted file read the next file's
+  bytes from the new writer's own pages, and its fstat returned the new file's owner, mode and size -- strict
+  mounts included. It is live on main (19027ea8d); OPEN-BUGS 10:37Z, main told on yip 0330. The brief's focus 6
+  had asked exactly whether a modelling choice hid a real interleaving, and my own spec work had not asked it.
+- The operator voted M34 (a read, fstat or mapping fill through an open is served from own pages and attributes
+  only when the open's name matches; an unnamed open asks the server), M35 (an unnamed open's leg lands every held
+  run at its number but takes no refusal from a holder named by a generation) and M36 (the plain walk's one
+  Tgetattr asks the basic attributes with the generation and fills the Larder). Two more came up while planning the
+  code, and I asked rather than chose: M35a (an unnamed open's change still stops every writer at its number
+  buffering, since it may be that writer's own file -- otherwise round 6 F1's stale append anchor returns) and M34a
+  (an unnamed directory handle is served by number, so stalk's per-directory search checks stay cache hits).
+- S-15 was mine and the reviewer did not report it: a by-number leg stopped at the first registry entry at the
+  number (wb_reg_find_locked), so round 8's S-11 window could put a dead entry ahead of the live one and an
+  unnamed open's leg skipped the live holder's run. The leg now visits every entry. F3: a caught note during the
+  plain walk's Tgetattr now fails the walk with EINTR, as ARCH 8.8.3 and notes.h require; my 9261539cf scripture
+  had listed "a caught note" among the failures that only leave an open unnamed. F4 moved the budget bias to its
+  own released knob; F8 orders the clone's identity loads acquire-first; F5 and F6 strengthened tests whose
+  positive arms were missing (the Tgetattr's fid; a Larder-served stat and a cached open after the leg).
+- Deriving the sabotages found a guard with no witness: M36's fill checks that the reply names the walked file,
+  and removing that check (m36-no-path-guard) would have passed every test. 251d7c9c5 adds the arm (a reply naming
+  another file fills nothing). A census of the old sabotages against the new tests: F6's positive arms give
+  m23-stat-serve-noleg and m23-cached-noleg their first red on m31_legs_skip_a_dead_holder's control. sabs14.py
+  now holds 120 sabotages, each kernel one compiling (SABCHK bad=0), each with a predicted first red in
+  m15-r9-sabs-notes.md -- except m34a-no-dir-clause's effect on older directory fstats, which the run will show.
+- The model (dd261b821): a dead open's read reaches the cache, served only by a matching name (Serves, the impl's
+  own_serves); cache entries carry the installing file's incarnation and name; a live holder's flush can be refused
+  too (FlushRefused, a fresh token); an fsync can be answered by its own leg's refusal (FsyncLeg). reuse GREEN over
+  10,544,250 distinct states (2,494,548 before); wb and wb_nopop 15,776 (6,960); BUGGY_NUMBER_SERVE red in 4
+  states (a reuse, the new file's populate, the dead open's read). The told cfgs' shortest traces run the other way
+  from what I first wrote: a deleted file's open is told the NEW file's refused run. Corrected in the cfg headers,
+  the matrix and SPEC-TO-CODE.
+- None of rounds 7 to 9 has booted: the evidence is compile (-Werror), TLC and derivations. Two points await the
+  operator, not blocking: a create on a strict cacheable mount is unnamed, so its fstats now go to the server; and
+  the EOF size serve is version-gated like read pages, so it could stay by number.
+- Audit round 10 (Opus on Opus, max; 0 P0, 0 P1, 1 P2, 4 P3; self-audit S-17..S-20): CLEAN by the rule, no
+  round 11 owed. F1 [P2] is live on main, and it is older than this arc. A union's member loops read every member
+  failure as a miss and walked the next member -- a failed cross, a failed X-stat, a failed walk (stalk.c 997/1072,
+  1013/1084, 1026-1029/1095-1098 at dd261b821) -- and stalk_union_has_child read a failed walk as absent. With a
+  caught note claimed, the next member's walk can still succeed: an op whose reply beats its Tflush clears the mark
+  (9p_client.c 1324). The path then resolves to the member the first one shadows, and unlink, open, exec or rename
+  act on a file the path does not name. OPEN-BUGS 13:20Z; main told on yip 0331. 6e470643c ends every member loop
+  on the call's mark or a pending death (stalk_call_ended), not on the walk's reason: a server's own EINTR is that
+  member's refusal and is skipped, as dev9p's wb_note_cancelled reads it. stalk_union_has_child answers -T_E_INTR,
+  and its two callers fail the call (create's EEXIST probe; the merged readdir returns what it has gathered).
+- S-20 was in my own F1 witness. It refused the walk with a POSITIVE T_E_INTR, and stalk_err_code maps anything
+  outside [-4095,-2] to EIO, so its control never showed a server's own EINTR being skipped -- the one case that
+  tells the mark from the reason. Five F1 sites also had no witness that could fail: the probe's entry check, the
+  readdir's count, the create target's cross, the last member's cross, create's existence probe. a94f47ad4 fixes
+  the sign and adds the arms. The sabotage that ends the search on the reason instead of the mark
+  (f1-reason-not-mark) reddens only because of that sign fix.
+- F2: wb_loss_report marked any record it reported as told, and an open with no name finds records by number, so a
+  deleted file's unnamed open could mark the live file's record and hide its loss from that file's next opens. It
+  now catches up and marks nothing. F3 and F4 strengthened tests: the visit-all leg past an idle entry, past one
+  look's eight holders, and after a wait on a closer; the plain walk's install guard taken before its Tgetattr; a
+  death during that Tgetattr failing the walk.
+- S-17 (mine): the model had no open without a name. My first draft ran it on two files: 39 million distinct
+  states with the queue still growing, 5.4 GB of metadir, the disk at 95%. I stopped it by PID and deleted its
+  generated metadir. The unnamed and external cfgs now run one file (reuse_unnamed GREEN, 14,848 states), since
+  every rule for an unnamed open is within one number. F2's NoMisdirectedSeen: TLC's shortest counterexample is
+  the harmless direction (the new file's unnamed open marks the deleted file's record, which nobody reads); the
+  harmful direction is 7 states, measured on a scratch copy and stated as such. F5: CacheOfLiveFile held by
+  construction, because the guest's own reuse drops the cache, so a serve checking one direction passed every
+  cfg; ExternalReuse (another client's create, the Larder keeping the old entry) makes BUGGY_SERVE_OLDER red in 5
+  states (d3e4a6135). The full re-run: 34/34 as wanted, and the 26 earlier cfgs keep verdict, invariant, count
+  and trace length, compared file by file against round 9's outputs (reuse 10,544,250 again; 015ee00fa).
+- Sabotages: 19 new (13 for F1, one for F2, three for F3, two for F4); sabs14.py holds 139, SABCHK ok, each new
+  one compiling under -Werror. The census of the old ones against the new tests gives ten of them new reds. One
+  wrong turn in it: I first wrote that m31-create-no-getattr reddens the F2 test because "a NONE holder writes
+  through". Re-reading wb_named (GEN or NONE) showed that a NONE create is named by number and registers, and the
+  test stays green. Corrected in m15-r10-sabs-notes.md before the script was written. A second, in the new ones:
+  I gave f1-has-child-post (the existence probe's post-loop check answering 0) one red, the union test. Turning
+  that prose into exact FAIL sets meant reading stalk.open_create_exists_before_access (test_stalk.c 5017-5065):
+  its n_kid leg refuses the probe's walk of "kid" with the mark set, and the post-loop check is the one that
+  answers -T_E_INTR, so under the sabotage the probe answers 0 and the create EACCES. Both messages are now in
+  its WANT and its live line (m15-sabs14-r10b.py). Two sabotages carry a set I did not enumerate, which the run
+  will settle: f3-idle-ends-leg and f3-no-relook on older leg tests.
+- Merged main 4363442f4 (24 commits, no kernel file; ca6e1a984). Seven conflicts (m15-merge2-resolve.py, exact
+  bytes): tapestry-battery keeps both new functions (our rel_watch, main's not_console_owner); three dossiers take
+  the later `updated:` date; sub-lictor takes main's #880 text and names our TestArmRestore beside its two
+  siblings, which Lictor gates on test-mode as it does them; the two generated views are quaestor's. The first
+  commit failed the hook (view-code-coverage: stale generated body): I had rendered the views before staging.
+  Rendered after staging, it passed. Then every source checker, main's new lever-strip checker included (23
+  cases), and cargo checks in the reap tree: tapestry-battery, and Lictor with its levers on and in the
+  production set (4 warnings, each on main too).
+- The lease script resid-live14.sh, round 8 to round 10 (live14-r9r10.py): round 9's 16 and round 10's 19
+  sabotages added with their exact FAIL lines, the R9/R10 reds appended to 15 older lines, 127 sab lines, the
+  narrowed suite 101 tests, and the witness part runnable as K of N leases, each a contiguous N-th of the sab
+  lines. bash -n ok; not yet run.
+- None of rounds 7 to 10 has booted: the evidence is compile (-Werror), TLC and derivations. Three points await
+  the operator, none blocking: a create on a strict cacheable mount is unnamed, so its fstats go to the server; the
+  EOF size serve could stay by number; a plain-walked symlink is unnamed, so its lstat always asks the server.
+- r10core (16:09-16:21Z, ca6e1a984) was the first run of M15's kernel tests in a guest at all: leases 1 to 13 had
+  run only the scenarios, so every M15 test from round 1 on, and every FAIL set I had derived from them, rested on
+  tests nobody had seen pass. The full suite: six red, and dev9p.s15_leg_resumes_after_a_closer started and never
+  returned; QEMU's 300 s timeout ended the boot with 527 of 2621 tests unrun (the boot log's last write, 10 to 15 s
+  after the boot began, puts 2094 tests at 10 to 15 s, so the timeout is no limit on the full set). Each was the test's,
+  read in the code (315dd29fe, not yet re-run). Three were older tests whose premise a vote of mine had changed and
+  my censuses never reached, because they looked only at dev9p's write-behind tests: spoor.close_error_is_eio still
+  wanted a close hook's ENOSPC as EIO (M28 passes it); loom_link_cancel_cascade failed its head inline with a
+  read-only FSYNC (M22 dispatches it); the two m27_ tests ran on the strict fixture, whose opens are unnamed, and
+  F2 -- this round's own fix -- marks nothing told from an unnamed report. Two Loom tests from round 2 never reaped
+  a CQE, so each later loom_enter(l, 1, 1, 0) found its min_complete met by the old CQE and returned before its own
+  op completed; a census of every test with two or more waiting enters and no cq_head store found exactly these
+  two (the control) and two that wait for their full count. The hang was round 10's F3 closer arm: it opened its
+  unnamed reader on the main thread while the closer's entry stood, dev9p_open's own leg matched the entry and
+  waited it out, and the entry leaves only after the open returns. Moving the open first, I made the reading
+  thread start whenever the reader existed; under a sabotage that breaks the premise (m31-number-only) that thread
+  would start with no newer holder, and the 50 ms look reads np->wb_len through NULL. Caught on re-reading the
+  diff before the commit; the thread now starts only when both holders stand. The WIP commit's message says 23
+  tests went unrun: it was 527, and of the M15 tests the script tracks, 25.
+- r10core2 (16:48-16:53Z, 315dd29fe) ran all 2621: the seven were gone and two round 10 tests, never run before,
+  were red; both the test's (a495789a1). F4's death arm started its thread already dead, and a dying caller's RPC
+  is refused before its frame is built, so the Twalk never went out and no Tgetattr was asked; the responder now
+  kills the thread as it answers the Tgetattr. Writing that, the arm's "the fid it bound is clunked" was wrong too:
+  a dying thread sends no Tclunk (client_clunk_async refuses it), production hands the fid to the closer, and this
+  bare client reports a live refusal, which the arm now asserts. F1's union test mounted um1 MBEFORE, so the
+  covered mount point stayed a member: three members, while every count in the test and in its sabotage sets is a
+  two-member union's (an existing test says it in a comment: "MREPL first, so no covered member"). MREPL. Then a
+  census of every plain-walk helper's test with a told-once assert, under m33-walk-no-learn: four reds its set
+  lacked -- m30a_a_loss_is_told_once and m27_create_samples_the_record since F2 (an unnamed report marks nothing),
+  the m27_ pair since their move to a staging session. The census's first draft checked that a message was unique
+  and refused: "an open made after one was told hears nothing" is two tests' message, both red here.
+- r10core3 (17:19-17:23Z, a495789a1) ran all 2621 with one red, and it was the assert I had just added: F4's
+  death arm, "it hands the fid on: a refusal on this bare client". My reading of the dying thread's clunk was right
+  (refused, no Tclunk) and my reading of the fixture was not: the death lands before the client reads the refused
+  Tgetattr's reply, so it abandons the op and flushes it, and the single-slot loopback refuses a send over an unread
+  reply ("9p: op abandoned (tag 0, death, flush send failed)"); the client latched the session dead, and a dead
+  session's fid is not held, so nothing was counted. The assert before it, "sends no Tclunk", passed on the dead
+  session -- the paired positive is what caught it. The project had settled the shape already (loom_quiesce: the
+  single-slot loopback refuses an abandon's Tflush; the late reply runs over the mq FIFO), so both F4 arms moved to a
+  FIFO variant of test_dev9p's fixture whose server answers Tflush, and the dying arm now drains the abandoned reply
+  and the Rflush and asserts a live session (ca86d1ad9). While the run was up, the three witness sets round 10 left
+  "read the run's set" were enumerated by reading against the 101 kept tests (m15-r10-enum3.py): m34a-no-dir-clause
+  and f3-idle-ends-leg redden their witness alone; f3-no-relook adds m23_leg_wait_sleeps ("and does not read
+  meanwhile") and, as a race, peer_waits_out_a_handed_off_run ("after the closer's job was done": its Tfsync beats
+  the closer's Tclunk unless the peer is slower than a Twrite round trip).
+- r10core4 (18:19-18:25Z, ca86d1ad9): the kernel suite green for the first time, 2621 and 0, and so for the first
+  time the boot went on into joey -- which went extinct at main's B-3h4 probe, merged at ca6e1a984: "pouch-hello-locks:
+  FAIL downgrade: the append was not staged". Read, not run: the probe proves staging by a child that opens the file
+  and fstats the old size, and vote M23 makes that child's own open land the holder's run first. jc-probe's killst
+  rung (next in joey) proves it the same way, with a stat by name. Both are main's end-to-end witnesses of a state
+  M23 made invisible to every observer on the session; how they should read is a coverage decision for main's work,
+  so it went to the operator. The merge lesson again: a parent's gates over the other's code -- here main's joey
+  probes over M15's kernel -- and they could only run once the suite was green.
+  The operator voted at 05:06Z: "Probes follow M23" (b865c4b2e). The lock probe's child now sees the append its own
+  open landed; jc-probe's killst rung looks at nothing before the kill, because under M23 that look would land the
+  child's run itself and leave the exit close -- the thing the rung watches -- nothing to flush. Main was told
+  (call 0332). The vault-lint hook refused the first commit attempt: the coverage view's harness count moved by the
+  seven lines jc-probe lost, and quaestor render belongs after staging.
+- r10core5 (05:15-05:21Z, b865c4b2e): suite green, the downgrade leg passed, and the next leg of the same probe
+  failed the same way: "mapped-write: the byte was not staged". My census before b865c4b2e had grepped for the
+  phrasings I had already met ("is staged", "not reached the server"), and "was not staged" is neither: a search
+  over nouns I had seen, not over the thing. Re-run on the stem in its write-behind sense across usr/, it found no
+  other observer premise in a probe joey runs. Same vote, same shape as killst: no look before the close (14a953469).
+- r10core6 (06:11-06:18Z, 14a953469): suite green, and for the first time on M15's kernel joey ran every probe to
+  the login prompt (downgrade, mapped-write and killst among them: the three probe fixes hold). Then tools/test.sh
+  failed the boot on its refused-clunk check: "9p: close: clunk of fid 1 refused rc 11", printed inside my own F4
+  test's dying arm. ca86d1ad9 had moved F4 onto the FIFO so the session lives, and on a live session the arm's
+  deliberate refusal (a bare client, no closer to hand the fid to) prints the one line test.sh reads as a failed
+  hand-off. r10core4 and r10core5 printed it too; their extinctions stopped test.sh first, and I read their logs for
+  the extinction only. Before fixing, I ran the rest of test.sh's checks by hand on this log (no flush or unlock
+  lines, no skips, the tally agrees, check-arc-gates rc=0): this was the only red. The fix (336127299) follows the
+  flush-quiet precedent -- count, then the quiet check, then the line -- with a flag of its own. My first draft shared
+  the flush flag; reading who else sets it showed five legs that quiet a lost run on purpose, where a real refusal
+  would then have gone unseen by test.sh, so it was reverted before the commit. The runner releases and names the new
+  flag (CLOSER-KNOB(clunk-quiet,)), and a 128th sabotage, f4-clunk-quiet-left, leaves it set (round 8 F5's pattern).
+  The lesson: a gate that stops at its first failure hides its second, so a run that stopped early has its log read
+  for every later check's line -- the refusal sat unread in two logs.
+- r10core7 (07:06-07:32Z, 336127299, QEMU 10.0.2): GREEN, the first green core of round 10 -- suite rc=0 and 2621/0
+  with every later test.sh check, joey to the login prompt, the three Mac scenarios green, the eight mutants red at the
+  checks that know them and ro-create green. Meanwhile corona's call 0334 (operator votes 150 + 155: the shared QEMU
+  10.0.2 -> 11.1.3 for the HVF short-WFI spin) asked every booting worktree to carry main's f22b3aac4. A merge of
+  main conflicted in nine files (main's EB-1/FC-1 against aux's Lictor and tapestryd work): aborted, since that merge is
+  M15's promotion's. The two QEMU commits were cherry-picked instead (aa7019c3e), and their machine-dossier text
+  resolved for aux's kernel: main's "GICv3 asserts isv under HVF" is false here since 6f8ab5387, and the 11.1.3 trial
+  it cites was main's kernel. My first resolution said a fixed kernel had never been tried on 11.1.3; f48fc214c's own
+  message recorded m3 (2026-11-10), so it was corrected before the commit -- and then I told corona m3 was one boot
+  without looking, and barged a correction after reading m3/summary.txt: four 11.1 GICv3 boots, 2442/0 each. Running
+  test-skip-verdict.py for the pick found it red on the base too: f48fc214c's MSI rule never reached the host check
+  nothing runs (35af3e4ce, 43/43). Corona then held the upgrade over late tickless parks on 11.1.3 (their bug 07:20Z).
+- r10w1 (07:56-10:17Z, 336127299, 10.0.2): witness 1 of 2, 59 of 64 exact. Five off target, none a kernel defect so
+  far: one sabotage no longer builds in the production shape main's test.sh now checks; my round 10 closer test HUNG
+  under the number-only sabotage -- its own thread's leg waits on the closer entry only that thread ends, so the
+  defect it exists to catch shows as a timeout that hides every later test (a test fix); three expectations to
+  re-read (a control the round 9 WANT edit gave stat-serve but not stat-wire; two m27 tests red at an earlier
+  premise; the EINTR fallback failing differently in a fixture that walks d/wbfile only fused). The commit moves, so
+  core and both witnesses run again.
+- The five, read (10:24-10:41Z, after a self-compaction). The hang was not where I had written it: not the newer
+  holder's create or write but the OLDER holder's own write, the first operation after the closer entry stands --
+  every write runs a leg, the holder's own included (dev9p.c:3276), and under number-only keys its gen 0x52 key
+  matches the entry's 0x53. The create runs no leg (dev9p_create is no caller of wb_holder_flush), so 0b52e408a moves
+  both writes, not the create, onto a test_dying thread in both arms, killed if they wait, with an assert that names
+  the wait. m31-create-no-getattr's unnamed keys would have hung witness 2 on the same entry. The stat-wire-noleg
+  extra was a WANT miss with a mechanism: that sabotage removes the bind walk's leg too, so run 1 lands by the open's
+  leg, whose flush drops the attr, and the stat goes to the wire it also emptied. The m27 pair runs its told arm
+  first, so the sampling sabotage reddens the told arm's premise and the controls the WANT named are never reached.
+  For f4's fallback the fused walk reports "d" as a plain file, but oc9_proc holds CAP_DAC_OVERRIDE and the fused
+  post-scan asks no intermediate type, so the control's open should open: it now says so, the positive the "opens
+  nothing" negative lacked. f3-yield's sabotage keeps a read of the counter; check-production passes with it.
+- r10core8 (10:54-11:22Z, 0b52e408a, QEMU 10.0.2): GREEN -- suite 2621/0 with every later test.sh check, the
+  scenarios and mutants as wanted. The F4 control's open, derived from CAP_DAC_OVERRIDE and the post-scan's missing
+  type check, measured: it opens.
+- r10w1b (11:23-13:05Z, 0b52e408a): witness 1 of 2 GREEN, 64 of 64 exact; the hang is gone and m31-number-only's
+  run reaches every test after the closer test, with the lines that were wanted there.
+- r10w2 (13:06-14:34Z, 0b52e408a): witness 2 of 2, the half that had never met round 10's tests: 61 of 64 exact,
+  m31-create-no-getattr among them (the closer test's other would-be hang). Three off target. m32-report-on-failure
+  turned nothing red, and reading why found a sabotage that could never have: loom_payload_result returns on any
+  status < 0 before the branch whose 'status == 0' it removed. An equivalent mutant since round 7, so M32's rule for
+  a failed Tfsync had never been seen red; it is rewritten to report a failed FSYNC ahead of that return.
+  m33-walk-no-learn reddened round 9's EOF-serve test at its premise, never enumerated; f3-no-relook's closer line
+  fell on the green side of the race its own WANT described. The three go through a new witness-only part, tested
+  against the real sab lines with stubs, since the script releases the Mac on exit and cannot be tried unleased.
+- r10wo (14:42-14:49Z): the three exact, the rewritten m32 sabotage red at the failing-Tfsync control. Every kernel
+  sabotage of round 10's 128 has now turned red as wanted on the device at 0b52e408a.
+- r10ctl (14:49-15:41Z): ten of twelve controls red where they should be. ctl-permsfirst's boot died -- the gate
+  image runs the kernel suite and extincts on a red, and the control had baked no-devno's kernel fault unkeyed, so
+  the suite's own rename test caught it before login. The lesson was already in memory (key a kernel mutant meant for
+  a userspace witness on the witness's Proc name); the control predates it. ctl-rm-follows was red at the right leg
+  with another errno, and the Mac app's log showed why: the following rm resolved ../keep as rmtree/keep, because a
+  served link re-anchors at the dirfd it is opened from (DISTRO 4.6) -- the kernel keeps even a following rm inside
+  the tree. Both are harness fixes; a controls-only part runs the two again.
+
+### Decided by the operator
+
+M17-M36, M22a, M24a, M30a, M34a, M35a (write-behind's holder, legs, pins, loss records, names and generations);
+the witness split into two leases (2026-11-18); probes follow M23 (2026-11-19T05:06Z); and, via corona's call 0334,
+votes 150 and 155 (the shared QEMU's 11.1 path, carried here as a cherry-pick, aa7019c3e).
+
+### What "green" covers
+
+At 0b52e408a on QEMU 10.0.2: the full suite 2621/0 with every later test.sh check (r10core8); all 128 kernel
+sabotages red with exactly their FAIL lines (r10w1b, r10w2, and r10wo for the three re-judged); all twelve control
+bakes red at the check that knows each fault and the gate image green again (r10ctl, r10co). Not run: the full CI
+gate (held by the operator), the SMP matrix, QEMU 11.1.3.
+
+### Open
+
+- The promotion: merging main (EB-1, FC-1 conflict with aux's Lictor and tapestryd work in nine files), with each
+  side's gates.
+- For the operator, not blocking: a strict-cacheable create is unnamed, so its fstats go to the wire; the EOF size
+  serve could stay by number; a plain-walked symlink is unnamed, so its lstat goes to the wire; whether host checks
+  nothing runs (tools/test-skip-verdict.py) should join build.sh; and DISTRO 4.6 anchors a served link at a dirfd
+  base, so openat(rmtree, "link") with `../keep` finds rmtree/keep while the path open finds work/keep (by design,
+  recorded at r10ctl).
+
 ## 2026-11-14 (aux): the line to the Mac, built to the session's mount
 
 Run on the Mac runner arc, station "Interop service (/mnt/mac)". Opus 5.5 throughout.

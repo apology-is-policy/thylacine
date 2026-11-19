@@ -82,7 +82,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-11-02
+updated: 2026-11-19
 ---
 
 ## Approved private service lifecycle
@@ -274,7 +274,31 @@ redirect work already in flight.
 
 The buffer-backed operations pin two objects this way; the two-fid operations —
 rename, link — pin three, and additionally require both fids to belong to the
-same session, because those messages name two fids in one namespace.
+same session, because those messages name two fids in one namespace. Two handles on two devices (two Devs, or
+two dev9p sessions: Dev and devno compared) answer `-EXDEV` and put nothing on the wire, as the sync rename answers
+it (votes M15 and M17; it answered EINVAL before), whichever handle is the other Dev's: the check runs before the
+dev9p gate, which would answer a first handle of another Dev EINVAL (M15 round 2, F8). The second handle's own
+not-dev9p and other-session checks stay behind it as a backstop no pair reaches. Test:
+`9p_client.loom_two_sessions_exdev` (both directions across sessions and across Devs, each with the wire counter
+unmoved, and a pair within the other Dev, which reaches the gate's EINVAL).
+
+FSYNC takes a registered handle with either right (vote M22), and a navigation handle's dispatches (vote M22a), as
+SYS_FSYNC's does; one with neither completes `-EACCES` at submit. An FSYNC whose
+Tfsync succeeded is told the file's lost write-behind runs, once, as fsync is
+(vote M32): `loom_payload_result` calls the pinned Spoor's `Dev.fsync_report`
+under the client's lock (the report takes only a leaf lock), and a negative
+answer is the CQE's result. An FSYNC whose Tfsync failed returns that errno at
+the function's first line, before any report, so it is told nothing and the
+next FSYNC is; the `status == 0` guarding the report call restates that rule
+and cannot be false there. The ring lands no held run first: it runs no leg
+([[sub-kernel-ninep-dev9p]]'s **A ring FSYNC is told**). Tests:
+`dev9p.m32_ring_fsync_is_told`, `dev9p.m32_ring_fsync_names_the_file`. READDIR asks each complete dirent's name what
+SYS_READDIR asks (`p9_dirent_run_check`): one path component, or the op completes `-EIO` and nothing reaches the
+buffer (M15 round 2, F7). Only complete records reach the buffer and the count, and a run holding none fails the
+op `-EIO`, as SYS_READDIR's does (round 3, F9). A READDIR its completion refuses fails as an error reply does: it
+ends a multishot stream and fails its chain, so a linked successor completes `-ECANCELED` (round 3, F2). Tests:
+`9p_client.loom_fsync_read_only`, `9p_client.loom_readdir_names` (a record with part of the next: the record alone;
+a run with no whole record: EIO), `9p_client.loom_readdir_refusal_cancels_chain`.
 
 The registered buffer's kernel address is taken from the backing region's
 direct-map base rather than the user virtual address, so the pin survives the

@@ -21,7 +21,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-11-09
+updated: 2026-11-19
 ---
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
@@ -576,6 +576,13 @@ the principals at its two ends, the system principal and a hostowner
   `role_waiters_list` (hooks waiting for the reader role itself, not a
   reply: the fan-in waiters' role hooks), `done_reply_buf`,
   `dead`. Magic `P9_CLIENT_MAGIC` (`_Static_assert`-pinned).
+- `struct p9_wb_losses wb_loss` (votes M27, M30a, M31): dev9p's lost
+  write-behind runs, at most `P9_WB_LOSS_MAX` (16) records of a file's qid path
+  and generation (`has_gen`: the server reported one), sequence, errno and
+  whether an open has been told, under a leaf spinlock; zeroed and
+  initialised in `p9_client_init_storage` beside `dirfid`, as storage is not
+  zeroed. The client holds only the table; dev9p keeps the policy
+  ([[sub-kernel-ninep-dev9p]]'s **Lost runs**).
 - The dev9p poll kthread's intrusive collect entry in each client:
   `poll_next`, `poll_pin` (the session ref the kthread holds across its pump,
   hook and park), `poll_hook`, `poll_listed`. One kthread needs one hook per

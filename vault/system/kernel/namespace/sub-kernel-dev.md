@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-11-09
+updated: 2026-11-19
 ---
 ## The lock slots (B-3h2, 2026-10-29)
 
@@ -125,14 +125,19 @@ bestiary, a `.wstat_native` slot on a Dev that does not set
 are structural gates rather than hygiene checks, and the first of them
 is the most interesting line in the file (Mechanism).
 
-**Sixteen of the 30 slots are mandatory; fourteen are NULL-permitted.**
+**Sixteen of the 40 slots are mandatory; twenty-four are NULL-permitted.**
 The optional set is `stat_native`, `wstat_native`, `walk_attrs`,
-`open_cached`, `fsync`, `readdir`, `rename`, `unlink`, `readlink`, `remote`,
-`poll`, and the remote-readiness triple `poll_snapshot` / `poll_snapshot_release`
-/ `poll_arm`. A NULL slot has a defined meaning per slot, and the
+`open_cached`, `fsync`, `fsync_report`, `readdir`, `rename`, `unlink`,
+`readlink`, `remote`, `poll`, the remote-readiness triple `poll_snapshot` /
+`poll_snapshot_release` / `poll_arm`, and the slots their own sections give:
+the five lock slots, `wstat_bind`, `fd_close`, `lock_held` and
+`content_versioned` (`dev.vtable_slot_coverage` asserts the sixteen). A NULL slot has a defined meaning per slot, and the
 meanings are not uniform: a NULL `poll` (with no triple) means ALWAYS
 READY (the POSIX-correct answer for a regular file), while a NULL
-`fsync` or `readdir` makes its syscall answer -T_E_OPNOTSUPP and a NULL
+`fsync` or `readdir` makes its syscall answer -T_E_OPNOTSUPP, a NULL
+`fsync_report` tells a ring FSYNC nothing (vote M32: what a Loom FSYNC whose
+Tfsync succeeded is told; called under the 9P client's lock, so it takes only
+a leaf lock and never blocks), and a NULL
 `stat_native` makes `SYS_FSTAT` answer -T_E_IO. So one absent slot is a
 graceful default and another is a hard refusal, and only the header says
 which.
@@ -355,7 +360,9 @@ Two disciplines, split by who is at fault:
   only dev9p has a reason, every other Dev would carry a parameter it ignores, and a
   caller that skips the wrapper keeps today's miss, which fails safe. A value the Dev
   passes is bounded by `stalk_err_code`: `-1` and anything outside `[-4095,-2]` read
-  `T_E_IO`. ERRORS.md ER-2.
+  `T_E_IO`. ERRORS.md ER-2. `open_cached` uses the same slot: a NULL after
+  `dev_walk_failed` fails the open with that errno, a NULL without it takes the normal
+  path ([[sub-kernel-stalk]]).
 
 `dev_simple_attach` propagates a `spoor_alloc` NULL. The helpers are
 NULL-safe in their Spoor argument.

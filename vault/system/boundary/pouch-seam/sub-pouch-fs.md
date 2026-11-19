@@ -33,7 +33,7 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-11-02
+updated: 2026-11-19
 ---
 ## fcntl locks and flock (2026-11-02, B-3h4, 0065)
 
@@ -74,6 +74,15 @@ one Proc: the prover spawns itself with a mode in `argv[1]` to ask. The child
 inherits every descriptor not marked close-on-exec and each of those is the
 parent's open file, so `cached-ro` marks its open before the child's take, and
 `cached-inherited` runs the same steps without the mark and reads the child's byte.
+`downgrade` and `mapped-write` follow a staged byte to the server, and neither
+looks from another open while it is staged: a peer's open, or a stat by name,
+lands the holder's staged run before it looks (vote M23,
+[[sub-kernel-ninep-dev9p]]), so no open on the session sees one, and staging
+itself is the kernel suite's to pin. `downgrade`'s child, opening the file while
+the parent's write lock holds an append, sees the append, and the reader the
+conversion to a read lock admits reads it; `mapped-write`'s byte is on the
+server after the descriptor's last close, while the map is still held, and
+another open reads it.
 
 ## utimensat sets times; chmod's refusal is EPERM (2026-10-22, 0063)
 

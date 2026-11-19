@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-11-13
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -46,7 +46,8 @@ lookup and behaves like a transfer.
 **Only versioned content is cached (operator vote 114, round 31 F1).** Before
 the search, the lookup asks the Spoor's Dev `content_versioned`. A file that
 answers no -- every file of a dev9p session not latched cacheable, netd's
-among them -- is created un-registered, as a bypass is: its Burrow holds the
+among them, and a dev9p open that can stage (vote M29: its reads overlay
+bytes the server may yet refuse) -- is created un-registered, as a bypass is: its Burrow holds the
 Spoor exactly as long as a mapping does and never answers a hit, so whatever
 the server keeps for that open (a connection slot) goes with the last
 mapping, no later mapper is served its bytes, and none inherits its size.
@@ -83,6 +84,17 @@ wide devno hitting its own entry as the control.
 gets a new version, so it is a different key and misses the old entry; a Proc
 that already exec'd stays pinned to the bytes it started with. No invalidation
 path exists because none is needed.
+
+**A file mapping keys on the version its size probe fetched**, not the one its
+descriptor was opened at: `image_lookup_or_create_at(..., key_vers)`, which the
+`mmap` arms call with `spoor_file_size_vers`'s answer; `image_lookup_or_create`
+keys on the Spoor's own version, which is current for exec's fresh open. A
+write on the same client after an open moves the file's version on, and keyed
+on the open-time version a later mapping would find the Image from before the
+write (LARDER-DESIGN 12.6; M15 round 5, R5b-F8).
+`image.mapping_keys_on_the_probe_version` holds it: keyed on the descriptor's
+version the lookup misses the probe-keyed Image, keyed on the probe's it hits
+(the control).
 
 **Executability is in the key because of a fault-arm coupling.** A crafted ELF
 can declare two `PT_LOAD`s over an identical file window with different X bits.

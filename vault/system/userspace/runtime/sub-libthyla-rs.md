@@ -51,7 +51,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-11-13
+updated: 2026-11-19
 ---
 ## Dedicated service owner (October 2)
 
@@ -839,6 +839,21 @@ absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
 base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
 `read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
 `assert(isv)` (#890, the kernel-worked-userspace-tripped signature).
+
+2026-11-14 (vote M15): `Error::CrossesDevices` (18, "invalid cross-device link"), `FileTooLarge` (27),
+`ReadOnlyFilesystem` (30) and `NameTooLong` (36), each with its `as_errno`, `From<i32>` and Display, so `mv` can
+branch on a rename between two devices and a Mac share's refusal reads "read-only file system" instead of "kernel
+error (errno 30)". `tools/check-err-rs.py` holds the three tables to each other at every build. `File::close(self)
+-> Result<()>` closes with the kernel's answer instead of Drop's silence: `SYS_CLOSE` reports a dev9p write-behind
+failure latched since the last write as EIO, and a copy that ignored it would report success for bytes the server
+never took. `fs::create_dir_open(path, mode)` creates a directory with `mode & 0o777` (the umask applies) and keeps
+the reading open `SYS_OPEN_CREATE` returns, so a caller examines the directory it made through that handle, not by a
+stat of its path, which a rename in between could point at another directory (M15 round 4, F3).
+`fs::create_dir_mode(path, mode)` is that create with the handle closed, and `create_dir` is
+`create_dir_mode(path, 0o755)`, unchanged for its callers. For votes M19-M21, the calls a walk by descriptor needs:
+`File::open_at(name, omode)` (SYS_OPENAT relative to the handle; `T_OPATH | T_ONOFOLLOW` examines an entry without
+following it), `unlink_at(name, dir)`, `rename_at(old, &to, new)`, `File::sync_all()` (SYS_FSYNC) and
+`ReadDir::from_file(f)` (the listing of a directory already opened for reading).
 
 2026-10-22: `Error::Unsupported` (95), "operation not supported". G12 made
 `SYS_WSTAT` answer `T_E_OPNOTSUPP` for a Dev with no metadata slot (every Dev

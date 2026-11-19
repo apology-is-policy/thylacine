@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-11-15
+updated: 2026-11-19
 ---
 ## A closer entry may be a job alone (B-3h2, 2026-10-29)
 
@@ -95,7 +95,8 @@ Tclunk is sent.
   spinlock, a wakeup), so a dying thread may call it (I-24). `-1` when the
   node cannot be allocated: the caller reports the leak with
   `p9_clunk_refused(fid, rc)`, the one producer of
-  `9p: close: clunk of fid N refused rc R`, which `tools/test.sh` fails on.
+  `9p: close: clunk of fid N refused rc R`, which `tools/test.sh` fails on (a
+  test that refuses one on purpose quiets it, `p9_clunk_refused_quiet_for_test`).
   `p9_closer_start()` makes the first closer (boot, after the poll pump;
   extinction on failure). `p9_closer_stats()` (tests build only) reports the pool.
 - A close job (2026-10-07, ARCH 7.9.1 part C): `p9_attached_defer_close(a,
@@ -352,6 +353,13 @@ the kick arrived before the retiree's switch.
   (each returns the count still unconsumed), and
   `p9_closer_hold_spawn_for_test` holds the next spawn at its end -- before
   it readies its closer or takes its failure -- until released.
+  `p9_closer_test_release_knobs` clears all three and the two quiet flags and
+  says which were set; the kernel test runner calls it after every test and
+  names a leak `CLOSER-KNOB(...)` (M15 round 8 F5). A quiet flag keeps a line a
+  test causes on purpose out of the log, the count moving either way:
+  `p9_close_flush_quiet_for_test` a lost run's or unlock's,
+  `p9_clunk_refused_quiet_for_test` a refused clunk's (a flag of its own, so a
+  leg that quiets a lost run still shows a refusal).
 - `attached_destroy_inner` sends no Tclunk for the root fid: the session
   refuses to clunk the root, so the old call was dead, and the transport
   close releases the root with every other fid.

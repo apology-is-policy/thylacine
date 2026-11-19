@@ -22,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-11-14
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -390,6 +390,10 @@ refused rc R` is a fid the live session holds after the hand-off failed: a
 real leak until the session ends. After the banner `test.sh` fails on the
 line and prints it. Its red run injected one refusal at boot: all 1764 kernel
 tests passed and the verdict failed on the line; the clean boot prints none.
+The one kernel test that refuses a clunk on purpose (M15 round 10 F4's dying
+arm, on a bare client with no closer to hand the fid to) counts the refusal
+and keeps its line out (`p9_clunk_refused_quiet_for_test`); before it did,
+guest run r10core6 failed here with all 2621 kernel tests passing.
 Its sibling `9p: close: flush of fid N failed rc R` (2026-10-07, ARCH 7.9.1
 part C: a last close's staged bytes never reached a live server) fails the
 verdict the same way, and so does `9p: close: unlock of fid N failed rc R`
@@ -467,6 +471,14 @@ target, a fixture fabricated a zombie, and one carrying a hand-linked thread
 are each named (`LEAKED-PROC(3809)` for the zombie) and the suite runs to its
 end, where before the mark the zombie extincted the boot mid-suite and the
 thread-bearing one hung it until `test.sh` timed out.
+
+The 9P closer's and write-behind's test knobs are the runner's to release too
+(M15 round 8 F5): after every test `p9_closer_test_release_knobs` and
+`dev9p_wb_test_release_knobs` clear the close-job and closer spawn and node
+failures, the spawn hold, the two quiet flags and the leg and report windows,
+the runner prints `CLOSER-KNOB(...)` naming each that was set, and a passing
+test that left one fails. A closer test whose loud `TEST_YIELD_UNTIL` returned
+before its own disarm had left a knob armed for the rest of the boot.
 
 ### The host tests (`test-rust.sh`)
 

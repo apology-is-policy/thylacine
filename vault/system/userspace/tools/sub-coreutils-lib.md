@@ -19,6 +19,8 @@ code:
   - usr/coreutils/src/ui.rs
   - usr/coreutils/src/usage.rs
   - usr/coreutils/src/netpump.rs
+  - usr/coreutils/src/copy.rs
+  - usr/coreutils/src/rmtree.rs
   - usr/coreutils/Cargo.toml
 audit: none
 guarded-by: []
@@ -28,7 +30,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-10-22
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -198,6 +200,48 @@ than deferring. A naive write-everything loop fails the instant the first
 window fills -- which is exactly the bulk transfer these tools exist to
 perform. The pumps wait on a writability signal and retry, one in-flight
 chunk per direction.
+
+**`copy` is the engine `cp` and `mv` share** (vote M15 moved it out of `cp`, verbatim but for the tool's name
+in each diagnostic). A file copy opens the source, creates the destination truncated with the source's mode under
+the umask, streams, and closes the destination checked (`File::close`): a write the server had not taken fails
+the copy there. Identity is (dev, qid path) -- for `cp` from a stat that follows links, for `mv` (`no_deref`) from
+one that does not: a destination that is its source is refused before the truncating open could empty it, a
+directory met again below itself (a symlink cycle) or the destination tree met inside the source is not descended.
+For `mv` and `cp -P` the source is walked by descriptor, as `rmtree` walks: the top is examined through a navigation handle
+that does not follow its last name (`File::open_link`), each entry below through one opened from its listed
+directory's handle (`open_at(name, T_OPATH | T_ONOFOLLOW)`), a directory is listed from a reading open of its own
+handle ("."), and a file is opened from its directory's handle without following a link and checked to be the
+entry examined. So a link put in place of a file, or of a directory already listed, is refused, not followed: a
+path walked again from the top would follow a link swapped in for any directory on it (M15 round 3, F4; round 4,
+F2). `cp` without `-P` follows links, and walks by path. Kept attributes (`cp -p`, every `mv` across devices):
+times, then owner and group (a refusal left without a word, as GNU leaves it for an unprivileged caller), then the
+mode; a directory is created owner-only (0700) and gets its mode after its entries. A directory the copy creates
+is examined through the handle its creation returned (`fs::create_dir_open`): its identity is the one compared
+with the source's, the destination root the walk will not descend into, and the top `dst_top` records (round 4,
+F3). `attrs_soft` (mv) says a
+permission-class refusal of an attribute and goes on; any other failure -- a set_times that flushed a write the
+server refused -- fails the copy. `refuse_special` (mv) asks the OPEN source what it is, because an unconnected
+`/srv` entry stats as a regular file and only its connection reports a socket; a device's or a service's stream is
+not content. A symlink source is refused when links are not followed: no native call creates one (vote M18 queues
+it). For `mv` (votes M19, M20): `excl` creates every name new (`create_new`), so the copy can never write into a
+file it did not make; `sync` syncs each copied file before closing it, and each directory after its entries;
+`attrs_only_whole` applies a directory's attributes only once its whole subtree copied, so a failed copy's
+directories stay the owner's 0700 and can be removed (round 2 F11). `copy_tracked` records what it copied
+(`Done.copied`: each file's identity with the qid version its open saw, `ver_of`; a directory's identity alone, so
+one new entry in it does not keep every file it holds), the source's identity at its open (`src_top`), and the top
+it created (`dst_top`).
+
+**`rmtree` removes a tree by descriptor** (vote M21), for `rm -r` and `mv`'s removal. Each entry is opened
+relative to its directory's handle with `T_OPATH | T_ONOFOLLOW`, its kind and identity read from that handle, a
+directory's names read whole from a reading open of "." before any goes, and each child unlinked relative to it. A
+link swapped into the tree mid-walk cannot steer the walk out of it, as a path walked again from the top could;
+the unlink still names the entry (there is no unlink by identity), so an entry replaced between its check and its
+unlink is the one removed, and a directory so only if empty. `Rm.only` (mv) removes only what it copied, a file
+only at the version copied -- Stratum gives a removed file's inode number to the next file created, and (qid path,
+qid version) is unique across time where the path alone is not (M15 round 3, F1) -- and names and leaves anything
+else ("changed or appeared after the copy; left in place") with each directory above it; `expect` refuses a top that
+is no longer the file it was. Each failure is said, naming the entry, and the walk goes on, for `rm` as for `mv`, as
+POSIX, Plan 9's rm and GNU's do (round 3; `rm` stopped at the first before).
 
 **`ui` is the card renderer**, carrying both a plain and a coloured string per
 row (plain sizes the box, coloured prints) per beacon's compute-on-plain /

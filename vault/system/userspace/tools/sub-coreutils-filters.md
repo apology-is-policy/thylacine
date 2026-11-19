@@ -49,7 +49,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-10-29
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -110,9 +110,32 @@ state run continuously across every operand rather than resetting per file,
 which is the behaviour that makes `cat -n a b` number the concatenation
 instead of each file.
 
-**Move is a rename, not a copy.** It uses the runtime's rename, which maps
-onto the filesystem's atomic replace. Same-device only, which today is not
-a restriction: the whole pivoted tree is one device.
+**Move is a rename within one device, a copy across two** (votes M15, M19-M21). It
+uses the runtime's rename, which maps onto the filesystem's atomic replace. When the
+kernel answers EXDEV (two Devs, or two 9P sessions: the guest's /tmp and /mnt/mac),
+`mv` examines both ends by descriptor (`T_OPATH | T_ONOFOLLOW` in each parent) and
+refuses what a rename would refuse: the same file (identity: Dev instance and qid
+path), a directory over a file or the reverse, a non-empty directory. It copies the
+source's tree through the shared engine ([[sub-coreutils-lib]]), walking it by
+descriptor as `rm -r` does (round 4, F2), into a name created
+new beside the destination (".mv-<pid>-<n>"), times and mode kept and every file
+synced; checks from the destination directory's handle that the name still holds that
+copy (round 3, F3), and renames it over the destination, which within its device is
+atomic: the destination is never removed first, so a copy that fails leaves it as it
+was. It syncs the destination's directory through a reading open (vote M22), checks
+that the source it opened is still the file it examined, and only then removes the
+source by descriptor, removing only the entries it copied, each file only at the
+version it copied, and naming and leaving anything that appeared or changed meanwhile
+(round 3, F1). A failure removes only the temporary name, and only while it is
+still the tree the copy created. A symbolic link and a special file are refused.
+
+**`rm` examines every operand and entry without following a link**, so a link is
+removed itself and needs no `-r`, and `rm -r` walks by descriptor (`rmtree`): each
+directory is opened from its parent's handle, so a link swapped into the tree cannot
+steer it out, and never empties the directory a link in the tree names; it says each
+entry it cannot remove and goes on with the rest (M15 round 3). Until
+2026-11-14 it stat-followed and walked by path: a tree holding a link to a directory
+had that directory emptied, then failed on the link.
 
 **Copy is open, create-truncate, copy.** Recursion skips the two dot
 entries the directory reader yields — a real hazard handled, since a
@@ -290,14 +313,22 @@ design.
   written through the swallowing `print!` let `tail` go on to read an endless
   next input with no reader, and let a failed banner exit zero; the smoke
   points `head` and `tail` at `/dev/full` to hold both.
-- **Rename must keep being a rename.** Falling back to copy-then-remove on
-  a cross-device move would silently lose the atomic-replace property that
-  callers depend on.
+- **Within one device a move must stay a rename.** The copy fallback is taken only
+  on EXDEV, where no rename was possible; taken for any other error, it would turn a
+  refusal into a silent, non-atomic move.
+- **A move's removals must ask identity, never a name alone.** `mv` removes the
+  source only after the handle it copied from shows it is still the file examined,
+  and then only the entries it copied; its cleanup removes only the temporary name it
+  created, checked by identity.
 
 ## Seams
 
-Cross-device move is unbuilt — currently unreachable, since the tree is
-one device, but the fallback is named as a later refinement.
+A move across devices is not atomic, as POSIX allows: the destination changes in
+one rename, but a failure between the rename and the source's removal leaves both,
+and says so. Two 9P sessions to one server (a share reached through a second mount
+of /srv/mac) are two devices whose files mv cannot tell apart, so a copy onto an
+alias through them can still truncate it, as GNU cp does over two NFS mounts. A link
+in the tree refuses the move until a native call creates links (vote M18).
 
 There is no regular-expression engine, so the pattern tools take literal
 substrings; `grep` says so in its own usage text.
@@ -345,8 +376,13 @@ report a symlink as a plain file even where the mode string shows `l`.
   That is worth holding next to what these programs do. `rm`, `mv`, `cp`
   and `chmod` mutate the filesystem irrecoverably, and their argument
   parsing — which operand is the destination, whether a trailing name is
-  an existing directory — is exactly the logic a test would pin. It is
-  pinned by nothing.
+  an existing directory — is exactly the logic a test would pin. Only some of
+  it is pinned: `ls-mac-folders` legs 8-10 run `mv` across devices (from the
+  app's record: its syncs, the source removed only after them, and the walks
+  that show its copy and `rm -r` going by descriptor), `rm -r` over links, and the
+  refusals (the same file through two shares, a service, a failed copy over an
+  existing file) in a real guest, and `ls-3b` runs `mv` and `cp` within one
+  device.
 
 - **Fifteen one-shot tools and two producers swallow a failed write.**
   `basename`, `clear`, `cmp`, `cp`, `date`, `dirname`, `echo`, `id`, `mkdir`,

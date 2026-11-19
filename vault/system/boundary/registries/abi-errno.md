@@ -10,7 +10,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-11-04
+updated: 2026-11-19
 ---
 ## The surface
 
@@ -28,6 +28,7 @@ anywhere.
 | 4 | `T_E_INTR` | EINTR | a blocking wait unwound to deliver a **caught** note (not death); a native caller re-issues, a Linux handler restarts iff `SA_RESTART` |
 | 5 | `T_E_IO` | EIO | block-device failure, 9P `Rerror`, transport break |
 | 7 | `T_E_2BIG` | E2BIG | the environment bounds only (`EXEC_ENV_MAX`); the ARGV bounds still answer `INVAL` — the asymmetry is tracked (#142), not accidental |
+| 8 | `T_E_NOEXEC` | ENOEXEC | not a runnable image: the file resolved and may be executed, and this kernel cannot load it (empty, over `EXEC_FILE_MAX`, not an ELF, another machine's, malformed); `execve` and `SYS_SPAWN_FULL_ARGV`; never the answer for a read that failed, since a shell reads it as "run this as a script" |
 | 9 | `T_E_BADF` | EBADF | empty slot, bad magic, wrong `KObj` kind for the op |
 | 10 | `T_E_CHILD` | ECHILD | a wait names no matching child — every reap loop's termination condition (LINEAGE L-6b `wait4`) |
 | 11 | `T_E_AGAIN` | EAGAIN | would block; note queue at depth without coalesce |
@@ -36,18 +37,23 @@ anywhere.
 | 14 | `T_E_FAULT` | EFAULT | a `uaccess` touch faulted on the supplied user VA |
 | 16 | `T_E_BUSY` | EBUSY | per-Proc lock held and the op cannot wait; mount busy |
 | 17 | `T_E_EXIST` | EEXIST | mount point taken; create collision -- answered before the parent's W check when the caller may search it (B-3b, Linux's order) |
+| 18 | `T_E_XDEV` | EXDEV | a rename between two devices (two Devs, or two dev9p sessions), answered before the Dev's own op, its missing slot and its permission checks; Loom's RENAMEAT and LINK with a second handle on another session or Dev (vote M15, M17) |
 | 19 | `T_E_NODEV` | ENODEV | the backing endpoint went away (any clean server-side close; Loom device-gone) |
 | 20 | `T_E_NOTDIR` | ENOTDIR | X-search on a non-directory component — precedes the X-check, so 0755 and 0644 answer alike; distinct from `NOENT` ("safe to create") |
 | 21 | `T_E_ISDIR` | EISDIR | write/create names a directory — the 9P server, or `SYS_OPEN_CREATE`'s lexical leaf rows |
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
 | 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD); no slot for SYS_ACCOUNT CHILD's handle |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
+| 27 | `T_E_FBIG` | EFBIG | file too large: a server's answer (the Mac app's `snarf` past 16 MiB), named at vote M15 |
 | 28 | `T_E_NOSPC` | ENOSPC | bounded terminal interaction binding pool or identifier capacity exhausted; a memory account's child past the tree's depth |
+| 30 | `T_E_ROFS` | EROFS | read-only file system: a server's answer (the Mac app's read-only shared folder, for a change the kernel's mode check passed on), named at vote M15 |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
+| 36 | `T_E_NAMETOOLONG` | ENAMETOOLONG | file name too long: a server's answer, named at vote M15; `SYS_CHDIR`'s over-long path does not answer it yet |
 | 37 | `T_E_NOLCK` | ENOLCK | `SYS_FILE_LOCK`: the Dev serves no locks, the server refuses (Rlock ERROR/GRACE/undefined status, a Tlock/Tgetlock Rlerror ENOSYS), or the Proc's lock-owner table is full (I-32) |
 | 38 | `T_E_NOSYS` | ENOSYS | dispatch slot exists, handler is a placeholder |
 | 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), `O_NOFOLLOW` on a final symlink (DISTRO D-1), or a mount that would close a cycle in the mount graph (`SYS_MOUNT`, I-3) |
+| 80 | `T_E_LIBBAD` | ELIBBAD | a good program whose interpreter is not a runnable image; `execve` answers it so a shell reports it instead of running a binary as a script (Linux's value; POSIX has none; operator vote 32) |
 | 88 | `T_E_NOTSOCK` | ENOTSOCK | a socket call names an fd with no socktab entry |
 | 93 | `T_E_PROTONOSUPPORT` | EPROTONOSUPPORT | a `SOCK_*`/`IPPROTO_*` the `/net` tree has no directory for |
 | 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | appended at PTY-1d; emitted by `SYS_TTY_SIGNAL`'s stop class (PTY-1f) and `SYS_WSTAT` (a Dev with no metadata slot, dev9p's fidless cached open; G12) |
@@ -59,6 +65,7 @@ anywhere.
 | 110 | `T_E_TIMEDOUT` | ETIMEDOUT | a `tsleep`/`torpor_wait` deadline elapsed |
 | 111 | `T_E_CONNREFUSED` | ECONNREFUSED | netd rejected the dial, or the data open failed after connect |
 | 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open; also a server's answer for its own dead handle when its client must tell that from a lost link: `tapestryd`'s present on a dormant pixel generation and HIN1's `BadHandle` (vote 66); and `SYS_ACCOUNT` or the spawn account tail naming an account by an incarnation that is not its own (vote 76) |
+| 122 | `T_E_DQUOT` | EDQUOT | a server refused a write-behind run for quota: passed through as `T_E_NOSPC` is (vote M28); the kernel raises it nowhere else |
 | 125 | `T_E_CANCELED` | ECANCELED | a Loom chain op cancelled by a failed predecessor |
 
 The **socket family** (24 remapped to EMFILE for the socket table, and 88/93/97/98/103/106/107/111) was appended at VIVARIUM V-5, its values read directly from `third_party/musl/arch/generic/bits/errno.h` because a Linux guest's libc compares against exactly those numbers — collapsing them to `EINVAL` would make a guest retry a connection that can never succeed. `INTR` (4), `2BIG` (7), `CHILD` (10) and `NOTTY` (25) each landed under the same append-under-ratified-scripture precedent the `-1` and change-protocol sections describe.
@@ -108,8 +115,10 @@ The three ranges a return value can fall in, as the seam reads them:
 ## Where the registry is mirrored, and where it has drifted
 
 **`usr/lib/libthyla-rs/src/err.rs`** is the only value-by-value mirror. It
-enumerates **24** of the 38 non-zero values (`as_errno`): 1, 2, 3, 5, 9, 11,
-12, 13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 37, 38, 40, 95, 110, 111, 116. Missing —
+enumerates **30** of the 44 non-zero values (`as_errno`, re-derived 2026-11-14): 1, 2, 3, 5, 8, 9, 11,
+12, 13, 14, 16, 17, 18, 20, 21, 22, 27, 28, 30, 32, 34, 36, 37, 38, 40, 80, 95, 110, 111, 116. Vote M15 added
+`CrossesDevices` (18), `FileTooLarge` (27), `ReadOnlyFilesystem` (30) and `NameTooLong` (36); the ENOEXEC
+chunk's `NotExecutable` (8) and `BadInterpreter` (80) had joined unrecorded here. Missing —
 **14** — is dominated by the V-5 socket family: `INTR` (4), `2BIG` (7),
 `CHILD` (10), `NODEV` (19), `MFILE` (24), `NOTTY` (25), `NOTSOCK` (88),
 `PROTONOSUPPORT` (93), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
@@ -141,7 +150,9 @@ disagree in both directions.
 
 **Nothing catches the lag.** The kernel's discipline is a `_Static_assert`
 per value; the Rust side has no equivalent, and no test compares the two
-lists. Each append owed a mirror update by the audit rule above; the build
+lists. `tools/check-err-rs.py` (run by `tools/build.sh` since 2026-11-14) checks only that err.rs agrees with
+itself -- each variant's errno decodes back to it and has a text -- because libthyla-rs runs on no host, so a
+`#[test]` there would run nowhere; which values it should name is still this page's audit rule. Each append owed a mirror update by the audit rule above; the build
 stayed green through every omission. Tracked as task #34.
 
 **`usr/lib/libt`** deliberately holds no mirror — the C wrappers return the

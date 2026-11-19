@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-11-15
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -47,6 +47,8 @@ bool          spoor_fd_open(const struct Spoor *c);   // does any slot name c? s
 struct Spoor *spoor_clone(struct Spoor *c);           // fresh Spoor, copied state, ref 1
 u64           spoor_next_devno(void);                 // monotonic from 1; never wraps, never reused
 int           spoor_stat_native(struct Spoor *c, struct t_stat *out);
+u64           spoor_file_size(struct Spoor *c);       // the stat's size, or BURROW_FILE_LIMIT_UNKNOWN
+u64           spoor_file_size_vers(struct Spoor *c, u32 *vers_out);   // and the qid version it answered with
 
 struct Walkqid *walkqid_alloc(int max_qids);          // >= 1 slot even at 0
 void            walkqid_free(struct Walkqid *w);

@@ -22,8 +22,35 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-11-14
+updated: 2026-11-19
 ---
+## SYS_RENAME answers EXDEV across devices; a readdir run's names are checked; fsync takes either right (2026-11-14, votes M15, M22, M22a)
+
+`spoor_rename_in_dirs` (SYS_RENAME and the phenotype's renameat) first asks whether the two directories are one
+device: the same Dev and the same instance of it, `od->dev != nd->dev || od->devno != nd->devno`. Two devices answer
+`-T_E_XDEV` before the missing-slot check (`-T_E_OPNOTSUPP`) and before the permission stats, so a move between two
+devices is EXDEV whatever either Dev would have said, as Linux compares mounts before it asks the file system. dev9p
+mints one devno per attach session (`dev9p_attach_client` runs once per session), so two 9P sessions are two
+devices, and the devno is the st_dev a stat reports. The case a guest meets is its /tmp (bound from its home's
+Stratum session) against /mnt/mac (the Mac app's session). `mv` answers EXDEV with POSIX's copy-then-remove
+([[sub-coreutils-filters]]). Older kernels answered EINVAL, or EOPNOTSUPP for a source Dev with no rename slot.
+Test: `dev9p.rename_in_dirs_two_devs` (ramfs and dev9p both ways, two dev9p sessions both ways, and the controls
+within one device, which reach the slot check and the stat).
+
+`spoor_readdir_run`, the run every directory listing passes through (native SYS_READDIR, the phenotype's
+getdents64, and a union's merged run), refuses a run holding an entry whose name is empty or holds '/' or NUL:
+`-T_E_IO`, a malformed stream, as Linux's `verify_dirent_name` refuses it; the walk is `p9_dirent_run_check`
+([[sub-kernel-ninep-wire]]), which Loom's READDIR asks too ([[sub-kernel-loom]]). A recursive walker (rm -r, cp -r, mv's
+removal) joins each name to the path it lists, so a server's '/' would steer it out of that tree (I-28, I-14). The
+refusal returns before the caller commits the cookie, so a retry reads the same run again. "." and ".." pass, and
+the walkers skip them by name. Test: `dev9p.readdir_refuses_bad_names` (the responder's name knob `g_rd_name`).
+
+`sys_fsync_for_proc` (SYS_FSYNC; viv's FSYNC degrades to it) takes a handle holding RIGHT_READ or RIGHT_WRITE, as
+POSIX fsync works on a descriptor opened only for reading: `mv` syncs its destination directory through a reading
+open before it removes the source (vote M22). A navigation (T_OPATH, CWALKONLY) handle syncs too, where Linux
+answers EBADF, because corvus's rename-swap barrier syncs its directories through one (vote M22a,
+IDENTITY-DESIGN 9.2). A handle with neither right answers EBADF and nothing is sent. Test: `dev9p.fsync_rights`.
+
 ## Session registry factory
 
 Native call 134 copies at most sixteen 40-byte route records into bounded
@@ -361,7 +388,9 @@ distinguishable things:
   renumber that falls through, so descriptor teardown keeps exactly one
   implementation. That implementation, `SYS_CLOSE`, returns `-EBADF` for a dead
   descriptor and, since 2026-10-07, `-EIO` when the last close's Dev hook failed
-  (a dev9p write-behind flush) -- the descriptor gone either way
+  (a dev9p write-behind flush), and since 2026-11-17 `-ENOSPC` or `-EDQUOT` when
+  the server refused that flush for space (vote M28) -- the descriptor gone either
+  way
   ([[sub-kernel-handle]]'s `handle_close_report`). And a phenotyped `read`, `write`, `readv`, `writev`,
   `pread64` or `pwrite64` on a socket whose connect a signal interrupted
   finishes that connect first
@@ -1044,7 +1073,12 @@ follows a link and answers EEXIST), and after the retry that case answers
 -T_E_NOENT, never EEXIST (`stalk.open_create_exists_before_access`'s
 `p_lnk` leg). Ported code's `mkdir(p) < 0 && errno
 != EEXIST` relies on Linux's lookup-then-may_create order
-(`stalk.open_create_exists_before_access`).
+(`stalk.open_create_exists_before_access`). A probe a caught note or a death
+ended answers -T_E_INTR, and the create returns it, not EACCES (audit round 10
+of M15, F1; the test's `n_kid` leg). A union's merged readdir ends the same
+way: a member's readdir failing while the call's note mark is set, or a dedup
+probe answering -T_E_INTR, stops the merge, which returns the entries it has
+gathered, else EINTR ([[sub-kernel-stalk]]; `stalk.union_note_ends_the_search`).
 
 ### The hardware-mint sequence, and where the same idea is factored and where it is copied
 
@@ -1927,10 +1961,13 @@ length-first order.) It decides the native word and dispatches:
 - FIXED with a file -> `sys_mmap_fixed_file_for_proc` (arm 2: R or R|X
   through the Image cache, RW as `mmap_eager_copy`'s private copy).
 
-Both Image-cache arms pass `image_lookup_or_create` the mapper's space and
+Both Image-cache arms pass `image_lookup_or_create_at` the mapper's space and
 its I-32 verdict (vote 118): a private image's every minted page is charged
 to the space that created the mapping ([[sub-kernel-image]],
-[[sub-kernel-fault]]).
+[[sub-kernel-fault]]). They key the Image on the qid version their size probe
+answered with (`spoor_file_size_vers`), not the descriptor's open-time one, so
+a mapping made after a write on the client finds no Image from before it
+(LARDER-DESIGN 12.6).
 
 The order is fixed and observable: the prot and flag masks, W|X (`-EACCES`),
 W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`

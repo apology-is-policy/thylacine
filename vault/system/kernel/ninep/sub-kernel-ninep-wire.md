@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/9P-EXTENSIONS.md]
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-19
 ---
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
@@ -48,6 +48,12 @@ Three layers of API, all in `9p_wire.h`:
   `p9_unpack_*`; `p9_peek_header` (size/type/tag without consuming the body);
   `p9_unpack_dirent` (one record out of an Rreaddir stream). `p9_pack_u8`,
   `p9_pack_qid` and `p9_unpack_dirent` are compiled only with the tests.
+- **`p9_dirent_run_check`** (2026-11-14, vote M15): walks an Rreaddir run and returns the length of its complete
+  records (a truncated last one is left for the next read), setting the last one's cookie. A record whose name is
+  empty or holds '/' or NUL refuses the whole run, `-T_E_IO`, as Linux's `verify_dirent_name` does: a walker that
+  joins each name to the path it lists (rm -r, cp -r, mv's removal) would otherwise be steered out of the tree
+  (I-28, I-14). SYS_READDIR's run ([[sub-kernel-syscall-dispatch]]) and Loom's READDIR ([[sub-kernel-loom]]) both
+  ask it.
 - **Builders** (`p9_build_t*`): version, attach, walk, clunk, flush, lopen,
   lcreate, read, write, getattr, setattr, readdir, statfs, fsync, the
   mutation family (symlink/mknod/rename/readlink/link/mkdir/renameat/

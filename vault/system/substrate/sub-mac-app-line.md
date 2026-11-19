@@ -21,7 +21,7 @@ hazards: []
 abis: []
 design: ["docs/MAC-RUNNER.md"]
 created: 2026-11-14
-updated: 2026-11-14
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -141,11 +141,34 @@ the line's rules (`macline::Line`, behind the `wire` lock) and hands DATA to its
 - Each name operation then acts at the parent's descriptor, with AT_SYMLINK_NOFOLLOW where the
   call takes it.
 - The share's own path is opened once, following links, since the person chose it.
+- Tfsync asks the drive to flush, `fcntl(F_FULLFSYNC)`: macOS's fsync(2) leaves the data in the
+  drive's own cache, so a guest's mv could remove a source whose copy a power loss would still
+  lose. Only ENOTSUP (a file system that cannot) falls back to fsync(2), and EINTR is retried.
+  A fid with no descriptor (walked, never opened) answers EBADF. Each Tfsync is recorded beside
+  the walks, "fsync <node> -> ok|errno N", which is how ls-mac-folders checks that mv syncs its
+  copy and the destination's directory before it removes the source (vote M20).
+- Each rename is recorded too, in order with the walks and syncs, Trename and Trenameat
+  alike, refused or not: "rename '<old>' -> '<new>' -> ok|errno N". So ls-mac-folders sees
+  mv rename its synced copy into place between the copy's sync and the directory's (M15
+  round 3, F7).
+- Each unlink is recorded too, refused or not: "unlink '<dir>/<name>' -> ok|errno N". So
+  ls-mac-folders sees mv remove its source only after the destination's directory is synced,
+  a removal told apart from a mere walk to the file (M15 round 4, F7).
 
 Qids:
-- A host file's qid path is the share's index + 1 in bits 56-62 over the inode, when the file is
-  on the share root's device and its inode fits. Otherwise it is a number from a remap table
-  whose top byte is 0x7F. So at most 126 folders can be shared.
+- A host file's qid path is its device's index + 1 among the devices seen (`devs`, at most 126) in
+  bits 56-62, over the inode, when the inode fits below bit 56 and the device has a slot.
+  Otherwise it is a number from the remap table, keyed by (device, inode), whose top byte is
+  0x7F. Never the share: two shares can reach one file (one folder inside another), and the
+  guest knows a file by its qid, so mv and cp refuse a file moved or copied onto itself through
+  two shares (M15 round 2, F1). Until 2026-11-14 the share's index was the prefix, and one file
+  had two identities. At most 126 folders can be shared (`MAX_SHARES`).
+- A qid's version folds the host file's change time and modification time, each to the
+  nanosecond, with its size (splitmix64's finalizer, word by word): any change to content,
+  size, mode or owner moves the change time, which no call sets back. A guest's mv removes a
+  source only at the version it copied, so a rewrite the version missed would let it remove
+  bytes it never copied. Before M15 round 3 the version was the modification time's seconds
+  xor the size, which a same-size rewrite within one second, or a time set back, kept.
 - The synthetic nodes' paths have bit 63 set.
 - The qid version is QEMU's, mtime ^ (size << 8).
 
@@ -154,7 +177,7 @@ Qids:
 - `Shared` holds:
   - the shares sorted by name, each root opened at the first walk that finds the folder and then
     kept;
-  - the pasteboard, the record, the lock table and the remap table;
+  - the pasteboard, the record, the lock table, the remap table and the devices table;
   - the start time, which is the synthetic nodes' times.
 - `Fid { node, uid, open }`. `Open` is `No`, `Dir { fd, list }`, `SnarfRead { snap }`,
   `SnarfWrite { buf }` or `File { fd, read, write, append }`.
@@ -166,7 +189,8 @@ Qids:
 - One thread reads the connection, and one thread per channel runs its session.
 - The `out` lock is always taken before the `wire` lock, and the reader never holds `wire` while
   it writes.
-- The lock table, the remap table and each share's root slot have their own mutexes. Each is held
+- The lock table, the remap table, the devices table and each share's root slot have their own
+  mutexes. Each is held
   for a lookup and never across a host call.
 - A session answers its requests in order, so a Tflush always comes after the request it names
   has been answered.

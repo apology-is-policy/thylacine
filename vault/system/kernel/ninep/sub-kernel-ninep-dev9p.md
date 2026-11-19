@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-15
+updated: 2026-11-19
 ---
 ## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
 
@@ -167,7 +167,9 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   no generation). A dead file's fid answers ESTALE and learns nothing.
   `dev9p_lock_same_file(a, b)` requires the same client and qid.path, and
   the same generation when both have learned one. Stratum does not keep a
-  file a fid names, and reuses inode numbers.
+  file a fid names, and reuses inode numbers. On a session that stages, a
+  plain file's identity is learned where its fid is made (vote M33: **A file's
+  name**), so a lock call asks nothing more; elsewhere the first asks once.
 - `dev9p_lock_sync(c, RELEASE)` flushes `c`'s run when the thread may wait.
   A thread that may not (a death is pending) queues `dev9p_lock_flush_job`,
   which holds `c`, on the session closer as a job alone (`P9_NOFID`, see
@@ -261,10 +263,14 @@ A CAPED session (the identity cape, below) changes what four of these slots
 report or send; no slot changes shape.
 
 Exports beyond the vtable: `dev9p_client_fid` (the Loom I-30 submit pin
-resolve), `dev9p_loom_register` (a Loom registration: fail on a latched
-flush error, flush the staged run, stop staging by clearing only `wb_known`
-as wstat does, free the dead staging buffer, then drop the file's Larder
-pages; witnesses
+resolve), `dev9p_loom_register` (a Loom registration of a plain file first
+runs the changing holder leg, pinned. A cached open then reads through a
+read fid; an eligible one fails on a latched flush error, flushes its staged
+run, stops staging by clearing only `wb_known` as wstat does and frees the
+dead staging buffer. A registration of a plain file that succeeds drops the
+file's Larder pages, an ineligible open's too: the leg's flush may have
+installed the holder's run as own pages, and the ring's writes bypass the
+Larder (M15 round 5, R5b-F1); witnesses
 `p9_closer.loom_register_flushes_staged_run`,
 `dev9p.wb_dying_loom_register_keeps_staging`,
 `dev9p.wb_loom_register_keeps_the_latch`; its errno is the registration's,
@@ -284,6 +290,8 @@ session's images are shared and cached; any other session's mapping is private,
 its own Burrow freed with its last mapping, so it holds a slot no longer than an
 fd would and no mapper reads another's rendering (round 31 F1). A Haul or
 host-share export, which never latches, still maps and executes, unshared.
+An open that can stage answers no on any session (vote M29; **A holder's
+mappings are private**, below).
 `dev9p.content_versioned_follows_latch` holds the answer to the latch. The wire
 qid's append bit reaches the Spoor as `QTAPPEND` (round 31 F5), so both mapping
 cores refuse a Plan 9 server's append-only file; `dev9p.qid_type_from_wire` pins
@@ -448,7 +456,11 @@ additionally drops the file's attr + pages (an own-write — the D44-F3 rule:
 truncate coherence must not rest on the server bumping qid.version) and
 arms write-behind eligibility (end known = 0) on a loose+cacheable client.
 
-`dev9p_create` (file: Tlcreate creates-and-opens; dir: Tmkdir → walk to
+`dev9p_create` (file: Tlcreate creates-and-opens, always asking O_EXCL,
+0200: both create paths -- an exclusive create, and open-or-create's create after its open missed -- count on
+EEXIST for a name that exists, which a server honouring the flags would otherwise open; Stratum keys only the access
+mode and O_APPEND, and the Mac app adds O_EXCL itself, so neither answers differently today (M15 round 3, F11; test
+`dev9p.create_file` reads the flags); dir: Tmkdir → walk to
 the child → swap fids → lopen OREAD): on ANY failure arm it records
 `p->create_errno = rc` (#99 — read once by the create handler via
 `dev9p_create_errno`, clamped to the [-4095,-2] passthrough window) and
@@ -516,7 +528,14 @@ drop), then `wb_note_through` advances the append anchor.
 
 `dev9p_fsync`: flush the staged run first — **fsync is the reliable error
 channel** (the voted NFS model: a latched flush error surfaces here even
-after the run is gone) — then Tfsync with real-errno propagation.
+after the run is gone) — then Tfsync with real-errno propagation. A cached open (read-only: nothing is
+staged) sends its Tfsync on the fid its fstat and wstat address -- a strict open's kept fid, or the one a loose open
+binds now (`co_bind`) -- because the server may hold the file's content uncommitted and fsync takes either right
+(vote M22). A loose open whose name no longer reaches the file (renamed or removed since) still syncs, as POSIX
+fsync on such a descriptor does: its Tfsync goes on the start the open kept, because a cached open exists only on a
+server that walks with Twalkgetattr (Stratum), whose Tfsync commits the whole pool whichever fid carries it (M15
+round 3, F8; it answered ESTALE before). Tests: `dev9p.cached_open` (one Tfsync, on the kept fid),
+`dev9p.cached_open_loose_fsync` (on the start's fid while the name is gone, on a bound fid once it resolves).
 
 `dev9p_wstat_native` (Tsetattr; `T_WSTAT_* == P9_SETATTR_*` pinned by eight
 `_Static_assert`s, and a ninth keeps the wire's CTIME bit out of
@@ -550,8 +569,12 @@ page invalidate when SIZE changed.
 
 ### rename, unlink, readdir
 
-`dev9p_rename` (Trenameat; same-client gate — a renameat is within one
-session) / `dev9p_unlink` (Tunlinkat; `SYS_UNLINK_REMOVEDIR ==
+Each attach session is its own device: `dev9p_attach_client` (once per session) mints the session's devno, which
+`SYS_RENAME`'s one-device check compares and a stat reports as st_dev ([[sub-kernel-syscall-dispatch]]).
+
+`dev9p_rename` (Trenameat; same-client gate — a renameat names two fids of one
+session, so two sessions answer `-T_E_XDEV` before anything is sent, vote M15; test `dev9p.rename_two_sessions`) /
+`dev9p_unlink` (Tunlinkat; `SYS_UNLINK_REMOVEDIR ==
 P9_UNLINK_AT_REMOVEDIR` pinned): both resolve the G2 victim's qid from the
 dentry cache BEFORE the wire op mutates the dirent set (rename-replace
 kills the DEST inode; the SOURCE keeps its inode — fids track inodes, so
@@ -651,55 +674,247 @@ residuals silently overwrite it. The flusher count freezes the run (no
 stage, no growth realloc) so the out-of-lock reads of the captured buffer
 cannot race a kfree. Flush I/O: msize-max Twrites, wire outside the lock;
 `acc == 0` fails (no progress must not spin). Coherence at the flush: attr
-invalidate on BOTH arms; a failed/partial flush drops the whole file's
-pages fail-safe; a FULL land **installs the run's pages as OWN** (G1a —
-`larder_page_install_own`, the write-populate: the build's read-back of
-just-written archives serves from cache; the `err==0` coupling is pinned by
-the `fs_cache_buggy_populate_unflushed` counterexample cfg). An own page
-serves without the cvers gate and the boundary page extends only an OWN
-page ending exactly at the run start — sound under the loose single-writer
-premise the wb already asserts.
+invalidate on BOTH arms; a failed or partial flush, or one past the open's
+last close, drops the whole file's pages fail-safe; a FULL land inside the
+open **installs the run's pages as OWN** (G1a — `larder_page_install_own_run`,
+the write-populate: the build's read-back of just-written archives serves
+from cache; the `err==0` coupling is pinned by the
+`fs_cache_buggy_populate_unflushed` counterexample cfg). The install has a
+gen guard (LARDER-DESIGN 13, votes M24, M24a): `wb_flush_locked` snapshots
+the Larder's gen after freezing the run and before sending it, and an event
+naming the file since then, a change on this client that may have reached
+the server after the run, skips the install and drops the file's pages
+(`page_own_skips`). An own page serves without the cvers gate and the
+boundary page extends only an OWN page ending exactly at the run start:
+nothing on the client changes the file while its holder's run is frozen (a
+changing leg waits the flush out, or pinned the file before the open became
+the holder), and the guard catches what gets past.
 
 ### The file's holder (LARDER-DESIGN 12.6, vote M23, 2026-11-15)
 
 On one client a file's held bytes are the client's: another open's operation
 on the file lands them first, as one page cache per file per client would.
-**The registry**: 64 buckets of entries keyed by client and qid.path
-([[lock-dev9p-wb-reg]], ordered before `wb_lock`), at most one per file. An
-entry is a holder's `wb_reg` -- `wb_register`, at the eligibility gate of a
-create-born open (`dev9p_create`) or an OTRUNC open (`dev9p_open`), so a second
-open of a held file stays ineligible and writes through -- or a closer job's.
-The holder leaves at its last close once nothing is staged (`dev9p_fd_close`)
-or at its last reference with no run (`dev9p_close`, first thing). With a run
+**The registry**: 64 buckets keyed by client and qid.path
+([[lock-dev9p-wb-reg]], ordered before `wb_lock`), each with a chain of
+entries, at most one per file (its number and generation: **A file's name**,
+below), and a chain of pins. An entry is a holder's
+`wb_reg` -- `wb_register`, at the eligibility gate of a create-born open
+(`dev9p_create`) or an OTRUNC open (`dev9p_open`) -- or a closer job's. A
+second open of a held file, or of a file a pin stands on, stays ineligible
+and writes through for its life. `wb_register` sets the open's anchor
+(`wb_eligible`, `wb_known`, `wb_base`) and its entry's fields before it links
+the entry, so a leg that finds the entry finds the anchor. The holder leaves
+at its last close once nothing is staged (`dev9p_fd_close`), when the
+lock-flush job its last close queued has left no run (past the last close
+nothing stages again, though a map or a Loom op keeps the open), or at its
+last reference with no run (`dev9p_close`, first thing). With a run
 at the last reference, `wb_close_swap` moves the run into the hand-off job and
 the job into the holder's place, under the bucket lock and before the job is
 queued; the job's release leaves (`wb_reg_leave`), after the closer's write and
 Tclunk. A hand-off that fails leaves the registry too. `g_wb_reg_count` (all
-entries) is the legs' fast path.
+entries) is the observing legs' fast path.
 
-**`wb_holder_flush(cl, path, self, changing)`** -- the leg. Observing legs:
-`dev9p_open` (any mode, before the Tlopen), `dev9p_open_cached` (a held leaf ->
-NULL, the normal path), `dev9p_read`, `dev9p_stat_native`, `dev9p_fsync`, and
-the walk-fused getattr. Changing legs, which also drop the holder's anchor so
-it stops staging: `dev9p_write`, an OTRUNC `dev9p_open`, `dev9p_wstat_native`,
-`dev9p_loom_register`. The holder's own operations pass (`self`). Under the
-bucket lock the leg finds the entry. A holder with nothing held: 0 (a changing
-leg drops the anchor in place). A holder holding a run or a flush: the leg
-takes a reference on its Spoor only while one is held (`spoor_tryref`; a
-closing holder is refused), and flushes outside every lock through
-`wb_flush_locked` (single-flight). A job, or a holder refused as closing:
-`wb_leg_wait` (`wb_flush_wait`'s yield or doubling sleep, counted in
-`g_wb_leg_waits`), then look again. Returns 0, 1 (a run landed, was dropped
-and latched on the holder, or was waited out), `-T_E_INTR` (this thread's
-caught note cancelled the flush or ended the wait: `wb_note_cancelled`,
-`thread_caught_note_unwinds`) or `-T_E_IO` (a death); on a negative return the
-operation does not happen and a run it flushed stays held.
+**The pin** (votes M24, M24a, 2026-11-16; M26, 2026-11-17): a change through
+any open, the holder's own included, pins the file, found holder or not, from
+its leg's first look until its wire operation has answered and its Larder
+drops are done (`struct wb_pin`, on the operation's stack, linked in its bucket's pin
+chain; the operation's `wb_unpin` after them). While a pin stands
+`wb_register` refuses, so no open becomes the holder between a change's leg
+and the change reaching the server, whose answer the new holder's flush
+could otherwise be installed over as own pages; Linux holds the inode lock
+across a write or a truncating open for the same reason. A truncating
+open's own pin is taken over by its registration, under the bucket lock
+that decides it. Only a pin's owner links or unlinks it. The holder's own
+wstat, Loom registration and write-through pin too (M26): their wire operation
+runs outside the holder's `wb_lock`, and its entry can leave meanwhile (a last
+close on another thread with nothing staged), so without the pin another open
+could become the holder before the change lands. A write the holder stages
+holds its pin only while it stages. A strict client never stages (`loose` is
+fixed at attach), so its operations run no leg and take no pin (round 6 F9).
+
+**`wb_holder_flush(cl, key, self, pin, refused)`** -- the leg, by the caller's
+name (`struct dev9p_fkey`: **A file's name**, below). Observing
+legs pass no pin: `dev9p_open` (any mode but OTRUNC, before the Tlopen),
+`dev9p_open_cached`, `dev9p_read`, `dev9p_stat_native`, `dev9p_fsync`, and the
+walk-fused getattr; with no entry on any file (`g_wb_reg_count`) they return
+at once. Changing legs pass their pin and also drop the holder's anchor so
+it stops staging: `dev9p_write`, an OTRUNC `dev9p_open`,
+`dev9p_wstat_native`, `dev9p_loom_register`. Under the bucket lock the leg links
+its pin at its first look, then visits every entry its key matches, newest
+registration first (each entry carries `seq`, its bucket's count at its
+registration). A key with a generation matches at most one entry, since a
+registration refuses a name the same as a standing one; a key with no name
+(`unnamed`: the open's Tgetattr failed or was never asked) matches every entry
+at the number, and a leg that stopped at the first would pass a live holder
+standing behind a deleted file's (M15 round 9 S-15). The holder's own
+operations pass their own entry (`self`), keeping their pin (M26). A strict
+client's leg returns 0 at once (F9). A holder with nothing held is passed (a
+changing leg drops its anchor in place). A holder holding a run or a flush:
+the leg takes a reference on its Spoor only while one is held
+(`spoor_tryref`; a closing holder is refused) and collects it, at most eight
+in a pass (`WB_LEG_VISIT_MAX`), then flushes each outside every lock through
+`wb_flush_locked` (single-flight). A changing leg drops the anchor of every
+holder it collected (vote M35a: a change through an open with no name may be
+any of them's own file's). A job, or a holder refused as closing:
+`wb_leg_wait`, a sleep doubling from 1 ms to 64 ms on every thread
+(`tsleep_noteintr`: a death ends it with `-T_E_IO`, a caught note with
+`-T_E_INTR`; counted in `g_wb_leg_waits`, and in `g_wb_leg_sleeps` when the
+sleep timed out, round 6 F8), then look
+again, past the entries already passed (`lim`: a pass takes only registrations
+older than the one it stopped at), so each entry is passed at most once and the
+leg ends. A yield would spin a CPU for as long as a closer holds the run, about
+a second for a refused write and without end on a hung server (M15 round 5,
+F3). Returns 0, 1 (a run landed; or the server refused it, and it was dropped,
+latched on the holder and recorded as a lost run (below), the refusal also
+put in `*refused` when the caller asks, as is a refusal latched between the
+leg's look, which found the run held, and its flush, which found nothing left
+(round 6 F2a); or a run was waited out), `-T_E_INTR` (this thread's caught
+note cancelled the flush or ended the wait: `wb_note_cancelled`,
+`thread_caught_note_unwinds`) or `-T_E_IO` (a death). On a negative return
+the operation does not happen, its pin is released, and a run it flushed
+stays held. A server's own Rlerror(EINTR), with no caught note behind it, is
+a refusal like any other (R5b-F6). A refusal is latched, put in `*refused`
+and recorded as `EIO`, unless the server refused for space (`ENOSPC`,
+`EDQUOT`), which pass as they came (`wb_refusal_errno`, vote M28: Linux's
+`mapping_set_error` rule; a server's `EINTR` or `EAGAIN` would invite a retry
+that finds nothing held and returns 0). A caller with no name takes no refusal
+from a holder named by a generation, which may be a deleted file's (vote M35,
+round 9 F2): it lands the run, and hears of the loss only through the record
+past its sample.
 
 **The stat by name** (`walk_attrs_pass(..., asked)`, wrapped by
 `dev9p_walk_attrs`): the Larder serve skips a held leaf (asks the server
 instead); a wire answer naming a held file lands the run, gives back a bound
 fid (bind form) and walks once more with `asked`, so it reports the file after
 the flush.
+
+**What a leg's result means to its caller.** An fsync whose leg flush the
+server refused returns the refusal (vote M25): fsync through any descriptor
+writes back what the holder holds and reports a failed writeback, as Linux
+reports one to every descriptor's next fsync; the holder keeps its latch for
+its own next write, fsync or last close. A third open's fsync, which flushes
+nothing, is told of the refusal once, by its record (below). A cached open whose leg failed fails the open:
+`dev9p_open_cached` records the errno with `dev_walk_failed` and returns
+NULL, and the resolver fails the open with it rather than take the normal
+path with the run still held (M15 round 5, R5b-F3; [[sub-kernel-stalk]]). A
+leg that landed a run returns NULL with no errno, and the normal path opens
+the file after the flush.
+
+**Lost runs** (votes M27, M30a, 2026-11-17). A run is lost when the server
+refuses it or a closer gives it up, and the loss may reach no program: an
+exit's last close, a closer's spent retries, a hand-off that could not be
+queued. So every lost run is recorded against the file on its client, as
+Linux's errseq records a writeback error against the inode: `struct
+p9_wb_losses` in `struct p9_client` ([[sub-kernel-ninep-client]]), at most
+`P9_WB_LOSS_MAX` (16) records, one per file name (below), each a sequence, the
+errno and whether an open has been told. `wb_loss_record` records a refused run at its
+refusal, in `wb_flush_locked` under the holder's `wb_lock`, which every leg
+reads the latch under, so no leg reports a refusal before it is recorded; and
+a closer's run where its job gives it up -- the close job's release when its
+last try failed, each failure arm of `wb_close_hand_off` -- before the job or
+the open leaves the registry, so a leg waiting on it finds the record when it
+stops waiting. A full table evicts its oldest record, and that loss is then
+told only where it was before: the holder's latch, the fsync whose leg met it,
+the console line. Every open samples the record under its name into
+`wb_errseq` where its fid is made (`wb_open_sample`: the walk's mint, a
+navigation handle's included, round 7 F3; the walk_attrs mint; the create; the
+cached open's mint), and `dev9p_open` samples again under the same name: the
+record's sequence once an open has been told, the one before while none has,
+so an open made after a loss nobody heard is told too. `dev9p_fsync` calls
+`wb_loss_report` after its leg and after its own run is written back (round 7
+F5: Linux writes back, then reports; a told loss skips only the Tfsync): a
+record past the open's sample is returned once (`EIO`, or the space errno),
+and the open catches up and marks the record told -- the holder's own fsync
+too, so an open made after it is not told the same loss again (round 7
+S-4). An open with no name catches up but marks nothing told: it may be a
+deleted file's, which found the live file's record by number, and that file's
+own later opens are told still (round 10 F2). The report runs before the
+fsync returns its leg's refusal, so no open is told of one loss twice, and the
+leg's refusal is the answer even when its record was evicted meanwhile. A peer
+is told of a holder's refusal even when the holder heard it from a write or an
+fsync, as Linux tells every descriptor's next fsync. The table's lock is a
+leaf, taken under an open's `wb_lock` at a refusal and with no lock held
+elsewhere ([[lock-dev9p-wb-priv]]).
+
+**A file's name** (votes M31, M33, 2026-11-18). Stratum's qid.path is the
+inode number alone: it frees the number at the last unlink, while opens of the
+file stand (their fids then answer `ESTALE`), and gives it to the next file
+created. So write-behind names a file by number and generation, as Linux's NFS
+client names a file by a handle that carries the generation: `struct
+dev9p_fkey` (`path`, `gen`, `has_gen`). Every registry entry, pin and lost-run
+record carries the name, and `wb_same` compares two: the same number, and the
+same generation where both carry one. An open's name is set where its fid is
+made, before the priv is published, and never changes (`wb_name`, `wb_gen`;
+`wb_key_of` reads them): the walk_attrs mint takes the Twalkgetattr's
+generation; a plain walk that lands on a plain file, on a session that stages
+(loose and cacheable: `wb_session_names`), asks one Tgetattr on the new fid
+before the walk publishes it, for the basic attributes and `P9_GETATTR_GEN`
+together (`wb_name_learn`, votes M33 and M36), as Linux's 9P client asks
+whenever it makes an inode from a fid, and a reply that names the file the
+walk bound and carries the whole basic set fills the Larder's attribute entry
+under the freshness guard the walk that asks attributes uses (M36, a populate
+route of [[sub-kernel-larder]]), so a stat after the walk asks nothing more --
+the resolver walks one
+name at a time on any path holding `..`, at a union member, and on a server
+without the fused walk; a clone that walks no name copies its source's name
+and lock identity; a create asks once; a cached open takes the Larder's
+identity for the leaf. `wb_name` is GEN, NONE (the server reports no
+generation: the number names the file, vote M31's allowance), FAILED (the
+Tgetattr failed: no memory, the file gone, a server's refusal), or UNASKED (a
+session that does not stage, or not a plain file). A caught note or a death
+during the plain walk's Tgetattr fails the walk instead: it clunks the fid it
+bound (a dying thread sends no Tclunk; the closer sends it) and frees the priv
+it never published (ARCH 8.8.3: a call that sees a caught note returns EINTR;
+round 9 F3, round 10 F4). An open with no name (FAILED or
+UNASKED) registers nothing and writes through (`wb_named` gates the
+registration), samples the current sequence so it is told only losses recorded
+after it was made, and its legs and report go by number: its legs visit every
+holder at the number, take no refusal from one named by a generation (vote
+M35), and on a change stop every one of them staging (vote M35a). The answer names the file for the file locks
+too (`wb_name_from_attr`), which then ask nothing more; a generation the locks
+learn later for an open that has no name stays theirs, so its sample and its
+report read the same records (round 8 F2). State of another generation is a
+deleted file's: a leg skips it, it refuses no registration, and its refusal is
+recorded under its own name, so only its own file's opens are told of it.
+A strict session never stages and asks nothing.
+
+**A handle is served by its name** (votes M34, M34a, 2026-11-18). The Larder
+keys its entries by number, so a handle of a deleted file was served the next
+file's own pages and attributes (M15 round 9 F1). A read, a mapping fill and
+an fstat through a handle ask the Larder with the handle's name (`wb_who_of`,
+a `struct larder_who`): its generation for an open named GEN; by number for
+one named NONE, and for every directory handle (vote M34a: the root and a
+directory a plain walk reached have no name, and the resolver's per-directory
+search check stays a cache hit); UNNAMED for any other, which is served no own
+page and no attribute and asks the server, which answers a deleted file's fid
+`ESTALE`. `dev9p_read` asks the end-of-file size (`larder_attr_fresh_size_who`)
+and the pages (`larder_page_serve_who`), `dev9p_stat_native` the attributes
+(`larder_attr_serve_who`), and the cached open its hint and its snapshot under
+the identity it would mint (`larder_attr_gen`, `larder_pages_cover_who`,
+`larder_pages_snapshot_who`; an identity it does not know fails closed). A
+page read from the server keeps its version check and serves any handle. The
+own pages a flush installs carry the name their holder registered under
+(`wb_holder_key`). The rules are [[sub-kernel-larder]]'s.
+
+**A ring FSYNC is told** (vote M32, 2026-11-18). `dev9p_fsync_report`, the
+Dev's `fsync_report` ([[sub-kernel-dev]]), is what a Loom FSYNC whose Tfsync
+succeeded is told: the record under its open's name past the open's sample,
+once, as `dev9p_fsync` reports it. The ring lands nothing first (it runs no
+leg). Loom calls it under the client's lock ([[sub-kernel-loom]]): the report
+takes only the table's leaf lock and never blocks.
+
+**A failed change drops what it may have staled** (round 6 F6). A Tsetattr the
+server failed may have applied (a reply this thread never read), as a failed
+write may have landed: `dev9p_wstat_native` drops the attr, and the pages too
+when the size was asked. A failed truncating Tlopen drops the attr and the
+pages, under its pin, before the pin goes.
+
+**A holder's mappings are private** (vote M29). `dev9p_content_versioned`
+answers false for an open that can stage (`wb_eligible`, fixed before the open
+is published): its pages would fill through its own read, which overlays bytes
+the server may yet refuse. Its mappings are private Images
+([[sub-kernel-image]]); another open's mapping fills through its own read,
+whose leg lands the run first.
 
 Witnesses: `dev9p.m23_peer_open_lands_the_run`,
 `.m23_peer_read_fstat_fsync_land_the_run`,
@@ -709,10 +924,94 @@ Witnesses: `dev9p.m23_peer_open_lands_the_run`,
 `.m23_one_holder_per_file`, `.m23_leg_flush_failure_latches_on_the_holder`,
 `.m23_interrupted_leg_keeps_the_run` (EINTR and EIO),
 `.m23_cached_open_of_a_held_file_falls_back`, and
-`p9_closer.peer_waits_out_a_handed_off_run` (the job's place). KERNEL_TESTS
+`p9_closer.peer_waits_out_a_handed_off_run` (the job's place); and for round
+5, `dev9p.m24_change_pins_the_file`, `.m24_pin_refuses_a_holder` (M24a's pin
+with no holder found among its arms), `.m24_guard_skips_the_own_install`,
+`.m25_peer_fsync_reports_a_refused_run`, `.m23_server_eintr_is_a_refusal`,
+`.m23_leg_wait_sleeps`, `.m23_cached_open_interrupted_fails`, the page arms of
+`.m23_wstat_changes_the_file` and `.m23_loom_registration_changes_the_file`
+(R5b-F1), the bind form's
+clunk in `.m23_stat_by_name_lands_and_asks_again` (F4), and
+`p9_closer.lock_flush_job_leaves_the_registry` (F2); and for round 6,
+`.m23_truncating_open_changes_the_file`, `.m23_wstat_changes_the_file` and
+`.m23_loom_registration_changes_the_file` (one per changing leg, so a red
+names its leg), `.m26_holder_changes_pin`,
+`.m27_lost_run_reaches_the_next_fsync`, `.m27_unhanded_run_is_recorded`,
+`.m30_closing_refusal_reaches_a_peer`, `.m30a_a_loss_is_told_once`,
+`.m25_refusal_inside_the_leg_window` (F2a, with an evicted leg),
+`.m25_refusal_outlives_its_record`, `.m29_holder_maps_privately`,
+`.mapping_keys_on_the_probe_version`,
+`.m24_failed_change_drops_what_it_staled` (F6),
+`.m24_strict_client_runs_no_leg` (F9), `.m23_stalk_eintr_names_no_component`
+(F4), `.m23_stalk_cached_open_interrupted_fails`,
+`p9_closer.close_job_loss_reaches_a_peer_fsync` and
+`p9_closer.lock_flush_job_loss_reaches_a_peer_fsync`; and for round 7,
+`.m31_walk_names_the_file`, `.m31_a_new_file_at_a_dead_files_number`,
+`.m31_a_dead_files_loss_is_not_the_new_files`,
+`.m31_cached_mint_samples_by_generation`,
+`.m31_create_that_cannot_learn_writes_through`, `.m31_legs_skip_a_dead_holder`,
+`.m32_ring_fsync_is_told`, `.m27_navigation_handle_samples_at_its_walk` (F3),
+`.m27_create_samples_the_record`, `.m27_told_fsync_writes_back_first` (F5),
+`.m30a_holders_fsync_marks_the_loss_told` (S-4),
+`.m26_holder_loom_registration_pins`,
+`.m28_edquot_through_the_leg_and_the_latch`,
+`.m28_sys_close_passes_space_errnos`, and
+`p9_closer.hand_off_job_oom_reaches_a_peer_fsync` and
+`p9_closer.hand_off_node_oom_reaches_a_peer_fsync` (F7); and for round 8,
+`.m33_plain_walk_names_the_file`, `.m33_plain_walked_holder_is_named`,
+`.m33_plain_walked_open_skips_a_dead_holder`, `.m33_clone_keeps_the_name`,
+`.m33_unnamed_open_writes_through`, `.m33_the_name_does_not_move` (F2),
+`.m31_a_generation_leg_lands_a_numbered_holder` and
+`.m32_ring_fsync_names_the_file` (F4); and for round 9,
+`.m34_dead_open_no_other_files_own_page`, `.m34_dead_open_no_other_files_attr`,
+`.m34_unnamed_file_misses_m34a_unnamed_dir_by_number`,
+`.m35_unnamed_leg_takes_no_named_refusal`,
+`.m35a_unnamed_change_stops_the_holder`, `.s15_unnamed_leg_visits_every_holder`,
+`.f3_plain_walk_note_fails_the_walk`, `.m36_plain_walk_fills_the_larder` and
+`.m33_plain_walk_to_a_dir_asks_nothing` (F5); and for round 10,
+`.m35_unnamed_report_marks_no_record_told` (F2),
+`.s15_leg_visits_past_its_batch`, `.s15_leg_resumes_after_a_closer` and the
+idle arm of `.s15_unnamed_leg_visits_every_holder` (F3), the raced arm of
+`.m36_plain_walk_fills_the_larder` and `.f3_plain_walk_death_fails_the_walk`
+(F4). KERNEL_TESTS
 diagnostics: `dev9p_wb_holder_flushes`, `dev9p_wb_holders`,
-`dev9p_wb_leg_waits`. Spec: `fs_cache.tla`'s named opens (OneHolder; the
-`buggy_peer_skips_staged` and `buggy_peer_unordered` cfgs).
+`dev9p_wb_leg_waits`, `dev9p_wb_leg_sleeps`, `dev9p_wb_pins`; hooks:
+`dev9p_wb_test_pin`, `dev9p_wb_test_job` and `dev9p_wb_test_job_gen` (a closer
+job's entry, by number or under a generation, so it can stand between two
+holders), `dev9p_wb_test_leg_window` (once,
+between a leg's look and its flush), `dev9p_wb_test_report_window` (once,
+between an fsync's leg and its loss report), `dev9p_wb_test_loss` and
+`dev9p_wb_test_loss_gen` (a lost run by hand, by number or under a
+generation), `dev9p_wb_fail_close_jobs_for_test` (the hand-off's no-job arm),
+`dev9p_wb_test_release_knobs` (the runner's CLOSER-KNOB release after every
+test: the close-job failures, the two windows and the budget bias, named when
+a test left one set; round 8 F5, round 9 F4), and `dev9p_wb_test_purge`, which
+the runner's WB-REGISTRY release calls after every test, so a test that
+fails with a holder registered on the suite's shared client leaves no entry
+for the next one to find; it unlinks only the test's own static pin, and
+counts any other pin of the client, which belongs to a running operation whose
+`wb_unpin` would find it gone (round 6 S-1). Spec: `fs_cache.tla`'s named opens (OneHolder;
+the `buggy_peer_skips_staged`, `buggy_peer_unordered`,
+`buggy_peer_unordered_lost` and `buggy_unpinned` cfgs, with `wb_nopop` the
+green control); the cached-open leg and the guard are beneath the model. Since
+round 8 (F3) it models the reuse of a number too: a file is its number and
+generation, every open is named where its fid is made, and a dead holder's run
+is recorded under its own name (`NoMisdirectedLoss`, `DeadStateSkipped`; the
+`reuse` cfg green, its `reuse_told` and `reuse_coexist` witnesses, the
+`buggy_number_key` and `buggy_unnamed_walk` cfgs red); a server that reports
+no generation is beneath it, pinned by the m33_ tests. Since round 9 (F1, F7) a deleted file's open reads through the Larder
+too, whose serve compares the open's name with the entry's (`buggy_number_serve`
+red, the `reuse_served` witness); a live holder's flush can be refused, and is
+recorded as a dead one's is; and an fsync is answered by its own leg's refusal
+(the `reuse_told_leg` witness, `buggy_number_key_told_leg` red). Since round
+10 (S-17, F2, F5) it models the open with no name (`EnableUnnamed`: served
+nothing, staging nothing, its legs and report by number, marking no record
+told -- `NoMisdirectedSeen`; the `reuse_unnamed` cfg green, its
+`reuse_unnamed_told` and `reuse_unnamed_residue` witnesses, the
+`buggy_unnamed_serve`, `buggy_unnamed_leg_told` and `buggy_unnamed_marks_seen`
+cfgs red), and another client's or session's reuse of a number, whose Larder
+entry stands (`ExternalReuse`: the `reuse_external` cfg green,
+`buggy_serve_older` red). Those cfgs run one file.
 
 ### The weft data-drive arms
 
@@ -916,7 +1215,10 @@ now does what the closing thread owes, and `dev9p_close` does what any thread ma
 - `dev9p_fd_close` is idempotent: `sys_file_lock_handler` runs it again for a take
   that lost the race with the close (`spoor_fd_open`; [[sub-kernel-filelock]]). The
   grant store and the close's exchange are sequentially consistent for that.
-- `dev9p_lock_flush_job` gains `release_locks`.
+- `dev9p_lock_flush_job` gains `release_locks`. A job with it (a last close's) leaves the
+  holder registry once its flush has left no run: past the last close nothing stages again,
+  so another open of the file may hold it while a map or a Loom op keeps this one (M15
+  round 5, F2). Leg: `p9_closer.lock_flush_job_leaves_the_registry`.
 - `wb_flush_locked`'s wait for another flusher leaves on `thread_die_pending` with
   `-P9_E_IO`; a killed thread used to burn a CPU there.
 - `dev9p_lock` records `lock_granted` on a take's `-P9_E_IO`: a death may have
@@ -1023,7 +1325,7 @@ the Haul identity cape.)
 
 ## Tests
 
-`kernel/test/test_dev9p.c` — 74 registered `dev9p.*` cases over a
+`kernel/test/test_dev9p.c` — 200 registered `dev9p.*` cases over a
 canonical loopback responder: the vtable basics, errno propagation
 (`dev9p.create_errno_propagates_eexist` — non-vacuous, asserts the -17
 return AND the dentry drop), the Larder integration

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-11-15
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -28,7 +28,7 @@ metadata/negative-lookup caching).
 
 This dossier owns the MECHANISM (`kernel/larder.c`). The POLICY — every
 serve/populate/invalidate/downgrade call site, the write-behind engine
-that drives `larder_page_install_own`, the cached-open consumer of the
+that drives `larder_page_install_own_run`, the cached-open consumer of the
 snapshot readers, and the cacheability latch — lives in
 [[sub-kernel-ninep-dev9p]].
 
@@ -57,6 +57,13 @@ lazily-allocated array + page buffer.
   `cvers` equals the reading fid's open-time `qid.vers` (cvers-GATED,
   unlike `attr_serve`); lets a plain-file read at `offset >= size` answer
   0 RPC-free.
+- `larder_attr_serve_who` / `larder_attr_fresh_size_who` (votes M34, M34a,
+  2026-11-18) — the same, served only to a handle the entry's file is:
+  `who` by number takes any entry, a generation only an entry that holds the
+  same one (`gen_known`), UNNAMED nothing (`attr_serves`). dev9p's handle
+  serves call these; the names above are their by-number forms. The number is
+  given to the next file created while a deleted file's opens stand, so a
+  number alone does not name a file (M15 round 9 F1).
 - `larder_attr_install` — Open/Refetch: install `{attr, cvers}` iff no
   invalidation event named this qid since `seq0` (the G4-scoped gen
   guard); upgrades a `perm_only` entry to full. A skipped fill drops the
@@ -77,7 +84,9 @@ lazily-allocated array + page buffer.
   touch mode/uid/gid — only a wstat on the dir does, and that path
   full-drops); logs a SOFT event.
 - `larder_gen_snapshot` — capture the gen for a populate site that does
-  not serve first (the walk_attrs free-populate).
+  not serve first (the walk_attrs free-populate, and the plain walk's one
+  Tgetattr, vote M36: its reply installs the attributes and the generation
+  when it names the file the walk bound and carries the whole basic set).
 
 **Dentry** (`(parent-qid.path, name[0..name_len)) → child | ENOENT`):
 - `larder_walk_serve` — serve a whole resolver run under ONE lock hold:
@@ -104,18 +113,33 @@ lazily-allocated array + page buffer.
 **Page** (`(qid.path, page_index) → {bytes[0..valid_len), cvers, own}`):
 - `larder_page_serve` — one page per call (bounds the under-lock copy at
   4 KiB; a short serve is a legal short read the caller loops on). Serves
-  iff `cvers == want_cvers` OR the page is `own`, and `page_off <
-  valid_len`; a partial page misses beyond `valid_len` so no EOF
-  determination is ever made from a page.
+  a page read from the server iff `cvers == want_cvers`, and an own page iff
+  its writer's name serves the handle (`own_serves`, votes M34, M34a: by
+  number any; a generation only a page its writer registered under the same
+  one, `own_has_gen`/`own_gen`; UNNAMED never -- an own page never takes the
+  version arm, its cvers being 0), and `page_off < valid_len`; a partial page
+  misses beyond `valid_len` so no EOF determination is ever made from a
+  page. `larder_page_serve_who` takes the handle's name; `larder_page_serve`
+  is its by-number form.
 - `larder_page_install` — gen-guarded install of `[0, len)` from the
   page's ALIGNED start (never a hole); lazily kmallocs the slot's 4 KiB
   buffer; clears `own` (a read-populate observed SERVER content).
-- `larder_page_install_own` — G1 write-populate at the wb flush: no cvers
-  (`own` serves ungated under the loose single-writer premise), NO gen
-  guard (the bytes are the writer's just-landed content and the wb flush
-  freeze excludes same-file mutators); `page_off > 0` EXTENDS only an
-  existing OWN page whose `valid_len == page_off` (the append-chain
-  continuation) — any other shape is refused.
+- `larder_page_install_own` — one own page: no cvers (`own` serves
+  ungated), no gen guard; `page_off > 0` EXTENDS only an existing OWN page
+  whose `valid_len == page_off` (the append-chain continuation) — any other
+  shape is refused.
+- `larder_page_install_own_run(l, seq0, qid, off, total, buf, writer)` — G1
+  write-populate at the wb flush, guarded (LARDER-DESIGN 13, votes M24,
+  M24a). `seq0` is the gen the flush snapshotted before it sent its run.
+  Under one hold it asks whether an event named the file since `seq0` and
+  drops the file's attr; then it installs each page as own, under the lock,
+  while no event has named the file since that drop. A hit skips the rest,
+  counts `page_own_skips`, and drops every page of the file, as a failed
+  flush does; false then. The bytes are the writer's just-landed content, and
+  the flush's freeze plus the holder registry's pin keep this client's other
+  changes off the file meanwhile; the guard is the second layer, for what
+  slips between. Each page records `writer`, the name its holder registered
+  under (vote M34): a generation, or none on a server that reports none.
 - `larder_page_invalidate` — drop EVERY page of the file, O(pages-of-file)
   via the qid-only secondary hash; SOFT event.
 - `larder_page_invalidate_range` — G1b: drop only `[first_idx, last_idx]`
@@ -129,7 +153,9 @@ lazily-allocated array + page buffer.
 **Cached-open pure readers** (FID-LIFECYCLE; mutate nothing beyond the
 CLOCK ref bit):
 - `larder_pages_cover` — is `[0, size)` fully resident at `cvers` (own
-  pages count), each page holding content to its needed boundary?
+  pages count, under the would-be open's name in `larder_pages_cover_who`
+  and `larder_pages_snapshot_who`, vote M34), each page holding content to
+  its needed boundary?
 - `larder_pages_snapshot` — verify coverage AND copy `[0, size)` out
   under ONE lock hold, FAIL-CLOSED if any invalidation event named this
   qid since the caller's pre-decision `seq0` (the B1 gen witness — see
@@ -242,13 +268,14 @@ attr/page installs + the snapshot witness key on the file.
 their hash/qhash bucket arrays, caps, free-cursors, and CLOCK hands; ~30
 diagnostic counters (hits/misses/installs/install_skips/invalidations/
 downgrades/evictions per sub-cache, `inval_scope_passes`,
-`page_own_installs`, `co_snapshots`/`co_misses`). Not load-bearing; read
+`page_own_installs`, `page_own_skips`, `co_snapshots`/`co_misses`). Not load-bearing; read
 by the tests and the perf instruments.
 
 Entries: `larder_attr_ent` (qid_path, cvers, valid/ref/perm_only, hnext,
 inline 88-byte `t_stat`), `larder_dentry_ent` (parent qid, child qid,
 name_len, valid/negative/ref, hnext, inline 88-byte name),
 `larder_page_ent` (qid_path, page_index, cvers, valid_len, valid/ref/own,
+own_has_gen/own_gen (the writer's name, vote M34),
 hnext, qnext, heap 4 KiB `page` buffer — lazily kmalloc'd, REUSED across
 evictions, freed only at destroy). The `valid` bit — not a `qid_path ==
 0` sentinel — marks emptiness: root's `qid.path` is legitimately 0.
@@ -371,12 +398,13 @@ the first install per sub-cache builds + zeroes the array under the lock
   explicit out-flag). Every new `perm_only`-serving consumer must
   re-prove its field set; every new field a consumer reads re-opens the
   question.
-- **The own-page rules**: `install_own` only from the wb flush's
-  full-land arm (the `err == 0` coupling —
+- **The own-page rules**: own pages only from the wb flush's full-land arm
+  inside the open, through the guarded run install (the `err == 0` coupling —
   `fs_cache_buggy_populate_unflushed` is the counterexample cfg); the
   append-chain extend only onto an OWN page ending exactly at the new
   start (never a hole, never a mixed cvers/own page); a read-populate
-  clears `own`.
+  clears `own`; an own page serves only a handle its writer's name reaches
+  (vote M34), and so does an attribute.
 - **No EOF from pages**: a short page serves `[0, valid_len)` and misses
   beyond; EOF determination comes only from the wire or the cvers-gated
   fresh attr size.
@@ -476,7 +504,11 @@ and `pages_snapshot_gen_witness` (the B1 F1 interleave: coverage
 re-satisfied by a third actor, the witness fails it, a fresh capture
 serves). The policy-level integration proofs (`dev9p.page_cache_serve_
 and_gate`, the create-reuse pair, the wb-populate battery — all
-revert-probed non-vacuous) live with [[sub-kernel-ninep-dev9p]]. The SMP
+revert-probed non-vacuous) live with [[sub-kernel-ninep-dev9p]], as do the
+serve by name (`dev9p.m34_dead_open_no_other_files_own_page`,
+`.m34_dead_open_no_other_files_attr`,
+`.m34_unnamed_file_misses_m34a_unnamed_dir_by_number`) and the plain walk's
+fill (`dev9p.m36_plain_walk_fills_the_larder`). The SMP
 witness: the L1f full gate (40/40, 0 corruption — the boot chain's
 shared-client stat/walk/read storm under smp4/smp8 × default/UBSan) +
 every later gate on this surface ([[gate-smp]]).
