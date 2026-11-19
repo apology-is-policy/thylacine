@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-11-03
+updated: 2026-11-19
 ---
 ## Purpose
 
@@ -30,7 +30,9 @@ inconsistencies" (TOOLING.md §3).
   two NICs (mmio + PCI), keyboard/tablet/mouse, two GPUs, two RNGs, the 9P
   host share, and a QMP control socket.
 - Prints `==> qemu: accel=<a> cpu=<c> gic=v<n> smp=<n>` — the line
-  downstream harnesses read back rather than re-deriving.
+  downstream harnesses read back rather than re-deriving. Under QEMU 11.1 or
+  later with HVF and GICv2 a second line follows,
+  `==> qemu: HVF irqchip in userspace for GICv2 (QEMU <M>.<m>)`.
 - Every device group is disable-able by env (`THYLACINE_NO_{NET,INPUT,GPU,RNG,QMP,SHARE}`).
   `THYLACINE_NO_RNG=1` (2026-10-26) drops both RNGs: on a CPU without RNDR
   the kernel then has no strong entropy and refuses userspace (vote 18),
@@ -91,9 +93,20 @@ Hence the deliberate `gpu0`/`gpu-mmio0` and `kbd-pci0`/`kbd0` pairs.
 
 | | accel | `-cpu` | GIC | Why |
 |---|---|---|---|---|
-| default on Apple Silicon | `hvf` | `host` | v2 | HVF's emulated GICv3 distributor MMIO trips an `isv` data-abort assert; the GICv2 MMIO CPU interface is the HVF enabler (Lazarus W2) |
+| default on Apple Silicon | `hvf` | `host` | v2 | HVF's emulated GICv3 distributor MMIO trips an `isv` data-abort assert; the GICv2 MMIO CPU interface is the HVF enabler (Lazarus W2). QEMU 11.1+ (Apple's in-kernel GIC, also asserting `isv` here) needs `-accel hvf,kernel-irqchip=off` for v2 -- see below |
 | Linux on ARM silicon | `kvm` | `host` | `host` | the guest GIC is the in-kernel one matching the actual silicon |
 | fallback / compat | `tcg` | `max` | v3 | full ISA incl. RNDR; v3 is QEMU-virt's modern default |
+
+**QEMU 11.1 changed HVF's irqchip default.** It puts the GIC in the host
+kernel (Apple's vGIC, GICv3 only) and refuses a GICv2 machine there ("HVF does
+not support GICv2 emulation"). The userspace irqchip still offers v2, and only
+the `-accel` spelling can ask for it, which cannot be combined with the
+machine's `accel=`. So under HVF with GICv2 the launcher asks `qemu-system-aarch64
+--version` just before the exec -- after every refusal, so a refused launch never
+runs QEMU -- and on 11.1 or later passes `-accel hvf,kernel-irqchip=off` and drops
+`accel=` from `-machine`; older QEMU keeps the old line byte for byte (operator
+vote 155, 2026-11-19). The GICv3 in-kernel arm was tried on 11.1.3: our boot
+asserts `isv` (hvf.c:2447) there too.
 
 **The third row's GIC entry is a different *kind* of choice from the other
 two.** Both emulated arms name a version; the hardware arm names *the host's*,
@@ -252,6 +265,18 @@ HVF boots far faster than TCG; the 90 s default timeout in `test.sh` is
 sized for the slower TCG compat run. Idle cost under HVF was the subject of
 #299/#890 (the tickless work) — a never-stopped tick showed 332% idle.
 
+**QEMU 10.x's HVF will not sleep a short WFI** (measured 2026-11-18/19,
+work/nov03-mm1/ih5 and qab). `hvf_wfi` in 10.0.2 (target/arm/hvf/hvf.c:1857)
+returns at once when the guest's virtual timer is due in under 2 ms, so the
+guest idle loop re-parks and re-traps until each deadline it is awake near:
+on the ci image ~19-30k early WFI exits a second, 98% of them near a deadline,
+1.5% real IRQs. That was most of the ci image's 8-13% idle floor; the 4 ms
+tickless backstop, Lictor's 100 Hz loop and the 4 ms input poll set how often
+a CPU is awake near a deadline (switching all three off: 9.4% -> 1.8%). QEMU
+11.1 halts the vCPU and wakes it with a host timer at the deadline: the same
+image idles at 4.9% against 13.4% on 10.0.2, alternated in one lease, with
+early exits down from ~307k to ~1.8k per 10 s.
+
 ## Prosecution
 
 - The two-scan-direction pool/disk split depends on QEMU's reverse-order
@@ -290,7 +315,11 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   handing every key to the guest while its window has focus; macOS asks once
   for Accessibility permission for QEMU, and `THYLACINE_FULL_GRAB=0` opts out.
   Chosen by the operator over moving the chord plane off Super. Verified
-  present in QEMU 10.0.2.
+  present in QEMU 10.0.2; not yet re-verified on 11.1.
+- **QEMU 11.1.3 is verified headless only** (2026-11-19, a private copy, vote
+  150): idle, ls-gfx-throttle/quake/dosbox-input, ls-gpu-dead, ls-gfx,
+  ls-graphical-sak/-recover/-keys-overrun and tools/test.sh 2520/2520 pass.
+  The cocoa display, ls-gfx-chords and the virgl lanes have not run on it.
 - Halcyon supplies its native pointer through Lictor. Cocoa's forced host
   pointer is off by default; `THYLACINE_SHOW_CURSOR=1` remains an explicit
   diagnostic override for older images. `THYLACINE_DISPLAY=vnc-unix` with

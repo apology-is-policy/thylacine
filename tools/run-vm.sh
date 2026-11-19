@@ -918,9 +918,26 @@ fi
 # The guest MMIO drivers require VirtIO 1.0 (transport version 2).
 # QEMU builds can default to legacy transport; pin the device contract on
 # every host instead of relying on a distributor-specific default.
+# QEMU 11.1 moved HVF's default irqchip into the host kernel (Apple's vGIC,
+# GICv3 only) and refuses a GICv2 machine there. The userspace irqchip still
+# offers v2, and only the -accel spelling can ask for it -- it cannot be
+# combined with the machine's accel=. Older QEMU keeps the accel= spelling.
+# Asked here, after every refusal above, so a refused launch never runs QEMU.
+machine_accel=",accel=$accel"
+accel_flags=()
+if [[ "$accel" == hvf && "$gicv" == 2 ]]; then
+    read -r qemu_major qemu_minor <<< "$(qemu-system-aarch64 --version 2>/dev/null \
+        | sed -n 's/^QEMU emulator version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p' | head -1)"
+    if [[ -n "${qemu_major:-}" ]] && (( qemu_major > 11 || (qemu_major == 11 && qemu_minor >= 1) )); then
+        machine_accel=""
+        accel_flags=(-accel hvf,kernel-irqchip=off)
+        echo "==> qemu: HVF irqchip in userspace for GICv2 (QEMU $qemu_major.$qemu_minor)" >&2
+    fi
+fi
 exec qemu-system-aarch64 \
     -global virtio-mmio.force-legacy=false \
-    -machine "virt,gic-version=$gicv,accel=$accel$its_machine_opt" \
+    ${accel_flags[@]+"${accel_flags[@]}"} \
+    -machine "virt,gic-version=$gicv$machine_accel$its_machine_opt" \
     -cpu "$cpu" \
     -smp "$cpus" \
     -m "$mem_mib" \
