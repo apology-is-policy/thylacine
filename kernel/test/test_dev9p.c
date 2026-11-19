@@ -11087,7 +11087,8 @@ void test_dev9p_s15_leg_resumes_after_a_closer(void) {
 // as a caught note does. The death abandons the Tgetattr with its reply unread and
 // flushes it, so both arms run over the FIFO, where the Tflush goes out and the
 // session lives. A dying thread sends no Tclunk: the fid it bound is handed on (the
-// closer's in production; this bare client, with no attachment, reports a refusal).
+// closer's in production; this bare client, with no attachment, counts a refusal,
+// its line kept out of the log, where tools/test.sh reads it as a failed hand-off).
 // The control, one variable away (the same refusal on a thread no death has
 // reached): the walk succeeds unnamed.
 static struct Spoor   *g_f3_root;
@@ -11129,11 +11130,13 @@ void test_dev9p_f3_plain_walk_death_fails_the_walk(void) {
             // Killed as its Tgetattr is answered: a death pending before the walk
             // refuses the Twalk itself, and no Tgetattr is asked.
             g_f3_die_on_ga = true;
+            p9_clunk_refused_quiet_for_test(true);
             started = test_dying_start(&g_f3_thread, f3_walk, NULL, /*dead_now=*/false);
             if (started) {
                 TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_f3_thread));
                 if (test_dying_done(&g_f3_thread)) test_dying_reap(&g_f3_thread);
             }
+            p9_clunk_refused_quiet_for_test(false);
             g_f3_die_on_ga = false;
         } else {
             f3_walk(NULL);

@@ -4129,9 +4129,10 @@ void test_run_all(void) {
         }
 
         // And the closer's and write-behind's knobs: an allocation failure left
-        // armed fails a later test's close, a held spawn parks its closer, the
-        // quiet flag hides every later lost run's line from the gates that read
-        // them, and a window left set calls into a frame that has returned.
+        // armed fails a later test's close, a held spawn parks its closer, a
+        // quiet flag hides every later lost run's or refused clunk's line from
+        // the gates that read them, and a window left set calls into a frame
+        // that has returned.
         u32 wb_knobs     = dev9p_wb_test_release_knobs();
         u32 closer_knobs = p9_closer_test_release_knobs();
         if (wb_knobs != 0 || closer_knobs != 0) {
@@ -4144,6 +4145,7 @@ void test_run_all(void) {
             if (closer_knobs & P9_CLOSER_TEST_KNOB_NODE)  uart_puts("closer-node,");
             if (closer_knobs & P9_CLOSER_TEST_KNOB_HOLD)  uart_puts("spawn-hold,");
             if (closer_knobs & P9_CLOSER_TEST_KNOB_QUIET) uart_puts("quiet,");
+            if (closer_knobs & P9_CLOSER_TEST_KNOB_CLUNK_QUIET) uart_puts("clunk-quiet,");
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left a closer or write-behind test knob set (see CLOSER-KNOB)");

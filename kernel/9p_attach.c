@@ -658,10 +658,17 @@ static int attached_orphan_sink(void *arg, u32 fid) {
     return 0;
 }
 
+static bool g_clunk_refused_quiet;
+
+void p9_clunk_refused_quiet_for_test(bool quiet) {
+    __atomic_store_n(&g_clunk_refused_quiet, quiet, __ATOMIC_RELAXED);
+}
+
 void p9_clunk_refused(u32 fid, int rc) {
     spin_lock(&g_closer_lock);
     g_closer_st.live_refusals++;
     spin_unlock(&g_closer_lock);
+    if (__atomic_load_n(&g_clunk_refused_quiet, __ATOMIC_RELAXED)) return;
     struct cons_diag_line dl;
     cons_diag_line_init(&dl);
     cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
@@ -926,6 +933,8 @@ u32 p9_closer_test_release_knobs(void) {
         left |= P9_CLOSER_TEST_KNOB_HOLD;
     if (__atomic_exchange_n(&g_close_flush_quiet, false, __ATOMIC_RELAXED))
         left |= P9_CLOSER_TEST_KNOB_QUIET;
+    if (__atomic_exchange_n(&g_clunk_refused_quiet, false, __ATOMIC_RELAXED))
+        left |= P9_CLOSER_TEST_KNOB_CLUNK_QUIET;
     return left;
 }
 #endif
