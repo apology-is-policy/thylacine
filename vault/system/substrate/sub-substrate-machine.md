@@ -106,7 +106,7 @@ machine's `accel=`. So under HVF with GICv2 the launcher asks `qemu-system-aarch
 runs QEMU -- and on 11.1 or later passes `-accel hvf,kernel-irqchip=off` and drops
 `accel=` from `-machine`; older QEMU keeps the old line byte for byte (operator
 vote 155, 2026-11-19). The GICv3 in-kernel arm was tried on 11.1.3: our boot
-asserts `isv` (hvf.c:2447) there too.
+asserts `isv` in QEMU's `hvf_handle_exception` there too.
 
 **The third row's GIC entry is a different *kind* of choice from the other
 two.** Both emulated arms name a version; the hardware arm names *the host's*,
@@ -266,7 +266,7 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
 #299/#890 (the tickless work) — a never-stopped tick showed 332% idle.
 
 **QEMU 10.x's HVF will not sleep a short WFI** (measured 2026-11-18/19,
-work/nov03-mm1/ih5 and qab). `hvf_wfi` in 10.0.2 (target/arm/hvf/hvf.c:1857)
+work/nov03-mm1/ih5 and qab). `hvf_wfi` in 10.0.2 (QEMU's ARM HVF backend)
 returns at once when the guest's virtual timer is due in under 2 ms, so the
 guest idle loop re-parks and re-traps until each deadline it is awake near:
 on the ci image ~19-30k early WFI exits a second, 98% of them near a deadline,
