@@ -44,9 +44,11 @@ kernel witnesses in two leases (128 sabotages, each red with exactly its FAIL li
   larder_page_serve trusts whatever the version: every reader on the client got A's bytes while the server held
   B's. fs_cache.tla's OwnWrite and FlushClose are atomic, so it could not show this. The operator voted M24 (a
   changing operation pins the file until its wire op and drops are done; no open becomes the holder meanwhile; the
-  own install is guarded by the Larder generation) and M24a. A duplicate aux session spawned a second reviewer on
-  the same brief after a restart (R5b: 0/0/1/7); its F8 (a leg's wait spun a CPU per waiter) and F5 (a test helper
-  freeing the root's priv on a failed walk) were real.
+  own install is guarded by the Larder generation) and M24a. Among its P3s were F3 (a leg's wait spun a CPU per
+  waiter) and F5 (a test helper freeing the root's priv on a failed walk). A duplicate aux session spawned a
+  second reviewer on the same brief after a restart (R5b: 0/0/1/7): its F2 became vote M25, and its F8 was older
+  than the arc -- a new mapping through a descriptor opened before a same-client write found the old Image, keyed
+  on the descriptor's open-time version.
 - Writing round 5's lease script found two defects in it before any lease: the boot log is CRLF, so every predicted
   FAIL line read NOT AS WANTED until fails_are stripped the CR (shown both ways on the reap tree's real log); and
   its FAIL regex knew three of the runner's tags, not all seven (ACCOUNT-UNPAIRED, NP-FIXTURE, OFF-CPU0, P9-FIXTURE,
