@@ -509,7 +509,7 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WALK_CREATE` | target already exists | `-T_E_EXIST` (17) |
 | `SYS_WALK_CREATE` | missing parent component | `-T_E_NOENT` (2) |
 | `SYS_WALK_CREATE` | not a directory | `-T_E_NOTDIR` (20) |
-| `SYS_UNLINK` (rmdir) | directory not empty | `-T_E_NOTEMPTY` (39) |
+| `SYS_UNLINK` (rmdir) | directory not empty | the server's `ENOTEMPTY` (39), by value: no `T_E_*` names it (#80, below) |
 | `SYS_FSTAT` / `SYS_*` | bad / wrong-kind handle | `-T_E_BADF` (9) |
 | `SYS_WSTAT` | not the owner (chmod, chown, a time), or no write permission (the touch: both times to "now") | `-T_E_ACCES` (13); the POSIX front ends answer `EPERM` for the owner-only kinds |
 | `SYS_WSTAT` | the Dev has no metadata slot | `-T_E_OPNOTSUPP` (95) |
