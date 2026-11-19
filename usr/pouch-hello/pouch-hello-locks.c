@@ -42,8 +42,9 @@
 //                 close, whether the map went first or is still held. Each half
 //                 has a file of its own, since only a file's first map pins the
 //                 descriptor's own Spoor.
-//   mapped-write: a staged byte reaches the server at the last close while a
-//                 map of it is still held.
+//   mapped-write: a byte the map reads is on the server after the descriptor's
+//                 last close, while the map is still held, and another open
+//                 reads it.
 //   errors      : a write lock through a read-only descriptor and flock
 //                 LOCK_EX on one are EBADF, an OFD request with a pid and a
 //                 bad whence are EINVAL, a range past LLONG_MAX is EOVERFLOW,
@@ -473,9 +474,10 @@ static int leg_mapped_write(void) {
     void *m = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, w, 0);
     if (m == MAP_FAILED) return fail("mapped-write: mmap");
     if (*(volatile char *)m != 'z') return fail("mapped-write: the map does not read the staged byte");
-    if (child(FILE_M3, "size", "0", 0, 0, 0) != 0) return fail("mapped-write: the byte was not staged");
+    // No look from another open before the close: it would land the staged byte
+    // itself (vote M23). Staging itself is the kernel suite's to pin.
     if (close(w) != 0) return fail("mapped-write: close");
-    if (child(FILE_M3, "size", "1", 0, 0, 0) != 0) return fail("mapped-write: the byte stayed staged past the last close");
+    if (child(FILE_M3, "size", "1", 0, 0, 0) != 0) return fail("mapped-write: the byte is not on the server after the last close");
     if (child(FILE_M3, "rbyte", "0", "z", 0, 0) != 0) return fail("mapped-write: another open does not read the byte");
     if (munmap(m, 4096) != 0) return fail("mapped-write: munmap");
     if (unlink(FILE_M3) != 0) return fail("mapped-write: unlink");
