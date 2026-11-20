@@ -123,6 +123,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-11-20 [[chg-2026-11-20-arm-on-ipi]] — A secondary's first IPI after the preemption flag arms its tick: the boot-transition window closed
 - 2026-11-20 [[chg-2026-11-20-newidle-pull]] — An idle CPU steals before it parks: the newidle pull, the one path TI-4 left with no steal
 - 2026-11-10 [[chg-2026-11-10-full-pool-waits]] — corvus and netd ask about their listener only while they have room, so a full pool waits instead of running
 - 2026-11-10 [[chg-2026-11-10-owed-barrier-holders]] — A free's stand-down lets every context holding it go, the owed-free pass serves contexts with parked chains in turn, and a destroyed context's blob births are cleared
@@ -130,5 +131,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-10 [[chg-2026-11-10-owed-barrier]] — A chain that can reach an owed free parks until the free is paid, so a busy context cannot hold its taken free off
 - 2026-11-10 [[chg-2026-11-10-owed-frees]] — A free the device has not acknowledged is owed and repeated; replies carry the stall count their request began at; the stall shot is bound to its connection
 - 2026-11-10 [[chg-2026-11-10-owed-quiet]] — The owed-free pass and its barrier wait for a quiet engine, so a sustained load cannot take every revived window or freeze the owner's chains
-- 2026-11-10 [[chg-2026-11-10-owed-stand-down]] — The owed-free pass stands down for one window only after a stall its own repeat met; any other stall leaves it and its barrier up, so it gets the first turn after every other revival
 <!-- generated:end -->
