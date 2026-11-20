@@ -22,6 +22,74 @@ needed the operator.
 
 
 ---
+## 2026-11-19 (aux): the promotion -- main's news broker merged into the Mac arc, and a control that would not go red
+
+Run on the Mac runner arc, station "Interop service (/mnt/mac)", 2026-11-19 to 11-20. Opus 5.5 throughout; the
+reviewer Opus 5.5 at max (Fable out of credits), told to re-derive rather than agree.
+
+### What it is
+
+Main ee7271715 merged into aux-3-mac-trust: EB-1's news broker (Lictor serves /srv/lictor/news; tapestryd asks
+only on news, vote 147), FC-1's frame clock, the serial listener (1bcfc1b56) and TEV_FRAME opt-in (vote 144),
+against aux's clause 15 (the drain's reply carries its seat), SeatEpoch, the display follow and the blank restore.
+Nine files conflicted. One conflict was semantic and no file showed it: under the broker an idle compositor makes
+no call, and aux's display follow read `Stats.display_events` (and the blank restore `Stats.restores_blank`) off
+the last reply of any kind, so a host display change at idle would never have been followed. The operator chose
+(vote M37) to make both GPU news; with it M38 (docs/ERRORS.md's rmdir row: the server's ENOTEMPTY, 39, by value)
+and M39 (tools/build.sh runs test-skip-verdict.py), and M40/M41 (two guest leases, then the full CI gate, the SMP
+matrix and the specs once, for this promotion only, before main moves).
+
+### The run, in order
+
+- 83726bd32 the merge with M37 (`news::Facts::display`, `Heard.display`; two host arms, three mutants red);
+  18cee0477 M38; 5fa4327cf M39.
+- Wrong turn, caught: the host cargo tests first compiled libthyla-rs with its guest features and failed to build;
+  they run with `--no-default-features --target aarch64-apple-darwin`.
+- Wrong turn, caught: a docs script's edit re-read the file from disk and lost an earlier replacement, leaving a
+  marker in sub-tapestryd; found by the script's own refusal, resolved by a second script.
+- Wrong turn, caught before any push: the M39 commit said "No-dossier-change: tools/ is harness prose no dossier
+  owns". `quaestor owner` said sub-substrate-build owns tools/build.sh; the section was written and the unpushed
+  commit amended.
+- Audit round P1 (merge + M37 + aux's owed round R5): 0 P0, 0 P1, 0 P2, 4 P3, closed in 8bd082e1e. F1: under the
+  broker the pumps read the engine as of the last invocation, so a stall begun since made bind_pump count a bind
+  the broker refused before sending; `Comp::engine_as_it_stands` now asks once (`Gpu::refresh`, an Info
+  invocation) before a pump with work owed acts on an engine that reads Live. F2-F4: dossier and comment wording.
+  Named, not prosecuted, and enqueued (OPEN-BUGS 21:27Z): a failed RPC on tapestryd's Gpu client is terminal but
+  goes unnoticed until the next SEAT news.
+- Lease A (p1gfx, 8bd082e1e, QEMU 11.1.3, 21:58-23:0xZ, resid/live-p1gfx.out): 12 graphical scenarios green
+  (sak-blank, sak, sak-pointer, halcyon-pointer, sak-dead, sak-chained; display-stall, follow-edid,
+  display-follow, gpu-dead, gfx-throttle, gfx-quake 969 frames at 60.0 fps); controls noforget, allwalls, nomark
+  and nocause red at their checks; ci-idle-gate strict PASS, mean 6.4% (corona's 11.1.3 baseline 5.8%).
+- The finding: the M37 control (the news facts without the display's counts) left ls-display-follow GREEN. M37
+  had no guest witness. The cause, read in code: Aurora blinks its cursor every 30 frames
+  (usr/aurora/src/main.rs:70, :810), each blink is a present, and display_pump reads the count off the next
+  reply, the blink's. Not F1's refresh: `engine_as_it_stands` runs only when a pump has work owed
+  (usr/tapestryd/src/server.rs, bind_pump and the Ask/Pinned arm of display_pump).
+- fb1a3f622: ls-display-follow's last leg follows with nothing presenting. It sees the picture change with
+  nothing typed (the positive), turns the blink off with `aurora-push` of `cursor-blink off` (the operator's own
+  setting, session-scoped; no test lever), sees the picture stand for eight dumps, then tells 1280x800. The two
+  procedures were stub-tested both ways on the host first. Wrong turn, caught there: the first stub repeated its
+  last digest once the sequence ran out, so a blinking picture ended still and passed wait_still; read as the
+  stub's flaw, not the procedure's, and re-run with the sequence cycling, which failed every blink as wanted.
+- Lease B (p1core, 8bd082e1e, 23:46-00:11Z, released, resid/live-p1core.out): ALL GREEN. The full kernel suite
+  2621/0 on QEMU 11.1.3, its first run there; the kernel ELF is 219831d02f94cafe, the round 10 close's, so the
+  merge brought no kernel change. ls-mac-line (5), ls-mac-folders (10) and ls-3b (16) green; the eight app
+  mutants red at their checks; ro-create green.
+- Lease C (p1quiet, fb1a3f622, 01:18-01:30Z, released, resid/live-p1quiet.out): AS WANTED BOTH WAYS. On the gate image
+  ls-display-follow green, seven PASS lines, the quiet leg's steps in order: the picture changed with nothing
+  typed, stood for eight dumps, the event taken up, 1280x800 up and followed (display event 8), 128 by 36
+  cells, a redraw. Under the control the first six legs passed again (the blink carried them, as in lease A)
+  and the quiet leg failed: "timeout (30s) waiting for [tapestryd: display event \d+: asking the host] during
+  'the event is taken up with nothing presenting'"; the guest's last display line is event 7's follow. M37 is
+  what follows a host change when nothing presents. The lictor binary of the re-bake is da0ab75f3b0bbd49,
+  lease A's.
+
+### What is still open
+
+- OPEN-BUGS 21:27Z (owned, P3 liveness): the Gpu client's failed RPC goes unnoticed until SEAT news.
+- M41: the full CI gate and the SMP matrix on the Mac and the specs, once, then main fast-forwarded.
+- Codeberg is behind: no credentials are configured here.
+
 ## 2026-11-19 (aux): vote M15 to its round 10 close -- six audit rounds of write-behind, and a witness that could never fire
 
 Run on the Mac runner arc, station "Interop service (/mnt/mac)", 2026-11-15 to 11-19. Opus 5.5 throughout;

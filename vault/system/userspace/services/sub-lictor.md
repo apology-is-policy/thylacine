@@ -806,6 +806,12 @@ a synchronous round trip on every pass of every poll, which would cost the
 compositor one per serve pass. `rpc_client` reads a reply that fits one read in
 one (two round trips per call, not three).
 
+In a guest, M37's half is shown by `ls-display-follow`'s last leg ([[sub-tapestryd]]):
+it follows a host change with nothing presenting, so the display's count reaches
+the compositor only as GPU news. With `Facts::display` left out of the pass-end
+facts, it fails at the taking up while the legs before it, which the console's
+blinking cursor keeps asking, still pass (2026-11-20, on QEMU 11.1.3).
+
 ### Episode
 
 Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)

@@ -51,3 +51,13 @@ The audit round on the merge (with aux's owed round R5), then the guest gates on
 QEMU 11.1.3: the display-follow and graphical-SAK scenarios, the throttle and
 idle gates, and a control with the display facts left out. sub-lictor's News
 section and sub-tapestryd's serve-loop section say what is shown once it is.
+
+## Shown since (2026-11-20)
+
+The audit round closed 0 P0, 0 P1, 0 P2, 4 P3 (8bd082e1e). On QEMU 11.1.3 the
+graphical gates are green: the graphical-SAK and display scenarios, the throttle,
+Quake at 60 fps, and the idle gate at a 6.4% mean. The control with the display
+facts left out first stayed green: the console's cursor blinks, and every blink's
+reply carries the count, so `ls-display-follow` never went quiet. Its new last leg
+turns the blink off before the host is told (fb1a3f622). That leg is green with
+the facts in, and fails at the taking up with them left out.
