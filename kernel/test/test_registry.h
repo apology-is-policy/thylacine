@@ -83,6 +83,7 @@ void test_sched_preemption_smoke(void);
 void test_sched_idle_in_wfi_observability(void);
 void test_sched_notify_idle_peer_smoke(void);
 void test_sched_notify_disabled_no_ipi(void);
+void test_sched_idle_park_steals_before_parking(void);
 void test_sched_capacity_normalize_synthetic_dtb(void);
 void test_sched_place_by_capacity_synthetic_dtb(void);
 void test_sched_select_target_cpu_homogeneous_is_prev(void);

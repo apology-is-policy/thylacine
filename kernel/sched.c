@@ -2750,15 +2750,36 @@ void sched_idle_park(bool tickless) {
     // the IPI pended (I-9).
     // The deferred park is a stutter on sched_tickless.tla's Park action;
     // NoLostWake / ParkedImpliesRegistered are untouched.
-    while (cpu_has_surplus_for_kick(cs))
+    // Newidle pull: nor over a PEER's stealable backlog. A CPU whose real
+    // thread blocks reaches this idle through pick_next's in-tree idle (the
+    // idle band is a band like any other), so that sched() never ran
+    // balance_pull -- without a steal here the CPU sleeps until its one-shot,
+    // a busy peer's tick kick (TI-4c) or a placement onto it, while the thread
+    // waits on a peer that may itself be slow to run it. The idle IS current
+    // and our own tree is empty, so sched() finds nothing local and steals
+    // (pick_next NULL -> balance_pull). An unchanged switch count means nothing
+    // was taken (pinned work, a contended peer lock): park; the TI-4c kick
+    // still covers the contended case. A thread taken here runs, and when it
+    // blocks the idle resumes inside this loop and looks again. Production only,
+    // like the push placement and the kick, so the test phase stays
+    // UP-quiescent. The steal is sched_alpha.tla's idle-CPU Steal, earlier in
+    // the same envelope; the park after the loop is unchanged.
+    for (;;) {
+        while (cpu_has_surplus_for_kick(cs))
+            sched();
+        if (!g_sched_notify_enabled || !sched_has_runnable_work()) break;
+        u64 nctxt0 = __atomic_load_n(&cs->nctxt, __ATOMIC_RELAXED);
         sched();
+        if (__atomic_load_n(&cs->nctxt, __ATOMIC_RELAXED) == nctxt0) break;
+    }
     // TI-4d work-conservation sample: we are committed to parking THIS CPU.
-    // The #363 loop above just verified our OWN non-idle tree is empty, so a
-    // positive sched_has_runnable_work() here is a PEER's queued backlog this
-    // CPU is about to sleep through (a steal/handoff gap). Charge the whole
-    // park as starved if so. In the periodic path the next <=1ms tick re-polls
-    // and ends a starved park fast; in tickless it can run to the backstop --
-    // so a large starved_ns/max is exactly the steal-gap regression's signature.
+    // Our OWN non-idle tree is empty, so a positive sched_has_runnable_work()
+    // here is a PEER's queued backlog this CPU is about to sleep through: in
+    // production one the pull above could not take (pinned, or a contended
+    // lock); in the test phase any. Charge the whole park as starved if so. In
+    // the periodic path the next <=1ms tick re-polls and ends a starved park
+    // fast; in tickless it can run to the backstop -- so a large starved_ns/max
+    // is exactly the steal-gap regression's signature.
     bool starved = sched_has_runnable_work();
     u64 park_start = timer_now_ns();
     u64 armed_target = 0;  // TI-4e: one-shot target, kept for the wake-source classify below

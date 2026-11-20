@@ -458,6 +458,8 @@ struct test_case g_tests[] = {
                                        test_sched_notify_idle_peer_smoke,  false, NULL },
     { "scheduler.notify_disabled_no_ipi",
                                        test_sched_notify_disabled_no_ipi,  false, NULL },
+    { "scheduler.idle_park_steals_before_parking",
+                                       test_sched_idle_park_steals_before_parking, false, NULL },
     { "scheduler.capacity_normalize_synthetic_dtb",
                                        test_sched_capacity_normalize_synthetic_dtb, false, NULL },
     { "scheduler.place_by_capacity_synthetic_dtb",

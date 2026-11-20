@@ -542,3 +542,27 @@ re-measure.
 **THE ROOT CAUSE (the reason there is no further guest fix).** The boot "regression" is **HVF deep-park vCPU resume latency, NOT a guest bug.** Wake-source telemetry (`sched_wc_stats.tickless_{ipi,oneshot}_wakes`, in the `boot-wc:` banner) measured **99.85% of tickless parks woken by an IPI** (not the backstop) -- the wake path is push-complete. But resuming a DEEP-parked vCPU via SGI costs **~0.85 ms under HVF vs ~7 us hot** -- an emulation artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume; #299/#890), not a scheduler defect. On bare metal an SGI to a WFI'd core is hardware-fast (~ns), so the tickless+kick design gives fast boot + ~0% idle THERE = the ideal. The 4 ms re-poll keeps the dev-loop vCPUs warm -> ~0.09 ms IPI resumes -> **HVF boot ~7 s (= tickful gold) vs ~17-35 s at 100 ms**, at ~5% HVF idle (vs 0.3%). The kick earns its place as the fast (~1 ms) parallel-surplus catch (cpubench starvation -34..-60% across parallel modes); the SEQUENTIAL boot is dominated by the per-wake latency the re-poll mitigates. v1.x: an adaptive (warm-while-active / deep-when-idle) or accel-gated backstop reclaims 0.3% HVF idle without the dev-boot cost. **Bare-metal confirmation owed at Lazarus/RPi.**
 
 **Validation:** spec gate GREEN; in-kernel suite 972/972 (incl. `scheduler.cpu_surplus_for_kick`); HVF boot-ms A/B (tickless+kick @ 4 ms = 7.2-8.6 s vs the tickful `--no-tickless` gold 7.1 s; the 100 ms deep-park was 16-35 s); focused Opus-4.8-max audit + concurrent self-audit CLEAN **0 P0 / 0 P1 / 0 P2 / 2 P3** (both pre-existing test-fragility; `memory/audit_ti4_closed_list.md`); SMP gate. NO new §28 invariant (composes I-8 + I-9). The `cpubench` (13-mode) + the `THYLACINE_NO_TICKLESS` build flag (the tickful gold-standard lever) are the durable compass.
+
+### 9.9 The newidle pull (2026-11-20)
+
+TI-4's two mechanisms -- push placement onto an idle CPU and the busy side's
+kick -- left one path with no steal at all. A CPU whose real thread BLOCKS
+reaches its idle through `pick_next`: the pinned in-tree idle sits in
+`BAND_IDLE`, so `pick_next` returns it and `sched()` never calls
+`balance_pull`. The idle resumes inside `sched_idle_park`, past its own
+`sched()`, and parks with `starved` set over a peer's queue. Only its one-shot,
+a busy peer's tick kick or a placement onto it ended that park. Measured on
+HVF (q-ps5, work/nov03-mm1/ps5): 4 of 43 slow wakes were a thread placed on an
+idle CPU that sat stalled by the host for 5.5-6.2 ms while another CPU went idle
+7-820 us after the wake and parked over it until its backstop.
+
+The fix is the third mechanism Linux has, newidle balance (`pick_next_task_fair`
+pulls before it picks idle). Plan 9's single run queue never needed it. In the
+park's #363 loop, once the CPU's own tree is empty and a peer has queued work, one more
+`sched()` runs with the idle current, finds nothing local and steals. An
+unchanged per-CPU switch count (`nctxt`) means nothing was taken (pinned work,
+a contended peer lock), and the CPU parks as before; the kick still covers the
+contended case. It is gated on `g_sched_notify_enabled` with the other two, so
+the test phase stays quiescent. Spec: a steal by an idle CPU, inside
+`sched_alpha.tla`'s Steal envelope; `sched_tickless.tla`'s Park is unchanged.
+Witness: `scheduler.idle_park_steals_before_parking`.

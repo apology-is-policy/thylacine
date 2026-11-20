@@ -570,6 +570,110 @@ void test_sched_notify_disabled_no_ipi(void) {
     thread_free(t);
 }
 
+static volatile u32 g_np_b_ran;
+static volatile u32 g_np_b_cpu;
+static volatile u32 g_np_go;
+static volatile u32 g_np_t_ran;
+static volatile u32 g_np_t_cpu;
+
+static void np_blocker_thread(void) {
+    g_np_b_cpu = smp_cpu_idx_self();
+    __atomic_store_n(&g_np_b_ran, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_np_go, __ATOMIC_ACQUIRE)) { }
+    (void)spin_lock_irqsave(NULL);
+    thread_kthread_retire();   // wakes nothing: no other CPU is woken by this exit
+    sched();
+}
+
+static void np_victim_thread(void) {
+    g_np_t_cpu = smp_cpu_idx_self();
+    __atomic_store_n(&g_np_t_ran, 1u, __ATOMIC_RELEASE);
+    (void)spin_lock_irqsave(NULL);
+    thread_kthread_retire();
+    sched();
+}
+
+// A thread this test started has run to EXITING and left dispatch for good, so
+// thread_free cannot meet it RUNNING (the notify_idle_peer_smoke cleanup rule).
+static bool np_wait_terminal(struct Thread *t, volatile u32 *ran) {
+    for (int i = 0; i < 200; i++) {
+        if (__atomic_load_n(ran, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&t->state, __ATOMIC_RELAXED) != THREAD_RUNNING)
+            return true;
+        timer_busy_wait_ticks(1);
+    }
+    return false;
+}
+
+// scheduler.idle_park_steals_before_parking -- a CPU whose real thread blocks
+// reaches its idle through pick_next's in-tree idle, and must try to steal a
+// peer's queued thread before it parks (the newidle pull in sched_idle_park).
+// Nothing else may move the victim: secondaries have no timer in the test
+// phase (only an IPI wakes them), the victim is queued on cpu0 with notify OFF
+// (no push, no kick IPI), the blocker's exit wakes no one, and cpu0 holds IRQs
+// masked through the window (no tick: neither its overload kick nor a
+// preemption can run the victim). Without the pull the secondary parks over it
+// and it does not run at all in the window.
+void test_sched_idle_park_steals_before_parking(void) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
+    bool parked = false;
+    for (int i = 0; i < 200 && !parked; i++) {
+        for (unsigned c = 1; c < DTB_MAX_CPUS; c++)
+            if (sched_idle_in_wfi(c)) { parked = true; break; }
+        if (!parked) timer_busy_wait_ticks(1);
+    }
+    TEST_ASSERT(parked, "no secondary reached idle WFI within the settle budget (precondition)");
+
+    g_np_b_ran = 0; g_np_b_cpu = DTB_MAX_CPUS; g_np_go = 0; g_np_t_ran = 0; g_np_t_cpu = DTB_MAX_CPUS;
+    struct Thread *b = thread_create(kproc(), np_blocker_thread);
+    TEST_ASSERT(b != NULL, "thread_create(blocker) failed");
+    struct Thread *t = thread_create(kproc(), np_victim_thread);
+    TEST_ASSERT(t != NULL, "thread_create(victim) failed");
+
+    // The blocker goes to an idle secondary by push placement and holds it.
+    sched_set_notify_enabled(true);
+    ready(b);
+    for (int i = 0; i < 200 && !__atomic_load_n(&g_np_b_ran, __ATOMIC_ACQUIRE); i++)
+        timer_busy_wait_ticks(1);
+    sched_set_notify_enabled(false);
+    u32 bcpu = g_np_b_cpu;
+
+    bool window = false;
+    if (g_np_b_ran && bcpu != 0 && bcpu < DTB_MAX_CPUS) {
+        irq_state_t s = spin_lock_irqsave(NULL);
+        ready(t);                        // notify off: cpu0's own tree, no IPI
+        sched_set_notify_enabled(true);  // the pull is production-gated
+        __atomic_store_n(&g_np_go, 1u, __ATOMIC_RELEASE);
+        u64 c0 = timer_get_counter(), budget = timer_freq_hz() / 20u;   // 50 ms
+        while (!__atomic_load_n(&g_np_t_ran, __ATOMIC_ACQUIRE) &&
+               timer_get_counter() - c0 < budget) { }
+        sched_set_notify_enabled(false);
+        spin_unlock_irqrestore(NULL, s);
+        window = true;
+    } else {
+        __atomic_store_n(&g_np_go, 1u, __ATOMIC_RELEASE);   // let a misplaced blocker exit
+        ready(t);
+    }
+    u32 ran_in_window = window ? __atomic_load_n(&g_np_t_ran, __ATOMIC_ACQUIRE) : 0u;
+    u32 tcpu = g_np_t_cpu;
+
+    // Cleanup before the verdict, so a red leaves no thread RUNNING behind. In
+    // the red case the victim still sits in cpu0's tree; cpu0's tick, live
+    // again, runs it there and it exits.
+    bool b_done = np_wait_terminal(b, &g_np_b_ran);
+    bool t_done = np_wait_terminal(t, &g_np_t_ran);
+    if (b_done) thread_free(b);
+    if (t_done) thread_free(t);
+
+    TEST_ASSERT(window, "the blocker did not land on a secondary (push placement precondition)");
+    TEST_ASSERT(ran_in_window,
+        "an idle CPU parked over a peer's stealable thread: the victim queued on cpu0 never ran "
+        "while the secondary went idle (no steal before the park)");
+    TEST_EXPECT_EQ(tcpu, bcpu, "the victim ran on the secondary whose blocker exited (stolen at its park)");
+    TEST_ASSERT(b_done && t_done, "a test thread did not reach EXITING within budget (cleanup precondition)");
+}
+
 // =============================================================================
 // HMP foundation (#864, ARCH §8.4.4): capacity + capacity-aware placement.
 //

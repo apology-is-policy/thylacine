@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9, inv-i48]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-11-04
+updated: 2026-11-20
 ---
 ## Purpose
 
@@ -42,6 +42,9 @@ between two steps of a sequence that reads, in source, like a single act.
   peer that places work either sees the announcement and kicks it, or the
   IPI it sends lands pending and the WFI exits on it. This is
   register-then-observe, and it is [[inv-i9]] on the placement path.
+- In production an idle CPU looks for work **before** it parks: it parks
+  over neither its own queue nor a peer's stealable thread, only over work
+  it cannot take (pinned, or behind a peer lock it could not try-take).
 - Secondary CPUs are quiescent during the in-kernel test phase: no
   self-wake, no stealing, no timer. Production turns all three on at one
   transition point.
@@ -159,12 +162,12 @@ where the busy-side kick rebalances instead).
 **The idle park** (`sched_idle_park`, shared by cpu0's `bootcpu_idle_main`
 and each secondary's `per_cpu_main` tail) is one IRQ-masked region:
 
-    mask -> idle_in_wfi = true -> sched() -> [#363 re-check loop]
+    mask -> idle_in_wfi = true -> sched() -> [#363 re-check + newidle pull loop]
          -> sample starved -> arm one-shot -> WFI
          -> idle_in_wfi = false -> classify wake source
          -> re-arm periodic tick -> timerwait_tick() -> charge -> unmask
 
-Three parts of that are load-bearing rather than incidental:
+Four parts of that are load-bearing rather than incidental:
 
 - The **flag before the arm and the WFI** is the register-then-observe
   that makes the arm-race safe ([[spec-sched-tickless]]).
@@ -176,6 +179,20 @@ Three parts of that are load-bearing rather than incidental:
   restart its loop — it resumes *inside* the park, past its own
   `sched()`, headed for the arm and the WFI — and no IPI exists for a
   local self-requeue.
+- The **newidle pull**, in the same loop, stops it parking over a *peer's*
+  stealable thread. A CPU whose real thread blocks reaches its idle through
+  `pick_next`, because the in-tree idle sits in a band like any other, so
+  that `sched()` never ran `balance_pull`. Without the pull the CPU slept
+  until its one-shot, a busy peer's tick kick or a placement onto it, while
+  the thread waited on a peer that might itself be slow to run it (measured
+  under HVF: 5-6 ms behind a stalled target). With the idle current and its
+  own tree empty, one more `sched()` finds nothing local and steals. An
+  unchanged `nctxt` means nothing was taken (pinned work, a contended lock),
+  and the CPU parks; the busy-side kick still covers the contended case. A
+  taken thread runs, and when it blocks the idle resumes inside the loop.
+  Gated on `g_sched_notify_enabled`, like the push placement and the kick,
+  so the test phase stays quiescent. Linux does the same (newidle balance
+  from `pick_next_task_fair`); Plan 9's single run queue never needed it.
 - The **wake-to-running restore** does two jobs. `timer_arm_this_cpu()`
   re-arms the periodic tick so a CPU woken from tickless idle runs the
   placed thread with slice accounting live. But re-arming also
