@@ -577,6 +577,13 @@ static volatile u32 g_np_t_ran;
 static volatile u32 g_np_t_cpu;
 
 static void np_blocker_thread(void) {
+    // Pushed here, this thread was dispatched by the IPI's IRQ-return
+    // preemption, so at its exit the idle would resume OUTSIDE the park and its
+    // next park's sched() would steal anyway. One yield: the idle runs, comes
+    // round, and its next park's own sched() picks this thread back up from the
+    // local tree -- so the exit below lands the idle inside the park, past that
+    // sched(), the one path with no steal of its own.
+    sched();
     g_np_b_cpu = smp_cpu_idx_self();
     __atomic_store_n(&g_np_b_ran, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&g_np_go, __ATOMIC_ACQUIRE)) { }
@@ -608,6 +615,8 @@ static bool np_wait_terminal(struct Thread *t, volatile u32 *ran) {
 // scheduler.idle_park_steals_before_parking -- a CPU whose real thread blocks
 // reaches its idle through pick_next's in-tree idle, and must try to steal a
 // peer's queued thread before it parks (the newidle pull in sched_idle_park).
+// The blocker is first made a thread the park's own sched() dispatched (its
+// yield), since only then does its exit resume the idle inside the park.
 // Nothing else may move the victim: secondaries have no timer in the test
 // phase (only an IPI wakes them), the victim is queued on cpu0 with notify OFF
 // (no push, no kick IPI), the blocker's exit wakes no one, and cpu0 holds IRQs
