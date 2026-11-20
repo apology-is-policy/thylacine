@@ -756,8 +756,9 @@ static struct Thread *pick_next(struct CpuSched *cs) {
 // Reads/writes of g_sched_notify_enabled use volatile + relaxed — the
 // flag is set once at boot, observed by every CPU; no synchronization
 // needed beyond memory ordering of the boot-CPU's set being visible
-// before the first cross-CPU read (boot's banner UART writes after the
-// set provide an implicit dsb-equivalent boundary).
+// before the first cross-CPU read. A peer that reads it stale-false only
+// keeps its periodic tick for a park; the first gic_send_ipi after the set
+// (dsb ishst) publishes it.
 // (The definition lives up in the push-placement section (TI-4b) so
 // select_target_cpu can gate its idle-preference on it.)
 
@@ -2717,6 +2718,10 @@ void sched_test_clear_tick_armed(void) {
         extinction("sched_test_clear_tick_armed: a sleeper is linked on this CPU's timer base");
     g_cpu_sched[cpu].tick_armed = false;
     spin_unlock_irqrestore(NULL, s);
+}
+
+bool sched_test_tick_armed(unsigned cpu) {
+    return cpu < DTB_MAX_CPUS && __atomic_load_n(&g_cpu_sched[cpu].tick_armed, __ATOMIC_RELAXED);
 }
 #endif // KERNEL_TESTS
 

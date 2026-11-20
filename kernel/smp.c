@@ -109,21 +109,13 @@ unsigned smp_cpu_idx_self(void) {
 // P2-Cdc: handler for IPI_RESCHED.
 //
 // Called from gic_dispatch via vectors.S IRQ slot when SGI 0 is
-// received on any CPU. Increments this CPU's receive counter (for
-// observability) and otherwise does nothing — the IPI's job is to
-// wake the receiving CPU from WFI. preempt_check_irq runs after
-// this handler returns (vectors.S IRQ slot calls preempt_check_irq
-// after exception_irq_curr_el → gic_dispatch → ipi_resched_handler);
-// if the receiving CPU's need_resched was set by a cross-CPU placer,
-// preempt_check_irq picks it up and calls sched(). At v1.0 P2-Cdc no
-// cross-CPU placer exists yet (P2-Ce work-stealing introduces it);
-// IPI_RESCHED here is purely a "wake from WFI" signal proving the
-// SGI delivery path works.
-//
-// On a secondary it is also where the per-CPU tick is first armed once the
-// production flag is up (smp_secondary_arm_tick_once): this handler returns
-// before preempt_check_irq runs, so the arm lands before any dispatch the IPI
-// brings.
+// received on any CPU. Counts the receipt (observability) and, on a
+// secondary, runs smp_secondary_arm_tick_once: once the production flag is
+// up, the first IPI a secondary takes arms its tick. preempt_check_irq runs
+// after this handler returns (vectors.S IRQ slot calls preempt_check_irq
+// after exception_irq_curr_el -> gic_dispatch -> ipi_resched_handler), so
+// that arm lands before any dispatch the IPI brings; if a cross-CPU placer
+// set this CPU's need_resched, preempt_check_irq then calls sched().
 static bool smp_secondary_arm_tick_once(void);
 
 static void ipi_resched_handler(u32 intid, void *arg) {
@@ -219,6 +211,14 @@ static volatile bool g_secondary_preempt_enabled;
 // IRQs masked.
 static bool g_secondary_tick_armed[DTB_MAX_CPUS];
 
+#ifdef KERNEL_TESTS
+// A test asks a secondary to undo its arm at its next arm point (its idle
+// loop's top or its next IPI), with the flag down: a park entered while armed
+// may still re-enable the timer on its way out, and the next arm point comes
+// after it.
+static volatile bool g_secondary_disarm_req[DTB_MAX_CPUS];
+#endif
+
 // Arm THIS secondary's per-CPU tick once the flag is published, at whichever
 // comes first: the top of its idle loop, or the first IPI it takes. The IPI
 // leg is what closes the transition. A parked secondary has no timer, so an
@@ -229,11 +229,24 @@ static bool g_secondary_tick_armed[DTB_MAX_CPUS];
 // unmask.) Masked, because the IPI leg can interrupt the loop leg on the same
 // CPU. Returns whether the tick is armed.
 static bool smp_secondary_arm_tick_once(void) {
-    unsigned cpu = smp_cpu_idx_self();
-    if (cpu == 0 || cpu >= DTB_MAX_CPUS) return false;
     irq_state_t s = spin_lock_irqsave(NULL);
+    unsigned cpu = smp_cpu_idx_self();   // after the mask: a migratable caller cannot split it
+    if (cpu == 0 || cpu >= DTB_MAX_CPUS) {
+        spin_unlock_irqrestore(NULL, s);
+        return false;
+    }
+    bool up = __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE);
+#ifdef KERNEL_TESTS
+    if (!up && __atomic_load_n(&g_secondary_disarm_req[cpu], __ATOMIC_ACQUIRE)) {
+        timer_disarm_this_cpu();
+        (void)gic_disable_irq(TIMER_INTID_EL1_VIRT);
+        sched_test_clear_tick_armed();
+        g_secondary_tick_armed[cpu] = false;
+        __atomic_store_n(&g_secondary_disarm_req[cpu], false, __ATOMIC_RELEASE);
+    }
+#endif
     bool armed = g_secondary_tick_armed[cpu];
-    if (!armed && __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE)) {
+    if (!armed && up) {
         if (!gic_enable_irq(TIMER_INTID_EL1_VIRT))
             extinction("smp: gic_enable_irq(timer PPI) failed");
         timer_arm_this_cpu();
@@ -265,19 +278,32 @@ void smp_test_set_secondary_preempt(bool on) {
     __atomic_store_n(&g_secondary_preempt_enabled, on, __ATOMIC_RELEASE);
 }
 
-// Undo THIS secondary's arm (tick off, PPI off, both armed flags cleared), so a
-// test that armed one secondary leaves the test phase quiescent. Call with the
-// flag down, or the idle loop re-arms it.
-void smp_test_disarm_this_cpu(void) {
-    unsigned cpu = smp_cpu_idx_self();
-    if (cpu == 0 || cpu >= DTB_MAX_CPUS)
-        extinction("smp_test_disarm_this_cpu: not a secondary");
-    irq_state_t s = spin_lock_irqsave(NULL);
-    timer_disarm_this_cpu();
-    (void)gic_disable_irq(TIMER_INTID_EL1_VIRT);
-    sched_test_clear_tick_armed();
-    g_secondary_tick_armed[cpu] = false;
-    spin_unlock_irqrestore(NULL, s);
+// The secondaries whose tick is armed, one bit per CPU index.
+u32 smp_test_armed_mask(void) {
+    u32 m = 0;
+    for (unsigned c = 1; c < DTB_MAX_CPUS; c++)
+        if (__atomic_load_n(&g_secondary_tick_armed[c], __ATOMIC_RELAXED) || sched_test_tick_armed(c))
+            m |= 1u << c;
+    return m;
+}
+
+// From cpu0 with the flag down: every online secondary undoes its arm (timer
+// off, PPI off, both armed flags cleared) at its next arm point, which the
+// broadcast makes immediate. False if the flag is up or one has not answered
+// within 1 s.
+bool smp_test_disarm_secondaries(void) {
+    if (smp_cpu_idx_self() != 0 ||
+        __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE))
+        return false;
+    unsigned n = smp_cpu_count();
+    for (unsigned c = 1; c < n && c < DTB_MAX_CPUS; c++)
+        __atomic_store_n(&g_secondary_disarm_req[c], true, __ATOMIC_RELEASE);
+    smp_resched_others();
+    u64 c0 = timer_get_counter(), budget = timer_freq_hz();
+    for (unsigned c = 1; c < n && c < DTB_MAX_CPUS; c++)
+        while (__atomic_load_n(&g_secondary_disarm_req[c], __ATOMIC_ACQUIRE))
+            if (timer_get_counter() - c0 >= budget) return false;
+    return true;
 }
 #endif // KERNEL_TESTS
 
@@ -622,8 +648,9 @@ void per_cpu_main(int cpu_idx) {
     // deliver until unmask. WFI architecturally still exits on a pending
     // IRQ even with PSTATE.I=1 (ARM ARM C5.3.2). So if A's notifier
     // sends an IPI any time after B sets flag=TRUE, B's wfi sees the
-    // pending IRQ and exits; B clears flag, unmasks, IPI handler runs,
-    // loop iterates and sched picks up the work.
+    // pending IRQ and exits; B clears flag, unmasks, IPI handler runs, and
+    // preempt_check_irq dispatches the work if the placer set B's
+    // need_resched (else the loop iterates and sched picks it up).
     //
     // sched() internally takes its own spin_lock_irqsave/restore — so
     // calling sched with IRQs already masked is sound (sched saves

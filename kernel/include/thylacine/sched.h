@@ -183,8 +183,9 @@ u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt);
 // This secondary's tick is armed: its timed waits can use its own timer base.
 void sched_mark_tick_armed(void);
 #ifdef KERNEL_TESTS
-// Undo it on this secondary (its timer base must be empty).
+// Undo it on this secondary (its timer base must be empty); read it for any CPU.
 void sched_test_clear_tick_armed(void);
+bool sched_test_tick_armed(unsigned cpu);
 #endif // KERNEL_TESTS
 void sched_idle_park(bool tickless);
 

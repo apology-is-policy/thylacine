@@ -612,6 +612,22 @@ static bool np_wait_terminal(struct Thread *t, volatile u32 *ran) {
     return false;
 }
 
+// Every online secondary in WFI. idle_in_wfi is also true from a switch to the
+// idle until its next WFI, across an unmasked stretch, so no secondary may take
+// an IRQ across two cpu0 ticks either.
+static bool np_secondaries_in_wfi(void) {
+    unsigned n = smp_cpu_count();
+    u64 irqs[DTB_MAX_CPUS];
+    for (unsigned c = 1; c < n && c < DTB_MAX_CPUS; c++) {
+        if (!sched_idle_in_wfi(c)) return false;
+        irqs[c] = gic_cpu_irq_count(c);
+    }
+    timer_busy_wait_ticks(2);
+    for (unsigned c = 1; c < n && c < DTB_MAX_CPUS; c++)
+        if (!sched_idle_in_wfi(c) || gic_cpu_irq_count(c) != irqs[c]) return false;
+    return true;
+}
+
 // scheduler.idle_park_steals_before_parking -- a CPU whose real thread blocks
 // reaches its idle through pick_next's in-tree idle, and must try to steal a
 // peer's queued thread before it parks (the newidle pull in sched_idle_park).
@@ -627,12 +643,9 @@ void test_sched_idle_park_steals_before_parking(void) {
     if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
     bool parked = false;
-    for (int i = 0; i < 200 && !parked; i++) {
-        for (unsigned c = 1; c < DTB_MAX_CPUS; c++)
-            if (sched_idle_in_wfi(c)) { parked = true; break; }
-        if (!parked) timer_busy_wait_ticks(1);
-    }
-    TEST_ASSERT(parked, "no secondary reached idle WFI within the settle budget (precondition)");
+    for (int i = 0; i < 100 && !parked; i++)
+        parked = np_secondaries_in_wfi();
+    TEST_ASSERT(parked, "the secondaries did not all settle in WFI within the budget (precondition)");
 
     g_np_b_ran = 0; g_np_b_cpu = DTB_MAX_CPUS; g_np_go = 0; g_np_t_ran = 0; g_np_t_cpu = DTB_MAX_CPUS;
     struct Thread *b = thread_create(kproc(), np_blocker_thread);
@@ -655,7 +668,7 @@ void test_sched_idle_park_steals_before_parking(void) {
         ready(t);                        // notify off: cpu0's own tree, no IPI
         sched_set_notify_enabled(true);  // the pull is production-gated
         __atomic_store_n(&g_np_go, 1u, __ATOMIC_RELEASE);
-        u64 c0 = timer_get_counter(), budget = timer_freq_hz() / 20u;   // 50 ms
+        u64 c0 = timer_get_counter(), budget = timer_freq_hz();   // 1 s, spent only on a miss
         while (!__atomic_load_n(&g_np_t_ran, __ATOMIC_ACQUIRE) &&
                timer_get_counter() - c0 < budget) { }
         sched_set_notify_enabled(false);

@@ -233,9 +233,11 @@ unsigned smp_cpu_idx_self(void);
 extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
 
 // The production preemption flag without smp_enable_secondary_preemption's wake
-// broadcast, and back down; and undoing the calling secondary's tick arm.
+// broadcast, and back down; which secondaries are armed; and, from cpu0 with
+// the flag down, every secondary undoing its arm.
 void smp_test_set_secondary_preempt(bool on);
-void smp_test_disarm_this_cpu(void);
+u32 smp_test_armed_mask(void);
+bool smp_test_disarm_secondaries(void);
 #endif // KERNEL_TESTS
 
 // #868: attach + enable IPI_RESCHED on the BOOT CPU (cpu0), making it a full

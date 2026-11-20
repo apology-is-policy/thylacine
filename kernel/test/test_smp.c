@@ -458,14 +458,16 @@ static volatile u32 g_aa_armed;
 static volatile u32 g_aa_go;
 
 static void aa_probe_thread(void) {
-    // First, before anything can preempt it: is this CPU's tick on?
-    g_aa_armed = timer_enabled_this_cpu() ? 1u : 0u;
+    // First, masked so no tick can come between: is this CPU's tick on? Both
+    // halves, since other code also enables the timer (a one-shot, the park's
+    // restore) and only the arm enables its PPI.
     (void)spin_lock_irqsave(NULL);
+    bool timer_on = timer_enabled_this_cpu();
+    bool ppi_on = gic_intid_enabled(TIMER_INTID_EL1_VIRT);
+    g_aa_armed = (timer_on && ppi_on) ? 1u : 0u;
     g_aa_cpu = smp_cpu_idx_self();
     __atomic_store_n(&g_aa_ran, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&g_aa_go, __ATOMIC_ACQUIRE)) { }
-    // The flag is down again, so the idle loop will not re-arm this CPU.
-    if (smp_cpu_idx_self() != 0) smp_test_disarm_this_cpu();
     thread_kthread_retire();
     sched();
 }
@@ -480,52 +482,74 @@ static bool aa_wait_terminal(struct Thread *t) {
     return false;
 }
 
+// Every online secondary in WFI. idle_in_wfi is also true from a switch to the
+// idle until its next WFI, across an unmasked stretch, so no secondary may take
+// an IRQ across two cpu0 ticks either.
+static bool aa_secondaries_in_wfi(void) {
+    unsigned n = smp_cpu_count();
+    u64 irqs[DTB_MAX_CPUS];
+    for (unsigned c = 1; c < n && c < DTB_MAX_CPUS; c++) {
+        if (!sched_idle_in_wfi(c)) return false;
+        irqs[c] = gic_cpu_irq_count(c);
+    }
+    timer_busy_wait_ticks(2);
+    for (unsigned c = 1; c < n && c < DTB_MAX_CPUS; c++)
+        if (!sched_idle_in_wfi(c) || gic_cpu_irq_count(c) != irqs[c]) return false;
+    return true;
+}
+
 // smp.push_onto_unarmed_secondary_arms_first -- once the production preemption
 // flag is up, the first IPI a secondary takes arms its tick before anything that
 // IPI placed runs there. Here that first IPI is a push: the flag goes up WITHOUT
 // smp_enable_secondary_preemption's wake broadcast, cpu0 holds IRQs masked (no
-// tick, so nothing else is readied), and the probe is placed on a parked
-// secondary. Its first act reads that CPU's CNTV_CTL. With the arm only at the
-// idle loop's top, the push's IRQ-return preemption dispatches the probe first
-// and it finds the tick off. The probe then disarms its CPU after the flag is
-// down, so the rest of the test phase finds every secondary quiescent.
+// tick, so nothing else is readied), and the probe is placed on a secondary in
+// WFI. Its first act reads that CPU's timer and timer-PPI enables. With the arm
+// only at the idle loop's top, the push's IRQ-return preemption dispatches the
+// probe first and it finds them off. The push must be the only IPI that CPU took
+// in the window (the premise). Afterwards every secondary undoes any arm, so the
+// rest of the test phase finds them quiescent (the harness sweep checks it too).
 void test_smp_push_onto_unarmed_secondary_arms_first(void) {
     if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
     bool parked = false;
-    for (int i = 0; i < 200 && !parked; i++) {
-        for (unsigned c = 1; c < DTB_MAX_CPUS; c++)
-            if (sched_idle_in_wfi(c)) { parked = true; break; }
-        if (!parked) timer_busy_wait_ticks(1);
-    }
-    TEST_ASSERT(parked, "no secondary reached idle WFI within the settle budget (precondition)");
+    for (int i = 0; i < 100 && !parked; i++)
+        parked = aa_secondaries_in_wfi();
+    TEST_ASSERT(parked, "the secondaries did not all settle in WFI within the budget (precondition)");
 
     g_aa_ran = 0; g_aa_cpu = DTB_MAX_CPUS; g_aa_armed = 0; g_aa_go = 0;
     struct Thread *k = thread_create(kproc(), aa_probe_thread);
     TEST_ASSERT(k != NULL, "thread_create(probe) failed");
 
+    u64 ipis_before[DTB_MAX_CPUS];
     irq_state_t s = spin_lock_irqsave(NULL);
+    for (unsigned c = 0; c < DTB_MAX_CPUS; c++) ipis_before[c] = g_ipi_resched_count[c];
     smp_test_set_secondary_preempt(true);
     sched_set_notify_enabled(true);
     ready(k);
-    u64 c0 = timer_get_counter(), budget = timer_freq_hz() / 20u;   // 50 ms
+    u64 c0 = timer_get_counter(), budget = timer_freq_hz();   // 1 s, spent only on a miss
     while (!__atomic_load_n(&g_aa_ran, __ATOMIC_ACQUIRE) &&
            timer_get_counter() - c0 < budget) { }
     sched_set_notify_enabled(false);
     smp_test_set_secondary_preempt(false);
     u32 ran = __atomic_load_n(&g_aa_ran, __ATOMIC_ACQUIRE);
     u32 cpu = g_aa_cpu, armed = g_aa_armed;
+    u64 ipis = (ran && cpu < DTB_MAX_CPUS) ? g_ipi_resched_count[cpu] - ipis_before[cpu] : 0;
     __atomic_store_n(&g_aa_go, 1u, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(NULL, s);
 
     bool done = aa_wait_terminal(k);
     if (done) thread_free(k);
+    bool disarmed = smp_test_disarm_secondaries();
+    u32 still = smp_test_armed_mask();
 
     TEST_ASSERT(ran, "the probe did not run within the window (push placement precondition)");
     TEST_ASSERT(cpu != 0 && cpu < DTB_MAX_CPUS,
         "the probe did not run on a secondary (push placement precondition)");
+    TEST_ASSERT(ipis == 1,
+        "the push was not the only IPI the probe's CPU took in the window (premise: its first IPI since the flag)");
     TEST_ASSERT(armed,
         "a thread pushed onto a secondary as its first IPI after the preemption flag ran "
         "with that CPU's tick off: the arm must land in the IPI handler, before the dispatch");
     TEST_ASSERT(done, "the probe did not reach a terminal state (cleanup)");
+    TEST_ASSERT(disarmed && still == 0, "a secondary is still armed after the disarm (cleanup)");
 }

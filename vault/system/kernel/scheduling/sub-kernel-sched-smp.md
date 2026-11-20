@@ -245,8 +245,11 @@ its tick (`smp_secondary_arm_tick_once`) at whichever comes first: the top
 of its idle loop, or the first IPI it takes after the flag. The IPI leg is
 the one that matters. A parked secondary has no timer, so an IPI is its only
 way out of WFI, and `gic_dispatch` runs the handler before
-`preempt_check_irq` can dispatch what that IPI placed. A thread pushed or
-kicked onto it therefore never runs tickless. Before 2026-11-20 the arm was
+`preempt_check_irq` can dispatch what that IPI placed. A thread pushed onto
+it, or stolen by it after a kick, therefore runs with the tick armed, bar
+the few instructions before a thread the masked park dispatched first
+unmasks (a masked region cannot be preempted either way). After the
+broadcast every secondary is armed or holds an IPI that arms it. Before 2026-11-20 the arm was
 at the loop top only and notifications went on first, so a thread pushed
 onto a secondary between the two, or racing its first IPI, ran with no tick
 until it blocked. Witness: `smp.push_onto_unarmed_secondary_arms_first`.
@@ -434,7 +437,7 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
   closed. The comment at the site forbids it in words for this reason.
 - **An idle CPU covers its own timer base and no other.** Every other base
   has its own CPU ([[sub-kernel-rendez]]). A secondary marks `tick_armed`
-  (`sched_mark_tick_armed`, right after `timer_arm_this_cpu` in `per_cpu_main`);
+  (`sched_mark_tick_armed`, inside `smp_secondary_arm_tick_once`, on either leg);
   until then its sleepers link on cpu0's base and kick cpu0, so no deadline
   sits on a base with no tick.
 - **The park's ordering is fixed**: announce, then `sched()`, then the

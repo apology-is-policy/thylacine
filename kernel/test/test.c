@@ -3889,6 +3889,16 @@ void test_run_all(void) {
                 test_fail("an address space count was refunded past zero (see ADDRSPACE-OVERREFUND)");
         }
 
+        // A ticking secondary steals test threads (the #810 class), and a test
+        // that raises the preemption flag can leave one armed. Undo it, name
+        // it, redden the test that left it.
+        if (smp_test_armed_mask() != 0u) {
+            uart_puts("SECONDARY-ARMED ");
+            (void)smp_test_disarm_secondaries();
+            if (!current_test->failed)
+                test_fail("a secondary's tick was left armed (see SECONDARY-ARMED)");
+        }
+
         // The user pool's test park is the seventh piece of that state. A
         // capacity test parks the pool to its edge, asserts, and unparks on its
         // last line, so the first failing assert left the pool FULL and every

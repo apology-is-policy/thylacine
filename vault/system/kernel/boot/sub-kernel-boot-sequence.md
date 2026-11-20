@@ -216,8 +216,9 @@ vault of a correction landing only where it was noticed.
 notifications and secondary preemption are both off during the tests and enabled
 immediately afterwards, because a secondary waking on a timer tick and stealing a
 test's thread surfaced as a failure in a scheduler test. Preemption goes first,
-notifications second: in the other order a thread placed on a secondary between
-the two ran there with no tick until it blocked. This is a real narrowing
+notifications second. Until 2026-11-20 the order was the other way, and a
+secondary armed only at its idle loop's top, so a thread placed on a
+secondary between the two ran there with no tick until it blocked. This is a real narrowing
 of what the suite can observe, taken knowingly, with the multi-boot gate as the
 compensating control.
 

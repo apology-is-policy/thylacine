@@ -120,7 +120,8 @@ bool timer_init(u32 hz) {
     g_ticks  = 0;
 
     // Arm the boot CPU's timer. Each secondary arms its own (per-CPU
-    // banked) timer via timer_arm_this_cpu() from per_cpu_main.
+    // banked) timer once the production flag is up, from
+    // smp_secondary_arm_tick_once (its idle loop's top or its first IPI).
     timer_arm_this_cpu();
 
     return true;
