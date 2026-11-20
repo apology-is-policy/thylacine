@@ -20,7 +20,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-11-03
+updated: 2026-11-20
 ---
 ## Purpose
 
@@ -215,7 +215,9 @@ vault of a correction landing only where it was noticed.
 **The suite runs in a deliberately UP-like configuration.** Cross-CPU wakeup
 notifications and secondary preemption are both off during the tests and enabled
 immediately afterwards, because a secondary waking on a timer tick and stealing a
-test's thread surfaced as a failure in a scheduler test. This is a real narrowing
+test's thread surfaced as a failure in a scheduler test. Preemption goes first,
+notifications second: in the other order a thread placed on a secondary between
+the two ran there with no tick until it blocked. This is a real narrowing
 of what the suite can observe, taken knowingly, with the multi-boot gate as the
 compensating control.
 

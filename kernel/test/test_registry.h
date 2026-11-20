@@ -165,6 +165,7 @@ void test_smp_per_cpu_idle_smoke(void);
 void test_smp_ipi_resched_smoke(void);
 void test_smp_work_stealing_smoke(void);
 void test_smp_secondary_stack_guard_layout(void);
+void test_smp_push_onto_unarmed_secondary_arms_first(void);
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
 void test_proc_rfork_stress_1000(void);

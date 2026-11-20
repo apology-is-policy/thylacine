@@ -182,6 +182,10 @@ u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt);
 // specs/sched_tickless.tla). See ARCH 8.6.
 // This secondary's tick is armed: its timed waits can use its own timer base.
 void sched_mark_tick_armed(void);
+#ifdef KERNEL_TESTS
+// Undo it on this secondary (its timer base must be empty).
+void sched_test_clear_tick_armed(void);
+#endif // KERNEL_TESTS
 void sched_idle_park(bool tickless);
 
 // P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so

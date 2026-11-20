@@ -2701,6 +2701,25 @@ void sched_mark_tick_armed(void) {
     spin_unlock_irqrestore(NULL, s);
 }
 
+#ifdef KERNEL_TESTS
+// Undo sched_mark_tick_armed. Only this CPU links sleepers on its own base,
+// and only while armed (timer_base_here), so an empty base here is one no
+// sleeper can be stranded on.
+void sched_test_clear_tick_armed(void) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu == 0 || cpu >= DTB_MAX_CPUS)
+        extinction("sched_test_clear_tick_armed: not a secondary");
+    spin_lock(&g_timer_base[cpu].lock);
+    bool linked = g_timer_base[cpu].head != NULL;
+    spin_unlock(&g_timer_base[cpu].lock);
+    if (linked)
+        extinction("sched_test_clear_tick_armed: a sleeper is linked on this CPU's timer base");
+    g_cpu_sched[cpu].tick_armed = false;
+    spin_unlock_irqrestore(NULL, s);
+}
+#endif // KERNEL_TESTS
+
 void sched_idle_park(bool tickless) {
     // Production-gate tickless on cpu0 (TI-4b): cpu0's bootcpu_idle_main always
     // passes tickless=true, but during the in-kernel test phase the work-steal /

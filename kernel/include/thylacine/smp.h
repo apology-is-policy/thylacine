@@ -231,6 +231,11 @@ unsigned smp_cpu_idx_self(void);
 // CPU IPI delivery (boot sends to secondary; secondary's slot
 // increments). Read by anyone; only the receiving CPU writes its slot.
 extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
+
+// The production preemption flag without smp_enable_secondary_preemption's wake
+// broadcast, and back down; and undoing the calling secondary's tick arm.
+void smp_test_set_secondary_preempt(bool on);
+void smp_test_disarm_this_cpu(void);
 #endif // KERNEL_TESTS
 
 // #868: attach + enable IPI_RESCHED on the BOOT CPU (cpu0), making it a full
@@ -250,7 +255,10 @@ void smp_resched_others(void);
 
 // Enable preemptive scheduling on secondary CPUs (each arms its own per-CPU
 // generic timer). Called once from boot_main at the production transition,
-// after the UP-like in-kernel test suite. Before this, secondaries have no
+// after the UP-like in-kernel test suite and BEFORE sched_set_notify_enabled
+// (true); each secondary arms at its first IPI after this or at its idle
+// loop's top, whichever comes first, so nothing placed on it runs tickless.
+// Before this, secondaries have no
 // timer and stay quiescent (test-phase determinism); after, every CPU gets the
 // preemptive tick so a CPU-bound thread on a secondary cannot monopolize it
 // (#810 / invariants I-8, I-17). This is what makes smp_resched_others's

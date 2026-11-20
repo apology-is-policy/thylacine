@@ -948,21 +948,24 @@ void boot_main(void) {
     // EXTINCTION: line is what tools/test-fault.sh checks for.
     fault_test_run();
 
-    // P3-G: enable cross-CPU work-stealing IPIs from ready()/wakeup().
-    // Off during in-kernel tests so they keep their UP-like single-CPU
-    // assumptions; on for /init and beyond so secondaries actually
-    // pick up runnable work instead of sitting in WFI indefinitely.
-    // Closes R5-H F78. See sched.c::sched_notify_idle_peer.
-    sched_set_notify_enabled(true);
-
     // #810: enable preemptive scheduling on secondary CPUs (each arms its own
-    // per-CPU generic timer). Like the notify gate above, this is OFF during
+    // per-CPU generic timer). Like the notify gate below, this is OFF during
     // the UP-like in-kernel tests -- a secondary self-waking on a timer tick
     // and stealing a test thread surfaced as `thread_free of RUNNING thread`
     // in scheduler.preemption_smoke. From here on, every CPU gets the
     // preemptive tick, so a CPU-bound thread on a secondary can no longer
     // monopolize it (the exitgroup boot hang) -- invariants I-8 / I-17.
     smp_enable_secondary_preemption();
+
+    // P3-G: enable cross-CPU work-stealing IPIs from ready()/wakeup().
+    // Off during in-kernel tests so they keep their UP-like single-CPU
+    // assumptions; on for /init and beyond so secondaries actually
+    // pick up runnable work instead of sitting in WFI indefinitely.
+    // Closes R5-H F78. See sched.c::sched_notify_idle_peer. AFTER the
+    // preemption flag above: a push or kick before it could reach a
+    // secondary whose tick is not armed yet, and that thread would run
+    // tickless until it blocked.
+    sched_set_notify_enabled(true);
 
     // P3-F: /init is the first userspace process. v1.0 embedded blob —
     // prints "hello\n" via SYS_PUTS and exits via SYS_EXITS(0). Validates

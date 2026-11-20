@@ -119,6 +119,13 @@ unsigned smp_cpu_idx_self(void) {
 // cross-CPU placer exists yet (P2-Ce work-stealing introduces it);
 // IPI_RESCHED here is purely a "wake from WFI" signal proving the
 // SGI delivery path works.
+//
+// On a secondary it is also where the per-CPU tick is first armed once the
+// production flag is up (smp_secondary_arm_tick_once): this handler returns
+// before preempt_check_irq runs, so the arm lands before any dispatch the IPI
+// brings.
+static bool smp_secondary_arm_tick_once(void);
+
 static void ipi_resched_handler(u32 intid, void *arg) {
     (void)intid;
     (void)arg;
@@ -126,6 +133,8 @@ static void ipi_resched_handler(u32 intid, void *arg) {
     if (cpu < DTB_MAX_CPUS) {
         g_ipi_resched_count[cpu]++;
     }
+    if (cpu != 0)
+        (void)smp_secondary_arm_tick_once();
 }
 
 // P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
@@ -201,21 +210,76 @@ void smp_resched_others(void) {
 // by a secondary self-waking on its own timer tick and stealing a test thread
 // (which surfaced as `thread_free of RUNNING thread` in
 // scheduler.preemption_smoke). This is the per-CPU-timer analog of P3-G's
-// sched_set_notify_enabled gate; each secondary arms its own banked timer in
-// per_cpu_main's idle loop once this flag is set.
+// sched_set_notify_enabled gate; each secondary arms its own banked timer once
+// this flag is set, at its idle loop's top or its first IPI, whichever comes
+// first.
 static volatile bool g_secondary_preempt_enabled;
 
+// This secondary's tick is armed. Each slot is written only by its own CPU,
+// IRQs masked.
+static bool g_secondary_tick_armed[DTB_MAX_CPUS];
+
+// Arm THIS secondary's per-CPU tick once the flag is published, at whichever
+// comes first: the top of its idle loop, or the first IPI it takes. The IPI
+// leg is what closes the transition. A parked secondary has no timer, so an
+// IPI is its only way out of WFI, and the handler runs before preempt_check_irq
+// can dispatch what that IPI placed; a thread pushed or kicked onto it never
+// runs tickless. (A secondary that dispatches a pushed thread from inside its
+// masked park takes the pending IPI, and so the arm, at that thread's first
+// unmask.) Masked, because the IPI leg can interrupt the loop leg on the same
+// CPU. Returns whether the tick is armed.
+static bool smp_secondary_arm_tick_once(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu == 0 || cpu >= DTB_MAX_CPUS) return false;
+    irq_state_t s = spin_lock_irqsave(NULL);
+    bool armed = g_secondary_tick_armed[cpu];
+    if (!armed && __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE)) {
+        if (!gic_enable_irq(TIMER_INTID_EL1_VIRT))
+            extinction("smp: gic_enable_irq(timer PPI) failed");
+        timer_arm_this_cpu();
+        sched_mark_tick_armed();
+        g_secondary_tick_armed[cpu] = true;
+        armed = true;
+    }
+    spin_unlock_irqrestore(NULL, s);
+    return armed;
+}
+
 // Enable preemptive scheduling on secondary CPUs. Called once from boot_main
-// at the production transition (alongside sched_set_notify_enabled(true),
-// after test_run_all). Publishes the flag, then wakes every secondary out of
-// WFI so it observes the flag and arms its own per-CPU timer promptly (rather
-// than waiting for the first work-placement notify IPI). I-8 / I-17: every CPU
-// then gets the preemptive tick, so a CPU-bound thread on a secondary can no
-// longer monopolize it (the #810 exitgroup boot hang).
+// at the production transition, after test_run_all and BEFORE
+// sched_set_notify_enabled(true): no push or kick can target a secondary until
+// the flag is up, and from then on the first IPI a secondary takes arms its
+// tick before anything runs there. Publishes the flag, then wakes every
+// secondary so it arms promptly rather than at its first placement. I-8 /
+// I-17: every CPU then gets the preemptive tick, so a CPU-bound thread on a
+// secondary can no longer monopolize it (the #810 exitgroup boot hang).
 void smp_enable_secondary_preemption(void) {
     __atomic_store_n(&g_secondary_preempt_enabled, true, __ATOMIC_RELEASE);
     smp_resched_others();
 }
+
+#ifdef KERNEL_TESTS
+// The flag without the wake broadcast, so a test can make a push the first IPI
+// a parked secondary takes; and back down.
+void smp_test_set_secondary_preempt(bool on) {
+    __atomic_store_n(&g_secondary_preempt_enabled, on, __ATOMIC_RELEASE);
+}
+
+// Undo THIS secondary's arm (tick off, PPI off, both armed flags cleared), so a
+// test that armed one secondary leaves the test phase quiescent. Call with the
+// flag down, or the idle loop re-arms it.
+void smp_test_disarm_this_cpu(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu == 0 || cpu >= DTB_MAX_CPUS)
+        extinction("smp_test_disarm_this_cpu: not a secondary");
+    irq_state_t s = spin_lock_irqsave(NULL);
+    timer_disarm_this_cpu();
+    (void)gic_disable_irq(TIMER_INTID_EL1_VIRT);
+    sched_test_clear_tick_armed();
+    g_secondary_tick_armed[cpu] = false;
+    spin_unlock_irqrestore(NULL, s);
+}
+#endif // KERNEL_TESTS
 
 static unsigned g_cpu_count;
 static unsigned g_cpu_online_count;
@@ -567,21 +631,15 @@ void per_cpu_main(int cpu_idx) {
     // #810: this secondary arms its OWN per-CPU timer the first time it
     // observes the production-preemption flag (set by smp_enable_secondary_-
     // preemption at boot_main's transition, after the UP-like in-kernel test
-    // suite). Deferred to HERE -- not the bringup above -- so a secondary stays
-    // quiescent (no self-wake, no work-stealing) during the deterministic test
-    // phase, while production gets the preemptive tick on every CPU (I-8/I-17).
-    // The timer + PPI registers are per-CPU banked, so each secondary must arm
-    // its own (gic_enable_irq enables INTID 27 on THIS CPU's redistributor).
-    bool timer_armed = false;
+    // suite): here, or in the IPI handler if an IPI comes first
+    // (smp_secondary_arm_tick_once). Deferred past the bringup above so a
+    // secondary stays quiescent (no self-wake) during the deterministic test
+    // phase, while production gets the preemptive tick on every CPU
+    // (I-8/I-17). The timer + PPI registers are per-CPU banked, so each
+    // secondary must arm its own (gic_enable_irq enables INTID 27 on THIS
+    // CPU's redistributor).
     for (;;) {
-        if (!timer_armed &&
-            __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE)) {
-            if (!gic_enable_irq(TIMER_INTID_EL1_VIRT))
-                extinction("per_cpu_main: gic_enable_irq(timer PPI) failed");
-            timer_arm_this_cpu();
-            sched_mark_tick_armed();
-            timer_armed = true;
-        }
+        bool timer_armed = smp_secondary_arm_tick_once();
         // Tickless idle (NO_HZ_IDLE; TI-2): once this secondary's timer PPI is
         // enabled (timer_armed), sched_idle_park arms a one-shot to the nearest
         // deadline-or-backstop instead of holding the 1 kHz periodic tick. Until

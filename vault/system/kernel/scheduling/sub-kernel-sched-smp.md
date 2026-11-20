@@ -240,6 +240,17 @@ only by an explicit IPI. (Without the timer gate, a secondary self-waking
 on its own tick stole a test thread and surfaced as
 `thread_free of RUNNING thread`.)
 
+Production flips them in that order, the timer flag first. A secondary arms
+its tick (`smp_secondary_arm_tick_once`) at whichever comes first: the top
+of its idle loop, or the first IPI it takes after the flag. The IPI leg is
+the one that matters. A parked secondary has no timer, so an IPI is its only
+way out of WFI, and `gic_dispatch` runs the handler before
+`preempt_check_irq` can dispatch what that IPI placed. A thread pushed or
+kicked onto it therefore never runs tickless. Before 2026-11-20 the arm was
+at the loop top only and notifications went on first, so a thread pushed
+onto a secondary between the two, or racing its first IPI, ran with no tick
+until it blocked. Witness: `smp.push_onto_unarmed_secondary_arms_first`.
+
 ### Real silicon broke four things at once (#214, Pi 400 / KVM)
 
 The first `-smp 4` boot on real hardware froze at bring-up. **Every

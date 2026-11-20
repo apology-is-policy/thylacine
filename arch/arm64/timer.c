@@ -141,6 +141,18 @@ void timer_arm_this_cpu(void) {
     write_cntv_ctl_el0(CNTV_CTL_ENABLE);
 }
 
+#ifdef KERNEL_TESTS
+void timer_disarm_this_cpu(void) {
+    write_cntv_ctl_el0(0);
+}
+
+bool timer_enabled_this_cpu(void) {
+    u64 v;
+    __asm__ __volatile__("mrs %0, cntv_ctl_el0" : "=r"(v));
+    return (v & CNTV_CTL_ENABLE) != 0;
+}
+#endif // KERNEL_TESTS
+
 // ---------------------------------------------------------------------------
 // Tickless idle one-shot (NO_HZ_IDLE; docs/TICKLESS-IDLE.md, #299).
 //

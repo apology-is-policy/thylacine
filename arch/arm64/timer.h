@@ -134,6 +134,10 @@ u64 timer_now_ns(void);
 u64 timer_ns_to_counter(u64 ns);
 
 #ifdef KERNEL_TESTS
+// THIS CPU's virtual timer: switch it off; read whether it is on.
+void timer_disarm_this_cpu(void);
+bool timer_enabled_this_cpu(void);
+
 // The conversion at a given frequency; timer_ns_to_counter is it at CNTFRQ.
 // Pure, so a test can drive any frequency.
 u64 timer_ns_to_counter_at(u64 ns, u64 freq_hz);
