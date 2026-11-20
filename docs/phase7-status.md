@@ -3328,3 +3328,13 @@ Audit: Fable 5.1 r1 at 43c1916d9, 0/0/0/3 plus the author's two P2s (fixed in 25
 Tests: 2431. Leases: runs-1 green 2426, U01-U05 red; runs-2 green 2429 plus guest legs, U01-U11 red, regreen == green; runs-3 (54341523b, 06:49-07:02Z) green 2431 plus guest legs with the nine unlock legs, U12-U16 each red at its leg (U13 at tools/test.sh's new verdict line, its leg passing), regreen == green (c15ef522807edc30).
 
 **Did not run:** the full SMP matrix (held since 11-02), the interactive fleet, test-fault. No spec models the lock path. Record: `chg-2026-11-09-aux-unlock`.
+
+## An idle CPU steals before it parks: the newidle pull -- 2026-11-20
+
+Branch corona/newidle-pull, off main ee7271715. A CPU whose real thread blocks reaches its idle through `pick_next` (the in-tree idle sits in `BAND_IDLE`), so that `sched()` never calls `balance_pull`; when the idle last switched out inside `sched_idle_park`, it resumed past that `sched()` and parked over a peer's queued thread until its one-shot, a busy peer's kick or a placement onto it. Measured under HVF in q-ps5: 4 of 43 slow wakes, about 5 ms each. In the park's #363 loop, with the production flag on and a peer's work queued, one more `sched()` with the idle current now steals; an unchanged `nctxt` sends the CPU on to park (79357ca59). Linux's newidle balance. The witness's blocker yields first, or the witness cannot fail (81e11e87b). Audit close 4992e3758: doc precision, `Pull` + `RunningImpliesNotParked` in `sched_rebalance.tla`, a test leak.
+
+Audit: Opus 5.5 max r1 at 81e11e87b (same family; Fable out of credits), 0/1/0/3, the kernel change sound; F1 fixed in 81e11e87b, F2-F4 in 4992e3758 (`memory/audit_newidle_pull_closed_list.md`).
+
+Tests: 2388 (one new: `scheduler.idle_park_steals_before_parking`). Leases: q-ni1 (old witness RED passed: the finding), q-ni1b (sabotage 7e9e51c65 RED with the park message; 81e11e87b GREEN 2388/0), q-ni2 (4992e3758, 03:50:50-04:53:38Z): the SMP subset gate, default-smp4 10/10 and ubsan-smp4 10/10 PASS, 0 corruption; the last boot shows the witness PASS, 2388 / 0. The UBSan image is 0x778000, 32 KiB under the 8 MiB window (default 0x713000, 436 KiB): OPEN-BUGS 2026-11-06 addendum. Specs: 17 scheduler cfgs as expected (q-ni1); `sched_rebalance` clean + both buggy re-run with `Pull`, three throwaway mutants.
+
+**Did not run:** the full SMP matrix (held since 11-02), the interactive fleet. Owed next: main.c's notify-before-secondary-preemption window (OPEN-BUGS 2026-11-20T03:47Z). Record: `chg-2026-11-20-newidle-pull`.
