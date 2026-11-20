@@ -5,12 +5,12 @@ title: "sched_rebalance.tla"
 models: [sub-kernel-sched-smp]
 pins: [inv-i8, inv-i9]
 cfgs:
-  - "sched_rebalance.cfg -- clean: PendingImpliesNotRunning + the fairness-conditioned liveness"
+  - "sched_rebalance.cfg -- clean: PendingImpliesNotRunning + RunningImpliesNotParked + the fairness-conditioned liveness"
   - "sched_rebalance_buggy_nokick.cfg -- the busy CPU never kicks: work strands"
   - "sched_rebalance_buggy_nolift.cfg -- the kick does not lift a registered park: the wake is lost"
-gate: "any change to the busy-side overload kick or the surplus predicate it fires on"
+gate: "any change to the busy-side overload kick, the surplus predicate it fires on, or the idle park's newidle pull"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-11-20
 ---
 ## Abstraction
 
@@ -38,6 +38,14 @@ one new mechanism.
   peer's park, which holds only because the peer set `idle_in_wfi` before
   parking ([[spec-sched-tickless]]). This is [[inv-i9]] restated on the
   push path.
+- **`Pull`** — the idle side's own look (the newidle pull, 2026-11-20): a
+  registered, unparked idle CPU with nothing pushed onto it steals a busy
+  peer's surplus before it parks. It is optional and unfair, because a pull
+  can meet a contended lock or pinned work and work can arrive after the
+  look; so the kick stays the guaranteed rebalance and `nokick` still
+  strands. It writes neither `parked` nor `pending`, which is the whole
+  safety argument: `NoLostWake` cannot change. `RunningImpliesNotParked`
+  pins its unparked guard.
 
 The two buggy cfgs separate the two ways to lose the work, which is the
 useful part: `nokick` is "the mechanism is absent", `nolift` is "the
@@ -56,9 +64,15 @@ The model's "one-shot kick == migrate" is operationally realized by the
 inside [[spec-sched-alpha]]'s proven arbitrary-placement envelope, so no
 additional safety argument is needed for where the work lands.
 
+`Pull` is `sched_idle_park`'s loop after the #363 re-check: with the
+production flag on and a peer's work queued, one more `sched()` with the
+idle current steals through `balance_pull`, and an unchanged `nctxt` sends
+the CPU on to park ([[sub-kernel-sched-smp]]).
+
 ## Gate
 
-All three cfgs on any change to the kick or to the surplus predicate. The
+All three cfgs on any change to the kick, to the surplus predicate, or to
+the park's newidle pull. The
 predicate is lock-free by design (relaxed reads of band heads, never a
 Thread deref), so a change that makes it dereference is a change to its
 safety argument, not just its logic.

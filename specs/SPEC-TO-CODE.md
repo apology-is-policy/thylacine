@@ -2447,6 +2447,24 @@ regression). See `docs/TICKLESS-IDLE.md` §9 (TI-4) + ARCH §8.6 / §8.10 / §25
 - `Block`/`DrainLocally`/`Register`/`Park` ↔ the existing idle-enter + local-run
   paths. `DrainLocally` is UNFAIR: a CPU-bound producer need not yield, so the
   kick is the only GUARANTEED rebalance.
+- `Pull(i, b)` (added 2026-11-20) ↔ the newidle pull in `sched_idle_park`: after
+  the #363 loop, `if (g_sched_notify_enabled && sched_has_runnable_work())` one
+  more `sched()` with the idle current finds nothing local and steals
+  (`pick_next` NULL -> `balance_pull`); an unchanged `cs->nctxt` breaks to the
+  park. `registered[i]` is the `idle_in_wfi` set at the top of the park; the
+  dispatch clears it (`sched()`: `idle_in_wfi = (next == idle)`). UNFAIR and
+  optional: the pull can meet a contended peer lock or pinned work, and work can
+  arrive after the look, so `Park` carries no "looked first" guard and the kick
+  stays the guaranteed rebalance. The envelope argument: `Pull` only clears a
+  running peer's surplus and makes an unparked, unpending idle CPU run, so it
+  writes neither `parked` nor `pending` -- `NoLostWake` and the register-then-
+  observe obligation cannot change; where the work lands is inside
+  `sched_alpha.tla`'s Steal. Its `~pending[i]` guard is faithful (a CPU with
+  pushed work runs it locally: `pick_next` before `balance_pull`) but not
+  discriminated here: the model holds one unit of surplus, so a pending CPU never
+  coexists with stealable surplus (a guard-dropped mutant stays green). Its
+  `~parked[i]` guard is: dropping it violates `ParkedImpliesRegistered` and, on
+  its own, `RunningImpliesNotParked`.
 
 ### Bug class (executable counterexamples)
 
@@ -2462,10 +2480,16 @@ regression). See `docs/TICKLESS-IDLE.md` §9 (TI-4) + ARCH §8.6 / §8.10 / §25
 
 - `sched_rebalance.cfg` (clean, 3 CPUs): `TypeOK` + `NoLostWake` +
   `PendingImpliesNotRunning` + `SurplusImpliesRunning` + `ParkedImpliesRegistered`
-  + the `EventuallyParallelized` liveness (WF on `Overload` + `Dispatch`). GREEN —
-  117 distinct states.
-- `sched_rebalance_buggy_nokick.cfg` (2 CPUs): `EventuallyParallelized` VIOLATED.
+  + `RunningImpliesNotParked` + the `EventuallyParallelized` liveness (WF on
+  `Overload` + `Dispatch`). GREEN — 117 distinct states (295 generated; 289
+  before `Pull`, whose targets Overload + Dispatch already reach).
+- `sched_rebalance_buggy_nokick.cfg` (2 CPUs): `EventuallyParallelized` VIOLATED
+  (19 distinct with `Pull`, 15 before: an unfair pull may never fire).
 - `sched_rebalance_buggy_nolift.cfg` (2 CPUs): `NoLostWake` VIOLATED.
+- 2026-11-20 throwaway checks on the `Pull` change: dropping `~parked[i]` ->
+  `ParkedImpliesRegistered` violated (and `RunningImpliesNotParked` with that
+  invariant removed); an `OnlyProducerRuns` invariant under `BUGGY_NO_KICK` ->
+  violated (`Pull` is reachable); dropping `~pending[i]` -> green (above).
 
 The 100 ms backstop (defense-in-depth vs a dropped kick) is ORTHOGONAL and
 deliberately unmodeled (as in `sched_tickless`), so `buggy_nokick` is a clean

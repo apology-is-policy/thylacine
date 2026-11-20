@@ -2753,17 +2753,19 @@ void sched_idle_park(bool tickless) {
     // Newidle pull: nor over a PEER's stealable backlog. A CPU whose real
     // thread blocks reaches this idle through pick_next's in-tree idle (the
     // idle band is a band like any other), so that sched() never ran
-    // balance_pull -- without a steal here the CPU sleeps until its one-shot,
-    // a busy peer's tick kick (TI-4c) or a placement onto it, while the thread
-    // waits on a peer that may itself be slow to run it. The idle IS current
-    // and our own tree is empty, so sched() finds nothing local and steals
-    // (pick_next NULL -> balance_pull). An unchanged switch count means nothing
-    // was taken (pinned work, a contended peer lock): park; the TI-4c kick
-    // still covers the contended case. A thread taken here runs, and when it
-    // blocks the idle resumes inside this loop and looks again. Production only,
-    // like the push placement and the kick, so the test phase stays
-    // UP-quiescent. The steal is sched_alpha.tla's idle-CPU Steal, earlier in
-    // the same envelope; the park after the loop is unchanged.
+    // balance_pull; when the idle last switched out inside this park (one of
+    // its sched() calls here dispatched that thread), it resumes past that
+    // sched() with no steal of its own. Without a steal here the CPU sleeps
+    // until its one-shot, a busy peer's tick kick (TI-4c) or a placement onto
+    // it, while the thread waits on a peer that may itself be slow to run it.
+    // The idle IS current and our own tree is empty, so sched() finds nothing
+    // local and steals (pick_next NULL -> balance_pull). An unchanged switch
+    // count means nothing was taken (pinned work, a contended peer lock): park;
+    // the TI-4c kick still covers the contended case. A thread taken here runs,
+    // and when it blocks the idle resumes inside this loop and looks again.
+    // Production only, like the push placement and the kick, so a test-phase
+    // park behaves as before. The steal is sched_alpha.tla's idle-CPU Steal
+    // and sched_rebalance.tla's Pull; the park after the loop is unchanged.
     for (;;) {
         while (cpu_has_surplus_for_kick(cs))
             sched();
@@ -2775,8 +2777,9 @@ void sched_idle_park(bool tickless) {
     // TI-4d work-conservation sample: we are committed to parking THIS CPU.
     // Our OWN non-idle tree is empty, so a positive sched_has_runnable_work()
     // here is a PEER's queued backlog this CPU is about to sleep through: in
-    // production one the pull above could not take (pinned, or a contended
-    // lock); in the test phase any. Charge the whole park as starved if so. In
+    // production one the pull above could not take (pinned, a contended lock)
+    // or work that arrived after its look and was announced to another idle
+    // peer; in the test phase any. Charge the whole park as starved if so. In
     // the periodic path the next <=1ms tick re-polls and ends a starved park
     // fast; in tickless it can run to the backstop -- so a large starved_ns/max
     // is exactly the steal-gap regression's signature.

@@ -31,6 +31,12 @@
 (*   - sched_rebalance.tla: THIS -- the busy-side push of ALREADY-QUEUED work  *)
 (*                         to an idle peer, the leg the periodic tick used to  *)
 (*                         cover by pull-polling. The new liveness mechanism.  *)
+(*                         Since 2026-11-20 also the idle side's own look:     *)
+(*                         Pull, the newidle pull in sched_idle_park (an idle  *)
+(*                         CPU steals a busy peer's surplus before it parks).  *)
+(*                         Optional and unfair, so the kick stays the only     *)
+(*                         GUARANTEED rebalance and BUGGY_NO_KICK still        *)
+(*                         strands.                                            *)
 (*                                                                         *)
 (* The 100 ms backstop (defense-in-depth vs a dropped kick) is, as in         *)
 (* sched_tickless, deliberately NOT modeled -- so BUGGY_NO_KICK is a clean     *)
@@ -56,6 +62,8 @@
 (*                             is not already running (migration sanity).      *)
 (*   SurplusImpliesRunning  -- surplus exists only on a running CPU (sanity).  *)
 (*   ParkedImpliesRegistered-- a parked CPU registered first (carried over).   *)
+(*   RunningImpliesNotParked-- a CPU running work is not parked: Dispatch and   *)
+(*                             Pull only start work on an unparked CPU.        *)
 (* LIVENESS                                                                *)
 (*   EventuallyParallelized -- surplus[c] ~> ~surplus[c]: queued surplus on a  *)
 (*                             busy CPU, with an idle peer, is eventually       *)
@@ -159,6 +167,24 @@ Dispatch(i) ==
     /\ registered' = [registered EXCEPT ![i] = FALSE]
     /\ UNCHANGED <<surplus, parked>>
 
+(* Pull(i, b): the newidle pull (2026-11-20) -- the IDLE side's steal. An     *)
+(* idle CPU i that has registered (idle_in_wfi is set at the top of           *)
+(* sched_idle_park) but not yet parked, with no work pushed onto it, looks     *)
+(* before it parks and steals busy peer b's surplus: i runs it, and that       *)
+(* dispatch clears idle_in_wfi (sched()'s idle_in_wfi = (next == idle)).        *)
+(* OPTIONAL and UNFAIR: the pull can meet a contended peer lock or pinned      *)
+(* work, and work can arrive after the look, so Park keeps no "looked first"   *)
+(* guard and the kick stays the only guaranteed rebalance. It touches neither  *)
+(* parked nor pending, so NoLostWake and register-then-observe are untouched.  *)
+Pull(i, b) ==
+    /\ i # b
+    /\ registered[i] /\ ~parked[i] /\ ~running[i] /\ ~pending[i]
+    /\ running[b] /\ surplus[b]
+    /\ surplus'    = [surplus    EXCEPT ![b] = FALSE]
+    /\ running'    = [running    EXCEPT ![i] = TRUE]
+    /\ registered' = [registered EXCEPT ![i] = FALSE]
+    /\ UNCHANGED <<parked, pending>>
+
 Next ==
     \/ \E c \in CPUs    : Block(c)
     \/ \E c \in CPUs    : DrainLocally(c)
@@ -166,12 +192,13 @@ Next ==
     \/ \E c \in CPUs    : Park(c)
     \/ \E b, i \in CPUs : Overload(b, i)
     \/ \E c \in CPUs    : Dispatch(c)
+    \/ \E i, b \in CPUs : Pull(i, b)
 
 Spec == Init /\ [][Next]_vars
 
 (* Liveness: WF on the kick (a busy CPU's still-running tick reliably runs    *)
 (* the overload check) and on Dispatch (a non-parked CPU with pending work    *)
-(* runs it). NO fairness on DrainLocally / Block -- a producer need not        *)
+(* runs it). NO fairness on DrainLocally / Block / Pull -- a producer need not *)
 (* yield, so with an idle peer present the only GUARANTEED way surplus        *)
 (* clears is the kick.                                                        *)
 Fairness ==
@@ -185,6 +212,7 @@ NoLostWake               == \A c \in CPUs : ~(parked[c] /\ pending[c])
 PendingImpliesNotRunning == \A c \in CPUs : pending[c] => ~running[c]
 SurplusImpliesRunning    == \A c \in CPUs : surplus[c] => running[c]
 ParkedImpliesRegistered  == \A c \in CPUs : parked[c] => registered[c]
+RunningImpliesNotParked  == \A c \in CPUs : running[c] => ~parked[c]
 
 (* ---- Liveness ---- *)
 EventuallyParallelized   == \A c \in CPUs : surplus[c] ~> ~surplus[c]

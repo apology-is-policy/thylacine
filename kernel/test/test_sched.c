@@ -638,6 +638,7 @@ void test_sched_idle_park_steals_before_parking(void) {
     struct Thread *b = thread_create(kproc(), np_blocker_thread);
     TEST_ASSERT(b != NULL, "thread_create(blocker) failed");
     struct Thread *t = thread_create(kproc(), np_victim_thread);
+    if (t == NULL) thread_free(b);   // never readied: nothing can be running it
     TEST_ASSERT(t != NULL, "thread_create(victim) failed");
 
     // The blocker goes to an idle secondary by push placement and holds it.

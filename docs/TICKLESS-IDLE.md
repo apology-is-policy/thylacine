@@ -549,8 +549,12 @@ TI-4's two mechanisms -- push placement onto an idle CPU and the busy side's
 kick -- left one path with no steal at all. A CPU whose real thread BLOCKS
 reaches its idle through `pick_next`: the pinned in-tree idle sits in
 `BAND_IDLE`, so `pick_next` returns it and `sched()` never calls
-`balance_pull`. The idle resumes inside `sched_idle_park`, past its own
-`sched()`, and parks with `starved` set over a peer's queue. Only its one-shot,
+`balance_pull`. When the idle's last switch-out was inside `sched_idle_park`
+(one of the park's own `sched()` calls dispatched that thread, for example a
+sleeper the post-WFI `timerwait_tick()` woke locally), it resumes there, past
+that `sched()`, and parks with `starved` set over a peer's queue. (A thread the
+IPI's IRQ-return preemption dispatched instead leaves the idle outside the
+park, and the next park's top `sched()` steals.) Only its one-shot,
 a busy peer's tick kick or a placement onto it ended that park. Measured on
 HVF (q-ps5, work/nov03-mm1/ps5): 4 of 43 slow wakes were a thread placed on an
 idle CPU that sat stalled by the host for 5.5-6.2 ms while another CPU went idle
@@ -563,6 +567,12 @@ park's #363 loop, once the CPU's own tree is empty and a peer has queued work, o
 unchanged per-CPU switch count (`nctxt`) means nothing was taken (pinned work,
 a contended peer lock), and the CPU parks as before; the kick still covers the
 contended case. It is gated on `g_sched_notify_enabled` with the other two, so
-the test phase stays quiescent. Spec: a steal by an idle CPU, inside
-`sched_alpha.tla`'s Steal envelope; `sched_tickless.tla`'s Park is unchanged.
-Witness: `scheduler.idle_park_steals_before_parking`.
+a test-phase park behaves as before. The pull sits ahead of the tickless arm,
+so a `THYLACINE_NO_TICKLESS` build pulls too: the tickful gold baseline now
+includes it, and the recorded gold numbers (9.8 and the TI-4 validation's
+7.1 s) predate it, so a tickless-vs-gold comparison re-measures the gold first. Spec: `sched_rebalance.tla`'s `Pull` (an optional, unfair action:
+it only clears a busy peer's surplus and makes an unparked idle CPU run, so
+`NoLostWake` and `Park` are untouched, and the kick stays the guaranteed
+rebalance), and a steal by an idle CPU inside `sched_alpha.tla`'s Steal
+envelope; `sched_tickless.tla`'s Park is unchanged. Witness:
+`scheduler.idle_park_steals_before_parking`.

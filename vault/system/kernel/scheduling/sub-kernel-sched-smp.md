@@ -44,10 +44,13 @@ between two steps of a sequence that reads, in source, like a single act.
   register-then-observe, and it is [[inv-i9]] on the placement path.
 - In production an idle CPU looks for work **before** it parks: it parks
   over neither its own queue nor a peer's stealable thread, only over work
-  it cannot take (pinned, or behind a peer lock it could not try-take).
-- Secondary CPUs are quiescent during the in-kernel test phase: no
-  self-wake, no stealing, no timer. Production turns all three on at one
-  transition point.
+  it cannot take (pinned, or behind a peer lock it could not try-take) or
+  work that arrived after its look and was announced to another idle peer.
+- Secondary CPUs are quiescent during the in-kernel test phase because
+  nothing wakes them: no timer, no notify IPI (so no push placement, no
+  busy-side kick, no newidle pull). Stealing itself is not gated, so a
+  secondary that a test wakes may steal. Production turns the wakes on at
+  the transition after the suite.
 
 ## Mechanism
 
@@ -182,7 +185,13 @@ Four parts of that are load-bearing rather than incidental:
 - The **newidle pull**, in the same loop, stops it parking over a *peer's*
   stealable thread. A CPU whose real thread blocks reaches its idle through
   `pick_next`, because the in-tree idle sits in a band like any other, so
-  that `sched()` never ran `balance_pull`. Without the pull the CPU slept
+  that `sched()` never ran `balance_pull`. When the idle last switched out
+  inside the park (one of the park's own `sched()` calls dispatched the
+  thread, for example a sleeper the post-WFI `timerwait_tick()` woke
+  locally), it resumes past that `sched()` with no steal of its own. A
+  thread the IPI's IRQ-return preemption dispatched instead leaves the idle
+  outside the park, and the next park's top `sched()` steals as before.
+  Without the pull the CPU slept
   until its one-shot, a busy peer's tick kick or a placement onto it, while
   the thread waited on a peer that might itself be slow to run it (measured
   under HVF: 5-6 ms behind a stalled target). With the idle current and its
@@ -191,8 +200,9 @@ Four parts of that are load-bearing rather than incidental:
   and the CPU parks; the busy-side kick still covers the contended case. A
   taken thread runs, and when it blocks the idle resumes inside the loop.
   Gated on `g_sched_notify_enabled`, like the push placement and the kick,
-  so the test phase stays quiescent. Linux does the same (newidle balance
+  so a test-phase park behaves as before. Linux does the same (newidle balance
   from `pick_next_task_fair`); Plan 9's single run queue never needed it.
+  Modelled as `Pull` in [[spec-sched-rebalance]].
 - The **wake-to-running restore** does two jobs. `timer_arm_this_cpu()`
   re-arms the periodic tick so a CPU woken from tickless idle runs the
   placed thread with slice accounting live. But re-arming also
